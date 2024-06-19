@@ -2,64 +2,102 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System;
 using System.Collections.ObjectModel;
-using Zeroconf;
-using Microsoft.UI.Dispatching;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
+using System.IO;
+using Zeroconf;
+using System.Windows.Data;
 
 namespace WinStream
 {
     public sealed partial class MainWindow : Window
     {
-        public ObservableCollection<IZeroconfHost> Devices { get; } = new ObservableCollection<IZeroconfHost>();
+        public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
+        private CollectionViewSource deviceListView;
 
         public MainWindow()
         {
             InitializeComponent();
-            devicesList.ItemsSource = Devices;
+            deviceListView = new CollectionViewSource { Source = DeviceList };
+            devicesList.ItemsSource = deviceListView.View;
+            Debug.WriteLine("Application started, UI initialized.");
         }
 
         private async void SearchButton_Click(object sender, RoutedEventArgs e)
         {
-            await DiscoverDevicesAsync("Discover AirPlay Devices");
+            Debug.WriteLine("Search button clicked.");
+            await DiscoverAirPlayDevices();
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            await DiscoverDevicesAsync("Refreshed Discovery");
+            Debug.WriteLine("Refresh button clicked.");
+            await DiscoverAirPlayDevices();  // Assuming the same function should be used for refresh
         }
 
-        private async Task DiscoverDevicesAsync(string actionName)
+        private void DevicesList_ItemClick(object sender, ItemClickEventArgs e)
         {
-            Devices.Clear();
-            UpdateUI("Searching...", false);
+            if (e.ClickedItem is DeviceInfo deviceInfo)
+            {
+                Debug.WriteLine($"Device selected: {deviceInfo.DisplayName} at {deviceInfo.IPAddress}");
+                // Here you can add more functionality, such as navigating to a details page or displaying more information in a dialog.
+            }
+        }
+
+        private void FilterButton_Click(object sender, RoutedEventArgs e)
+        {
+            string filterText = filterTextBox.Text.ToLower();
+            deviceListView.View.Filter = new Predicate<object>(item =>
+            {
+                if (item is DeviceInfo device)
+                {
+                    return device.DisplayName.ToLower().Contains(filterText) || device.IPAddress.ToLower().Contains(filterText);
+                }
+                return false;
+            });
+            deviceListView.View.Refresh();
+            Debug.WriteLine("Filter applied.");
+        }
+
+
+        // Now properly named and focused on discovering AirPlay devices
+        private async Task DiscoverAirPlayDevices()
+        {
+            DeviceList.Clear();
+            UpdateUI("Searching for AirPlay Devices...", false);
             progressBar.Visibility = Visibility.Visible;
 
             try
             {
-                var scanDuration = TimeSpan.FromMilliseconds(60000);
-                var results = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", scanTime: scanDuration);
-                Debug.WriteLine($"Scan completed. Number of devices found: {results.Count()}.");
+                var results = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", scanTime: TimeSpan.FromSeconds(60));
+                Debug.WriteLine($"Discovery complete. Found {results.Count()} devices.");
 
                 if (!results.Any())
                 {
                     UpdateUI("No devices found. Try again?", true);
+                    Debug.WriteLine("No AirPlay devices found.");
                 }
                 else
                 {
                     foreach (var host in results)
                     {
-                        Devices.Add(host);
+                        DeviceList.Add(new DeviceInfo
+                        {
+                            DisplayName = host.DisplayName,
+                            IPAddress = host.IPAddress,
+                            ToolTipText = $"IP Address: {host.IPAddress}"
+                        });
                         Debug.WriteLine($"Found: {host.DisplayName} at {host.IPAddress}");
                     }
-                    UpdateUI(actionName, true);
+                    UpdateUI("AirPlay Devices Discovered - " + DeviceList.Count + " device(s) found", true);
                 }
             }
             catch (Exception ex)
             {
-                UpdateUI("Error: " + ex.Message, true);
-                Debug.WriteLine("Error searching for AirPlay devices: " + ex.Message);
+                UpdateUI("Error during discovery: " + ex.Message, true);
+                Debug.WriteLine("Error during device discovery: " + ex.Message);
+                LogException(ex);
             }
             finally
             {
@@ -73,8 +111,28 @@ namespace WinStream
             {
                 searchButton.Content = content;
                 searchButton.IsEnabled = isEnabled;
-                refreshButton.IsEnabled = isEnabled;
+                refreshButton.IsEnabled = isEnabled;  // Ensure this button is also updated
+                Debug.WriteLine($"UI updated: Button content - {content}, Enabled - {isEnabled}");
             });
         }
+
+        private void LogException(Exception ex)
+        {
+            string logFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinStream", "Logs", "error.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath));
+
+            using (StreamWriter writer = new StreamWriter(logFilePath, true))
+            {
+                writer.WriteLine($"{DateTime.Now}: {ex}");
+            }
+            Debug.WriteLine($"Exception logged to file: {logFilePath}");
+        }
+    }
+
+    public class DeviceInfo
+    {
+        public string DisplayName { get; set; }
+        public string IPAddress { get; set; }
+        public string ToolTipText { get; set; }
     }
 }
