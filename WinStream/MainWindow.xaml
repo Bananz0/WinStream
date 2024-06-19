@@ -10,20 +10,20 @@
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/> <!-- For Buttons -->
+            <RowDefinition Height="*"/>   <!-- For ListView -->
+            <RowDefinition Height="Auto"/> <!-- For additional UI elements like Filter Panel -->
         </Grid.RowDefinitions>
 
         <!-- Button Panel -->
-        <StackPanel Orientation="Horizontal" Grid.Row="0" HorizontalAlignment="Left" Margin="10">
+        <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Left" Margin="10">
             <Button x:Name="searchButton" Content="Discover AirPlay Devices" Margin="5" Click="SearchButton_Click"/>
             <Button x:Name="refreshButton" Content="Refresh" Margin="5" Click="RefreshButton_Click"/>
             <ProgressBar x:Name="progressBar" Width="100" Height="20" IsIndeterminate="True" Visibility="Collapsed"/>
         </StackPanel>
 
         <!-- Devices List -->
-        <ListView x:Name="devicesList" Grid.Row="1" Margin="10" ItemClick="DevicesList_ItemClick">
+        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10" ItemClick="DevicesList_ItemClick">
             <ListView.ItemTemplate>
                 <DataTemplate>
                     <StackPanel Orientation="Horizontal" ToolTipService.ToolTip="{Binding ToolTipText}">
@@ -35,8 +35,9 @@
             </ListView.ItemTemplate>
         </ListView>
 
+
         <!-- Filter Panel -->
-        <StackPanel Orientation="Horizontal" Grid.Row="2" Margin="10">
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10">
             <TextBox x:Name="filterTextBox" PlaceholderText="Filter devices..." Width="200" Margin="5"/>
             <Button x:Name="filterButton" Content="Filter" Margin="5" Click="FilterButton_Click"/>
         </StackPanel>
