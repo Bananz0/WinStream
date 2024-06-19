@@ -23,10 +23,10 @@
         </StackPanel>
 
         <!-- Devices List -->
-        <ListView x:Name="devicesList" Grid.Row="1" Margin="10">
+        <ListView x:Name="devicesList" Grid.Row="1" Margin="10" ItemClick="DevicesList_ItemClick">
             <ListView.ItemTemplate>
                 <DataTemplate>
-                    <StackPanel Orientation="Horizontal">
+                    <StackPanel Orientation="Horizontal" ToolTipService.ToolTip="{Binding ToolTipText}">
                         <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" Margin="5"/>
                         <TextBlock Text=" - " Margin="5"/>
                         <TextBlock Text="{Binding IPAddress}" Margin="5"/>
@@ -34,5 +34,11 @@
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
+
+        <!-- Filter Panel -->
+        <StackPanel Orientation="Horizontal" Grid.Row="2" Margin="10">
+            <TextBox x:Name="filterTextBox" PlaceholderText="Filter devices..." Width="200" Margin="5"/>
+            <Button x:Name="filterButton" Content="Filter" Margin="5" Click="FilterButton_Click"/>
+        </StackPanel>
     </Grid>
 </Window>
