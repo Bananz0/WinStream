@@ -1,36 +1,80 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Navigation;
 using System;
-using System.Collections.Generic;
-using System.IO;
+using System.Collections.ObjectModel;
+using Zeroconf;
+using Microsoft.UI.Dispatching;
+using System.Diagnostics;
 using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
-using Windows.Foundation;
-using Windows.Foundation.Collections;
-
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
+using System.Threading.Tasks;
 
 namespace WinStream
 {
-    /// <summary>
-    /// An empty window that can be used on its own or navigated to within a Frame.
-    /// </summary>
     public sealed partial class MainWindow : Window
     {
+        public ObservableCollection<IZeroconfHost> Devices { get; } = new ObservableCollection<IZeroconfHost>();
+
         public MainWindow()
         {
-            this.InitializeComponent();
+            InitializeComponent();
+            devicesList.ItemsSource = Devices;
         }
 
-        private void myButton_Click(object sender, RoutedEventArgs e)
+        private async void SearchButton_Click(object sender, RoutedEventArgs e)
         {
-            myButton.Content = "Clicked";
+            await DiscoverDevicesAsync("Discover AirPlay Devices");
+        }
+
+        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+        {
+            await DiscoverDevicesAsync("Refreshed Discovery");
+        }
+
+        private async Task DiscoverDevicesAsync(string actionName)
+        {
+            Devices.Clear();
+            UpdateUI("Searching...", false);
+            progressBar.Visibility = Visibility.Visible;
+
+            try
+            {
+                var scanDuration = TimeSpan.FromMilliseconds(60000);
+                var results = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", scanTime: scanDuration);
+                Debug.WriteLine($"Scan completed. Number of devices found: {results.Count()}.");
+
+                if (!results.Any())
+                {
+                    UpdateUI("No devices found. Try again?", true);
+                }
+                else
+                {
+                    foreach (var host in results)
+                    {
+                        Devices.Add(host);
+                        Debug.WriteLine($"Found: {host.DisplayName} at {host.IPAddress}");
+                    }
+                    UpdateUI(actionName, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateUI("Error: " + ex.Message, true);
+                Debug.WriteLine("Error searching for AirPlay devices: " + ex.Message);
+            }
+            finally
+            {
+                progressBar.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void UpdateUI(string content, bool isEnabled)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                searchButton.Content = content;
+                searchButton.IsEnabled = isEnabled;
+                refreshButton.IsEnabled = isEnabled;
+            });
         }
     }
 }

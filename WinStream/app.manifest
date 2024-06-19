@@ -1,19 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="1.0.0.0" name="WinStream.app"/>
+	<assemblyIdentity version="1.0.0.0" name="WinStream.app"/>
 
-  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
-    <application>
-      <!-- The ID below informs the system that this application is compatible with OS features first introduced in Windows 10. 
-      It is necessary to support features in unpackaged applications, for example the custom titlebar implementation.
-      For more info see https://docs.microsoft.com/windows/apps/windows-app-sdk/use-windows-app-sdk-run-time#declare-os-compatibility-in-your-application-manifest -->
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
-    </application>
-  </compatibility>
-  
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
-    </windowsSettings>
-  </application>
+	<compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+		<application>
+			<!-- Supported OS IDs for Windows 10 and Windows 11 compatibility -->
+			<supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+			<!-- Windows 10 -->
+			<supportedOS Id="{1e87508d-89c2-42f0-8a7e-645a0f50ca58}"/>
+			<!-- Windows 11 -->
+		</application>
+	</compatibility>
+
+	<application xmlns="urn:schemas-microsoft-com:asm.v3">
+		<windowsSettings>
+			<!-- PerMonitorV2 DPI awareness for better scaling on high-resolution displays across different monitors -->
+			<dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+			<!-- Preference for low-power GPU to maximize battery life on dual-GPU systems -->
+			<gpuPreference xmlns="http://schemas.microsoft.com/SMI/2021/WindowsSettings">power-saving</gpuPreference>
+		</windowsSettings>
+	</application>
+
 </assembly>

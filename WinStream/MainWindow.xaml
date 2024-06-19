@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
 <Window
     x:Class="WinStream.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -6,9 +5,34 @@
     xmlns:local="using:WinStream"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    Title="AirPlay Discovery">
 
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Button x:Name="myButton" Click="myButton_Click">Click Me</Button>
-    </StackPanel>
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Button Panel -->
+        <StackPanel Orientation="Horizontal" Grid.Row="0" HorizontalAlignment="Left" Margin="10">
+            <Button x:Name="searchButton" Content="Discover AirPlay Devices" Margin="5" Click="SearchButton_Click"/>
+            <Button x:Name="refreshButton" Content="Refresh" Margin="5" Click="RefreshButton_Click"/>
+            <ProgressBar x:Name="progressBar" Width="100" Height="20" IsIndeterminate="True" Visibility="Collapsed"/>
+        </StackPanel>
+
+        <!-- Devices List -->
+        <ListView x:Name="devicesList" Grid.Row="1" Margin="10">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" Margin="5"/>
+                        <TextBlock Text=" - " Margin="5"/>
+                        <TextBlock Text="{Binding IPAddress}" Margin="5"/>
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+    </Grid>
 </Window>
