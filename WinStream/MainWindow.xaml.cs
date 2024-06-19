@@ -14,6 +14,13 @@ namespace WinStream
     public sealed partial class MainWindow : Window
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
+        // Test list for debugging
+        public ObservableCollection<DeviceInfo> TestList { get; } = new ObservableCollection<DeviceInfo>
+        {
+            new DeviceInfo { DisplayName = "Test Device 1", IPAddress = "192.168.1.1", ToolTipText = "Test Tooltip 1" },
+            new DeviceInfo { DisplayName = "Test Device 2", IPAddress = "192.168.1.2", ToolTipText = "Test Tooltip 2" }
+        };
+
         private CollectionViewSource deviceListView;
 
         public MainWindow()
@@ -36,12 +43,34 @@ namespace WinStream
             await DiscoverAirPlayDevices();  // Assuming the same function should be used for refresh
         }
 
-        private void DevicesList_ItemClick(object sender, ItemClickEventArgs e)
+        private async void DevicesList_ItemClick(object sender, ItemClickEventArgs e)
         {
             if (e.ClickedItem is DeviceInfo deviceInfo)
             {
                 Debug.WriteLine($"Device selected: {deviceInfo.DisplayName} at {deviceInfo.IPAddress}");
-                // Here you can add more functionality, such as navigating to a details page or displaying more information in a dialog.
+
+                // Display a dialog with more information about the selected device
+                ContentDialog deviceDetailsDialog = new ContentDialog
+                {
+                    Title = $"Device Details: {deviceInfo.DisplayName}",
+                    Content = $"IP Address: {deviceInfo.IPAddress}\nTooltip Text: {deviceInfo.ToolTipText}",
+                    CloseButtonText = "OK"
+                };
+
+                // Show the dialog and get the result
+                ContentDialogResult result = await deviceDetailsDialog.ShowAsync();
+
+                // Handle the result if needed
+                if (result == ContentDialogResult.Primary)
+                {
+                    // User clicked OK
+                    Debug.WriteLine("User clicked OK");
+                }
+                else
+                {
+                    // User clicked Cancel or closed the dialog
+                    Debug.WriteLine("User canceled or closed the dialog");
+                }
             }
         }
 
@@ -50,13 +79,11 @@ namespace WinStream
             string filterText = filterTextBox.Text.ToLower();
             deviceListView.View.Filter = new Predicate<object>(item =>
             {
-                if (item is DeviceInfo device)
-                {
-                    return device.DisplayName.ToLower().Contains(filterText) || device.IPAddress.ToLower().Contains(filterText);
-                }
-                return false;
+                DeviceInfo device = item as DeviceInfo;
+                return device.DisplayName.ToLower().Contains(filterText) || device.IPAddress.ToLower().Contains(filterText);
             });
             deviceListView.View.Refresh();
+
             Debug.WriteLine("Filter applied.");
         }
 
@@ -70,38 +97,54 @@ namespace WinStream
 
             try
             {
-                var results = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", scanTime: TimeSpan.FromSeconds(60));
+                var results = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", scanTime: TimeSpan.FromSeconds(5));
                 Debug.WriteLine($"Discovery complete. Found {results.Count()} devices.");
 
                 if (!results.Any())
                 {
-                    UpdateUI("No devices found. Try again?", true);
-                    Debug.WriteLine("No AirPlay devices found.");
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        UpdateUI("No devices found. Try again?", true);
+                        Debug.WriteLine("No AirPlay devices found.");
+                    });
                 }
                 else
                 {
                     foreach (var host in results)
                     {
-                        DeviceList.Add(new DeviceInfo
+                        DispatcherQueue.TryEnqueue(() =>
                         {
-                            DisplayName = host.DisplayName,
-                            IPAddress = host.IPAddress,
-                            ToolTipText = $"IP Address: {host.IPAddress}"
+                            DeviceList.Add(new DeviceInfo
+                            {
+                                DisplayName = host.DisplayName,
+                                IPAddress = host.IPAddress,
+                                ToolTipText = $"IP Address: {host.IPAddress}"
+                            });
+                            Debug.WriteLine($"Found: {host.DisplayName} at {host.IPAddress}");
                         });
-                        Debug.WriteLine($"Found: {host.DisplayName} at {host.IPAddress}");
                     }
-                    UpdateUI("AirPlay Devices Discovered - " + DeviceList.Count + " device(s) found", true);
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        UpdateUI("AirPlay Devices Discovered - " + DeviceList.Count + " device(s) found", true);
+                    });
                 }
             }
             catch (Exception ex)
             {
-                UpdateUI("Error during discovery: " + ex.Message, true);
-                Debug.WriteLine("Error during device discovery: " + ex.Message);
-                LogException(ex);
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    UpdateUI("Error during discovery: " + ex.Message, true);
+                    Debug.WriteLine("Error during device discovery: " + ex.Message);
+                    LogException(ex);
+                });
             }
+
             finally
             {
-                progressBar.Visibility = Visibility.Collapsed;
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    progressBar.Visibility = Visibility.Collapsed;
+                });
             }
         }
 

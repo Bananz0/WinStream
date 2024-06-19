@@ -18,11 +18,10 @@ namespace WinStream
         {
             m_window = new MainWindow();
 
-            // Setup the window size
             IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(m_window);
             WindowId windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             AppWindow appWindow = AppWindow.GetFromWindowId(windowId);
-            appWindow.Resize(new Windows.Graphics.SizeInt32(640, 400));  // Set to calculated width and height
+            appWindow.Resize(new Windows.Graphics.SizeInt32(640, 400));  
 
             m_window.Activate();
         }
