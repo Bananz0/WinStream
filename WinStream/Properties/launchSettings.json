@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "WinStream (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "WinStream (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
