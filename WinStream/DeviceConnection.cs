@@ -35,27 +35,19 @@ namespace WinStream.Network
                 Debug.WriteLine($"OPTIONS Response: {optionsResponse}");
 
                 Debug.WriteLine("Preparing SDP data for ANNOUNCE request...");
-                string sdp = "v=0\r\n" +
-                             "o=- 0 0 IN IP4 127.0.0.1\r\n" +
-                             "s=Unnamed\r\n" +
-                             "i=N/A\r\n" +
-                             "c=IN IP4 " + ipAddress + "\r\n" +
-                             "t=0 0\r\n" +
-                             "m=audio 0 RTP/AVP 96\r\n" +
-                             "a=rtpmap:96 L16/44100/2\r\n" +
-                             "a=control:track1\r\n";
+                string sdp = PrepareSdpData(ipAddress);
                 Debug.WriteLine("Sending ANNOUNCE request...");
                 string announceResponse = await rtspClient.SendAnnounce("rtsp://" + ipAddress + "/stream", sdp);
                 Debug.WriteLine($"ANNOUNCE Response: {announceResponse}");
 
                 Debug.WriteLine("Sending SETUP request...");
-                string setupResponse = await rtspClient.SendSetup("rtsp://" + ipAddress + "/stream/track1", 6000);
+                string setupResponse = await rtspClient.SendSetup("rtsp://" + ipAddress + "/stream/track1", 6000, 6001, 6002);
                 Debug.WriteLine($"SETUP Response: {setupResponse}");
 
-                Debug.WriteLine("Sending PLAY request...");
+                Debug.WriteLine("Sending RECORD request...");
                 string session = ParseSessionId(setupResponse);
-                string playResponse = await rtspClient.SendPlay("rtsp://" + ipAddress + "/stream", session);
-                Debug.WriteLine($"PLAY Response: {playResponse}");
+                string recordResponse = await rtspClient.SendRecord("rtsp://" + ipAddress + "/stream", session);
+                Debug.WriteLine($"RECORD Response: {recordResponse}");
             }
             catch (Exception ex)
             {
@@ -69,6 +61,18 @@ namespace WinStream.Network
             }
         }
 
+        private static string PrepareSdpData(string ipAddress)
+        {
+            return "v=0\r\n" +
+                   "o=iTunes 0 IN IP4 127.0.0.1\r\n" +
+                   "s=iTunes\r\n" +
+                   "c=IN IP4 " + ipAddress + "\r\n" +
+                   "t=0 0\r\n" +
+                   "m=audio 0 RTP/AVP 96\r\n" +
+                   "a=rtpmap:96 AppleLossless\r\n" +
+                   "a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
+        }
+
         private static string ParseSessionId(string setupResponse)
         {
             string sessionIdLine = setupResponse.Split('\n').FirstOrDefault(line => line.StartsWith("Session:"));
@@ -77,7 +81,7 @@ namespace WinStream.Network
                 return sessionIdLine.Split(' ').Last().Trim();
             }
             Debug.WriteLine("Session ID not found in SETUP response.");
-            return string.Empty; // Or handle this case specifically
+            return string.Empty;
         }
 
         public static async Task PerformHandshake(TcpClient client)
