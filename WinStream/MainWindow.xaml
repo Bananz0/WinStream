@@ -2,7 +2,7 @@
     x:Class="WinStream.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:WinStream"
+    xmlns:local="using:WinStream.Network"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
@@ -10,9 +10,12 @@
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/> <!-- For Buttons -->
-            <RowDefinition Height="*"/>   <!-- For ListView -->
-            <RowDefinition Height="Auto"/> <!-- For additional UI elements like Filter Panel -->
+            <RowDefinition Height="Auto"/>
+            <!-- For Buttons -->
+            <RowDefinition Height="*"/>
+            <!-- For ListView -->
+            <RowDefinition Height="Auto"/>
+            <!-- For additional UI elements like Filter Panel -->
         </Grid.RowDefinitions>
 
         <!-- Button Panel -->
@@ -23,23 +26,23 @@
         </StackPanel>
 
         <!-- Devices List -->
-        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10" ItemClick="DevicesList_ItemClick">
+        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10" SelectionChanged="DevicesList_SelectionChanged">
             <ListView.ItemTemplate>
-                <DataTemplate>
-                    <StackPanel Orientation="Horizontal" ToolTipService.ToolTip="{Binding ToolTipText}">
-                        <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" Margin="5"/>
-                        <TextBlock Text=" - " Margin="5"/>
-                        <TextBlock Text="{Binding IPAddress}" Margin="5"/>
-                    </StackPanel>
+                <DataTemplate x:DataType="local:DeviceInfo">
+                    <Expander Header="{x:Bind DisplayName}">
+                        <StackPanel Orientation="Vertical" Margin="5">
+                            <TextBlock Text="{x:Bind IPAddress}" Margin="5"/>
+                            <Button Content="Connect" Margin="5" Click="ConnectButton_Click"/>
+                        </StackPanel>
+                    </Expander>
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
 
-
-        <!-- Filter Panel -->
+        <!-- Filter panel-->
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10">
-            <TextBox x:Name="filterTextBox" PlaceholderText="Filter devices..." Width="200" Margin="5"/>
-            <Button x:Name="filterButton" Content="Filter" Margin="5" Click="FilterButton_Click"/>
+            <TextBox x:Name="filterTextBox" PlaceholderText="Filter devices..." Width="200" Margin="5" TextChanged="FilterTextBox_TextChanged"/>
+            <Button x:Name="filterButton" Content="Filter" Margin="5" Click="FilterButton_Click" Visibility="Collapsed"/>
         </StackPanel>
     </Grid>
 </Window>
