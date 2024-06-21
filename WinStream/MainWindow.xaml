@@ -37,24 +37,28 @@
                                           HorizontalAlignment="Stretch" 
                                           HorizontalContentAlignment="Left"
                                           Click="ExpandToggle_Click">
-                                <StackPanel Orientation="Vertical" Margin="5">
-                                    <TextBlock Text="{x:Bind DisplayName}" FontWeight="Bold"/>
-                                    <TextBlock Text="{x:Bind IPAddress}"/>
-                                </StackPanel>
+                                <TextBlock Text="{x:Bind DisplayName}" FontWeight="Bold"/>
                             </ToggleButton>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                 <Button Content="Connect" Click="ConnectButton_Click"/>
+                                <Button Content="?" Click="InfoButton_Click" Margin="5,0,0,0"/>
                                 <ProgressRing x:Name="connectProgressRing" Width="20" Height="20" Visibility="Collapsed" Margin="5,0,0,0"/>
                                 <TextBlock x:Name="connectStatusTextBlock" Foreground="Red" Margin="5,0,0,0"/>
                             </StackPanel>
                         </Grid>
                         <StackPanel Grid.Row="1" x:Name="ExpandedInfo" Visibility="Collapsed" Margin="20,5,5,5">
-                            <TextBlock Text="{x:Bind ToolTipText}" TextWrapping="Wrap"/>
-                            <TextBlock Margin="0,5,0,0">
-                                <Run Text="Port: "/>
-                                <Run Text="{x:Bind Port}"/>
+                            <TextBlock>
+                                <Run Text="Manufacturer: "/>
+                                <Run Text="{x:Bind Manufacturer}"/>
                             </TextBlock>
-                            <!-- Add more information fields here as needed -->
+                            <TextBlock>
+                                <Run Text="Model: "/>
+                                <Run Text="{x:Bind Model}"/>
+                            </TextBlock>
+                            <TextBlock>
+                                <Run Text="IP Address: "/>
+                                <Run Text="{x:Bind IPAddress}"/>
+                            </TextBlock>
                         </StackPanel>
                     </Grid>
                 </DataTemplate>

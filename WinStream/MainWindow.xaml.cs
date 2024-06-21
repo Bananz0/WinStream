@@ -159,12 +159,65 @@ namespace WinStream
                 if (existingDevice != null)
                 {
                     existingDevice.DisplayName = discoveredDevice.DisplayName;
-                    existingDevice.ToolTipText = discoveredDevice.ToolTipText;
+                    existingDevice.Manufacturer = discoveredDevice.Manufacturer;
+                    existingDevice.Model = discoveredDevice.Model;
+                    existingDevice.IPAddress = discoveredDevice.IPAddress;
+                    existingDevice.ToolTipText = CreateTooltipSummary(existingDevice);
                 }
                 else
                 {
+                    discoveredDevice.ToolTipText = CreateTooltipSummary(discoveredDevice);
                     DeviceList.Add(discoveredDevice);
                 }
+            }
+
+        }
+        private string CreateTooltipSummary(DeviceInfo device)
+        {
+            return $"Device Name: {device.DeviceName}\n" +
+                   $"IP Address: {device.IPAddress}\n" +
+                   $"Port: {device.Port}\n" +
+                   $"Manufacturer: {device.Manufacturer}\n" +
+                   $"Model: {device.Model}\n" +
+                   $"Firmware Version: {device.FirmwareVersion}\n" +
+                   $"OS Version: {device.OSVersion}\n" +
+                   $"Bluetooth Address: {device.BluetoothAddress}\n" +
+                   $"Device ID: {device.DeviceID}\n" +
+                   $"Protocol Version: {device.ProtocolVersion}\n" +
+                   $"AirPlay Version: {device.AirPlayVersion}\n" +
+                   $"Serial Number: {device.SerialNumber}\n" +
+                   $"Public CU AirPlay Pairing Identity: {device.PublicCUAirPlayPairingIdentity}\n" +
+                   $"Public CU System Pairing Identity: {device.PublicCUSystemPairingIdentity}\n" +
+                   $"Public Key: {device.PublicKey}\n" +
+                   $"Household ID: {device.HouseholdID}\n" +
+                   $"Group UUID: {device.GroupUUID}\n" +
+                   $"Is Group Leader: {device.IsGroupLeader}\n" +
+                   $"Required Sender Features: {device.RequiredSenderFeatures}\n" +
+                   $"System Flags: {device.SystemFlags}";
+        }
+
+        private async void InfoButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
+            {
+                var dialog = new ContentDialog()
+                {
+                    Title = deviceInfo.DisplayName,
+                    Content = new ScrollViewer
+                    {
+                        Content = new TextBlock
+                        {
+                            Text = deviceInfo.ToolTipText,
+                            TextWrapping = TextWrapping.Wrap
+                        },
+                        VerticalScrollMode = ScrollMode.Auto,
+                        HorizontalScrollMode = ScrollMode.Disabled
+                    },
+                    CloseButtonText = "Close"
+                };
+
+                dialog.XamlRoot = this.Content.XamlRoot;
+                await dialog.ShowAsync();
             }
         }
 
@@ -175,3 +228,4 @@ namespace WinStream
         }
     }
 }
+
