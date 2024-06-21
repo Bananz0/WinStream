@@ -1,12 +1,14 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
-using System.Windows.Data;
 using WinStream.Network;
 
 namespace WinStream
@@ -15,30 +17,19 @@ namespace WinStream
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
         private DispatcherTimer scanTimer;
-        private CollectionViewSource deviceListView;
 
         public MainWindow()
         {
             InitializeComponent();
-            deviceListView = new CollectionViewSource { Source = DeviceList };
-            devicesList.ItemsSource = deviceListView.View;
             Debug.WriteLine("Application started, UI initialized.");
 
             InitializeTimer();
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
-        private void OnWindowClosing(object sender, WindowEventArgs e)
-        {
-            scanTimer?.Stop();
-        }
-
         private void InitializeTimer()
         {
-            scanTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromSeconds(5)
-            };
+            scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             scanTimer.Tick += async (s, e) => await DiscoverAndDisplayDevicesAsync();
             scanTimer.Start();
         }
@@ -55,24 +46,6 @@ namespace WinStream
             await DiscoverAndDisplayDevicesAsync();
         }
 
-        private void DevicesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (devicesList.SelectedItem is DeviceInfo selectedDevice)
-            {
-                var container = devicesList.ContainerFromItem(selectedDevice) as ListViewItem;
-                var expander = container?.ContentTemplateRoot as Expander;
-                if (expander != null)
-                {
-                    expander.IsExpanded = true;
-                }
-            }
-        }
-
-        private void FilterButton_Click(object sender, RoutedEventArgs e)
-        {
-            ApplyFilter(filterTextBox.Text.ToLower());
-        }
-
         private void FilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
         {
             ApplyFilter(filterTextBox.Text.ToLower());
@@ -80,66 +53,104 @@ namespace WinStream
 
         private void ApplyFilter(string filterText)
         {
-            deviceListView.View.Filter = string.IsNullOrWhiteSpace(filterText)
-                ? (Predicate<object>)null
-                : item => ((DeviceInfo)item)?.DisplayName?.ToLower().Contains(filterText) == true ||
-                          ((DeviceInfo)item)?.IPAddress?.ToLower().Contains(filterText) == true;
-            deviceListView.View.Refresh();
+            if (string.IsNullOrWhiteSpace(filterText))
+            {
+                devicesList.ItemsSource = DeviceList;
+            }
+            else
+            {
+                devicesList.ItemsSource = DeviceList.Where(d =>
+                    d.DisplayName.ToLower().Contains(filterText) ||
+                    d.IPAddress.ToLower().Contains(filterText));
+            }
         }
 
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
             {
-                Debug.WriteLine($"Connecting to {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}");
-                searchButton.IsEnabled = false;  // Disable the search button while connecting
-                progressBar.Visibility = Visibility.Visible;  // Show progress bar
+                var container = (button.Parent as FrameworkElement)?.Parent as Grid;
+                if (container != null)
+                {
+                    var progressRing = container.FindName("connectProgressRing") as ProgressRing;
+                    var statusTextBlock = container.FindName("connectStatusTextBlock") as TextBlock;
 
-                await DeviceConnection.ConnectToAirPlayServer(deviceInfo.IPAddress, deviceInfo.Port);
-                progressBar.Visibility = Visibility.Collapsed;  // Hide progress bar
-                searchButton.IsEnabled = true;  // Re-enable the search button
+                    Debug.WriteLine($"Connecting to {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}");
+                    UpdateUI(false);
+                    progressRing.Visibility = Visibility.Visible;
+                    statusTextBlock.Text = string.Empty;
+
+                    try
+                    {
+                        using var rsaPublicKey = RSA.Create();
+                        await DeviceConnection.ConnectToAirPlayServer(deviceInfo.IPAddress, deviceInfo.Port, rsaPublicKey);
+                        statusTextBlock.Text = "Connected successfully.";
+                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
+                    }
+                    catch (Exception ex)
+                    {
+                        statusTextBlock.Text = "Connection failed.";
+                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
+                        Debug.WriteLine($"Connection error: {ex.Message}");
+                    }
+                    finally
+                    {
+                        progressRing.Visibility = Visibility.Collapsed;
+                        UpdateUI(true);
+                    }
+                }
             }
         }
 
         private async Task DiscoverAndDisplayDevicesAsync()
         {
-            UpdateUI("Searching for AirPlay Devices...", false);
+            UpdateUI(false);
             progressBar.Visibility = Visibility.Visible;
 
             try
             {
                 var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync();
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    UpdateDeviceList(discoveredDevices);
-                    UpdateUI($"AirPlay Devices Updated - {DeviceList.Count} device(s) found", true);
-                });
+                UpdateDeviceList(discoveredDevices);
+                searchButton.Content = $"Devices Updated ({DeviceList.Count})";
             }
             catch (Exception ex)
             {
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    UpdateUI($"Error during discovery: {ex.Message}", true);
-                    Debug.WriteLine($"Error during device discovery: {ex.Message}");
-                    Logger.LogException(ex);
-                });
+                Debug.WriteLine($"Error during device discovery: {ex.Message}");
+                searchButton.Content = "Discovery Error";
             }
             finally
             {
-                DispatcherQueue.TryEnqueue(() =>
+                progressBar.Visibility = Visibility.Collapsed;
+                UpdateUI(true);
+            }
+        }
+
+        private void ExpandToggle_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleButton toggleButton)
+            {
+                var parentGrid = toggleButton.Parent as Grid;
+                if (parentGrid != null)
                 {
-                    progressBar.Visibility = Visibility.Collapsed;
-                });
+                    var expandedInfo = parentGrid.FindName("ExpandedInfo") as StackPanel;
+                    if (expandedInfo != null)
+                    {
+                        expandedInfo.Visibility = toggleButton.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+                    }
+                }
             }
         }
 
         private void UpdateDeviceList(List<DeviceInfo> discoveredDevices)
         {
-            var currentIPs = discoveredDevices.Select(d => d.IPAddress).ToList();
-            var devicesToRemove = DeviceList.Where(d => !currentIPs.Contains(d.IPAddress)).ToList();
-            foreach (var device in devicesToRemove)
+            var currentDevices = new HashSet<string>(discoveredDevices.Select(d => d.IPAddress));
+
+            foreach (var device in DeviceList.ToList())
             {
-                DeviceList.Remove(device);
+                if (!currentDevices.Contains(device.IPAddress))
+                {
+                    DeviceList.Remove(device);
+                }
             }
 
             foreach (var discoveredDevice in discoveredDevices)
@@ -157,12 +168,10 @@ namespace WinStream
             }
         }
 
-        private void UpdateUI(string content, bool isEnabled)
+        private void UpdateUI(bool isEnabled)
         {
-            searchButton.Content = content;
             searchButton.IsEnabled = isEnabled;
             refreshButton.IsEnabled = isEnabled;
         }
     }
 }
-
