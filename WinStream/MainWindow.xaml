@@ -7,42 +7,58 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Title="AirPlay Discovery">
-
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <!-- For Buttons -->
             <RowDefinition Height="*"/>
-            <!-- For ListView -->
-            <RowDefinition Height="Auto"/>
-            <!-- For additional UI elements like Filter Panel -->
         </Grid.RowDefinitions>
-
-        <!-- Button Panel -->
+        <!-- Search and Filter Panel -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Left" Margin="10">
-            <Button x:Name="searchButton" Content="Discover AirPlay Devices" Margin="5" Click="SearchButton_Click"/>
+            <TextBox x:Name="filterTextBox" PlaceholderText="Search devices..." Width="200" Margin="5" TextChanged="FilterTextBox_TextChanged"/>
+            <Button x:Name="searchButton" Content="Discover" Margin="5" Click="SearchButton_Click"/>
             <Button x:Name="refreshButton" Content="Refresh" Margin="5" Click="RefreshButton_Click"/>
             <ProgressBar x:Name="progressBar" Width="100" Height="20" IsIndeterminate="True" Visibility="Collapsed"/>
         </StackPanel>
-
         <!-- Devices List -->
-        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10" SelectionChanged="DevicesList_SelectionChanged">
+        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="local:DeviceInfo">
-                    <Expander Header="{x:Bind DisplayName}">
-                        <StackPanel Orientation="Vertical" Margin="5">
-                            <TextBlock Text="{x:Bind IPAddress}" Margin="5"/>
-                            <Button Content="Connect" Margin="5" Click="ConnectButton_Click"/>
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ToggleButton Grid.Column="0" x:Name="ExpandToggle" 
+                                          HorizontalAlignment="Stretch" 
+                                          HorizontalContentAlignment="Left"
+                                          Click="ExpandToggle_Click">
+                                <StackPanel Orientation="Vertical" Margin="5">
+                                    <TextBlock Text="{x:Bind DisplayName}" FontWeight="Bold"/>
+                                    <TextBlock Text="{x:Bind IPAddress}"/>
+                                </StackPanel>
+                            </ToggleButton>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Content="Connect" Click="ConnectButton_Click"/>
+                                <ProgressRing x:Name="connectProgressRing" Width="20" Height="20" Visibility="Collapsed" Margin="5,0,0,0"/>
+                                <TextBlock x:Name="connectStatusTextBlock" Foreground="Red" Margin="5,0,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Grid.Row="1" x:Name="ExpandedInfo" Visibility="Collapsed" Margin="20,5,5,5">
+                            <TextBlock Text="{x:Bind ToolTipText}" TextWrapping="Wrap"/>
+                            <TextBlock Margin="0,5,0,0">
+                                <Run Text="Port: "/>
+                                <Run Text="{x:Bind Port}"/>
+                            </TextBlock>
+                            <!-- Add more information fields here as needed -->
                         </StackPanel>
-                    </Expander>
+                    </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
-
-        <!-- Filter panel-->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10">
-            <TextBox x:Name="filterTextBox" PlaceholderText="Filter devices..." Width="200" Margin="5" TextChanged="FilterTextBox_TextChanged"/>
-            <Button x:Name="filterButton" Content="Filter" Margin="5" Click="FilterButton_Click" Visibility="Collapsed"/>
-        </StackPanel>
     </Grid>
 </Window>
