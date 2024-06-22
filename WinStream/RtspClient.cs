@@ -1,11 +1,11 @@
 ﻿using System;
-using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Net;
 using System.Net.Sockets;
+using System.Net;
 using System.Text;
 using System.Threading.Tasks;
+using System.Security.Cryptography;
+using System.Collections.Generic;
 
 namespace WinStream.Network
 {
@@ -15,117 +15,104 @@ namespace WinStream.Network
         private readonly NetworkStream _stream;
         private readonly StreamWriter _writer;
         private readonly StreamReader _reader;
-        private int _cSeq;
-        private string _session;
-        private string _transport;
-        private string _userAgent = "RTSPClient";
-        private string _localIp;
+        private int _cSeq; // Sequence number for RTSP requests
+        private string _session; // Session ID for RTSP
+        private string _transport; // Transport header
+        private string _userAgent = "iTunes/9.2.1 (Macintosh; Intel Mac OS X 10.5.8) AppleWebKit/533.17.8";
 
-        public RtspClient(string serverIp, int serverPort)
+        public string LocalIp { get; private set; }
+        private string _clientInstance; // 64 random bytes in hex
+
+        public RtspClient(string serverIp, int serverPort, RSA rsaPublicKey)
         {
-            _client = new TcpClient();
-            _client.Connect(IPAddress.Parse(serverIp), serverPort);
+            _client = new TcpClient(serverIp, serverPort);
             _stream = _client.GetStream();
             _writer = new StreamWriter(_stream) { AutoFlush = true };
             _reader = new StreamReader(_stream);
             _cSeq = 0;
-            _localIp = ((IPEndPoint)_client.Client.LocalEndPoint).Address.ToString();
+
+            // Get local IP address
+            var localEndPoint = (IPEndPoint)_client.Client.LocalEndPoint;
+            LocalIp = localEndPoint.Address.ToString();
+
+            // Generate Client-Instance
+            _clientInstance = GenerateClientInstance();
         }
 
-        public int GetSocket() => _client.Client.Handle.ToInt32();
-
-        public bool IsConnected() => _client.Connected && IsSane();
-
-        private bool IsSane()
+        private string GenerateClientInstance()
         {
-            try
-            {
-                return !_client.Client.Poll(1, SelectMode.SelectRead) || _client.Client.Available != 0;
-            }
-            catch (SocketException) { return false; }
+            var rng = new Random();
+            var bytes = new byte[64 / 2];
+            rng.NextBytes(bytes);
+            return BitConverter.ToString(bytes).Replace("-", "").ToLower();
         }
 
-        public async Task<bool> Connect(IPAddress local, IPAddress host, int destPort, string sid)
+        private string GenerateAppleChallenge()
         {
-            try
+            var randomBytes = new byte[16]; // 128 bits
+            using (var rng = RandomNumberGenerator.Create())
             {
-                _session = null;
-                await _client.ConnectAsync(host, destPort);
-                _localIp = ((IPEndPoint)_client.Client.LocalEndPoint).Address.ToString();
-                return true;
+                rng.GetBytes(randomBytes);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"Failed to connect: {ex.Message}");
-                return false;
-            }
+            return Convert.ToBase64String(randomBytes).TrimEnd('=');
         }
 
-        public async Task<bool> Disconnect()
+        private Dictionary<string, string> GetCommonHeaders()
         {
-            try
+            return new Dictionary<string, string>
             {
-                if (_client.Connected)
-                {
-                    await SendTeardown("rtsp://");
-                    _client.Close();
-                }
-
-                _session = null;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"Failed to disconnect: {ex.Message}");
-                return false;
-            }
+                {"CSeq", (++_cSeq).ToString()},
+                {"User-Agent", _userAgent},
+                {"Client-Instance", _clientInstance}
+            };
         }
 
-        public void Close()
+        private string BuildRequest(string method, string target, Dictionary<string, string> headers, string body = "")
         {
-            Dispose();
-        }
+            var request = new StringBuilder();
+            request.AppendLine($"{method} {target} RTSP/1.0");
 
-        public void Dispose()
-        {
-            _writer?.Dispose();
-            _reader?.Dispose();
-            _stream?.Dispose();
-            _client?.Close();
-            _client?.Dispose();
+            foreach (var header in headers)
+            {
+                request.AppendLine($"{header.Key}: {header.Value}");
+            }
+
+            if (!string.IsNullOrEmpty(body))
+            {
+                request.AppendLine($"Content-Length: {Encoding.UTF8.GetByteCount(body)}");
+            }
+
+            request.AppendLine();
+            if (!string.IsNullOrEmpty(body))
+            {
+                request.AppendLine(body);
+            }
+
+            return request.ToString();
         }
 
         public async Task<string> SendOptions(string target = "*")
         {
-            string request = $"OPTIONS {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n";
+            var headers = GetCommonHeaders();
+            headers.Add("Apple-Challenge", GenerateAppleChallenge());
+            string request = BuildRequest("OPTIONS", target, headers);
             return await SendRequest(request);
         }
 
-        public async Task<string> SendAnnounce(string target, string sdp)
+        public async Task<string> SendAnnounce(string target, string sdp, string appleChallenge)
         {
-            string request = $"ANNOUNCE {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             "Content-Type: application/sdp\r\n" +
-                             $"Content-Length: {Encoding.UTF8.GetByteCount(sdp)}\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "Client-Instance: 56B29BB6CB904862\r\n" +
-                             "DACP-ID: 56B29BB6CB904862\r\n" +
-                             "Active-Remote: 1986535575\r\n" +
-                             "\r\n" +
-                             sdp;
+            var headers = GetCommonHeaders();
+            headers.Add("Content-Type", "application/sdp");
+            headers.Add("Apple-Challenge", appleChallenge);
+            string request = BuildRequest("ANNOUNCE", target, headers, sdp);
             return await SendRequest(request);
         }
 
         public async Task<string> SendSetup(string target, int clientRtpPort, int controlPort, int timingPort)
         {
-            string request = $"SETUP {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             $"Transport: RTP/AVP/UDP;unicast;client_port={clientRtpPort}-{controlPort};mode=record\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n";
+            var headers = GetCommonHeaders();
+            headers.Add("Transport", $"RTP/AVP/UDP;unicast;client_port={clientRtpPort}");
+            string request = BuildRequest("SETUP", target, headers);
             var response = await SendRequest(request);
             ParseTransport(response);
             return response;
@@ -133,71 +120,59 @@ namespace WinStream.Network
 
         public async Task<string> SendRecord(string target, string session)
         {
-            string request = $"RECORD {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             $"Session: {session}\r\n" +
-                             "Range: npt=0-\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n";
+            var headers = GetCommonHeaders();
+            headers.Add("Session", session);
+            headers.Add("Range", "npt=0-");
+            string request = BuildRequest("RECORD", target, headers);
             return await SendRequest(request);
         }
 
-        public async Task<string> SendTeardown(string target)
+        public async Task<string> SendTeardown(string target, string session)
         {
-            string request = $"TEARDOWN {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             $"Session: {_session}\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n";
+            var headers = GetCommonHeaders();
+            headers.Add("Session", session);
+            string request = BuildRequest("TEARDOWN", target, headers);
             return await SendRequest(request);
         }
 
         public async Task<string> SendSetParameter(string target, string parameter)
         {
-            string request = $"SET_PARAMETER {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             "Content-Type: text/parameters\r\n" +
-                             $"Content-Length: {parameter.Length}\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n" +
-                             parameter;
+            var headers = GetCommonHeaders();
+            headers.Add("Content-Type", "text/parameters");
+            string request = BuildRequest("SET_PARAMETER", target, headers, parameter);
             return await SendRequest(request);
         }
 
         public async Task<string> SendAuthSetup(string target, byte[] data)
         {
-            string request = $"POST {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             "Content-Type: application/octet-stream\r\n" +
-                             $"Content-Length: {data.Length}\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n" +
-                             Convert.ToBase64String(data);
+            var headers = GetCommonHeaders();
+            headers.Add("Content-Type", "application/octet-stream");
+            string request = BuildRequest("POST", target, headers, Convert.ToBase64String(data));
             return await SendRequest(request);
         }
 
         public async Task<string> SendFlush(string target, string session)
         {
-            string request = $"FLUSH {target} RTSP/1.0\r\n" +
-                             $"CSeq: {++_cSeq}\r\n" +
-                             $"Session: {session}\r\n" +
-                             "RTP-Info: seq=0;rtptime=0\r\n" +
-                             $"User-Agent: {_userAgent}\r\n" +
-                             "\r\n";
+            var headers = GetCommonHeaders();
+            headers.Add("Session", session);
+            headers.Add("RTP-Info", "seq=0;rtptime=0");
+            string request = BuildRequest("FLUSH", target, headers);
             return await SendRequest(request);
         }
 
-        public async Task<string> SendRequest(string request)
+        private async Task<string> SendRequest(string request)
         {
             try
             {
-                Debug.WriteLine($"Sending request: {request}");
+                Console.WriteLine($"Sending request:\n{request}");
                 await _writer.WriteAsync(request);
-                return await ReadResponseAsync();
+                var response = await ReadResponseAsync();
+                Console.WriteLine($"Received response:\n{response}");
+                return response;
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error sending request: {ex.Message}");
+                Console.WriteLine($"Error sending request: {ex.Message}");
                 return null;
             }
         }
@@ -216,12 +191,11 @@ namespace WinStream.Network
                         _session = line.Substring(9).Trim();
                     }
                 }
-                Debug.WriteLine($"Received response: {response}");
                 return response.ToString();
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error reading response: {ex.Message}");
+                Console.WriteLine($"Error reading response: {ex.Message}");
                 return null;
             }
         }
@@ -238,17 +212,13 @@ namespace WinStream.Network
             }
         }
 
-        public async Task PerformHandshake(TcpClient client)
+        public void Dispose()
         {
-            using var networkStream = client.GetStream();
-            using var writer = new StreamWriter(networkStream);
-            using var reader = new StreamReader(networkStream);
-
-            await writer.WriteLineAsync("Example handshake message");
-            await writer.FlushAsync();
-
-            var response = await reader.ReadLineAsync();
-            Debug.WriteLine($"Received handshake response: {response}");
+            _writer?.Dispose();
+            _reader?.Dispose();
+            _stream?.Dispose();
+            _client?.Close();
+            _client?.Dispose();
         }
     }
 }
