@@ -8,6 +8,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Network;
 
@@ -106,10 +107,11 @@ namespace WinStream
         {
             UpdateUI(false);
             progressBar.Visibility = Visibility.Visible;
+            var cts = new CancellationTokenSource();
 
             try
             {
-                var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync();
+                var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync(cts.Token);
                 UpdateDeviceList(discoveredDevices);
                 searchButton.Content = $"Devices Updated ({DeviceList.Count})";
             }
@@ -124,6 +126,7 @@ namespace WinStream
                 UpdateUI(true);
             }
         }
+
 
         private void ExpandToggle_Click(object sender, RoutedEventArgs e)
         {
