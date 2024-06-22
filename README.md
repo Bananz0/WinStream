@@ -19,7 +19,7 @@ WinStream creates a virtual audio device on your Windows system, acting as a bri
 
 ### Installation
 
-1. Download the latest release from the [Releases](https://github.com/yourusername/WinStream/releases) page.
+1. Download the latest release from the [Releases](https://github.com/bananz0/WinStream/releases) page.
 2. Run the installer and follow the on-screen instructions.
 3. Restart your computer to ensure all components are properly initialized.
 
