@@ -46,7 +46,7 @@ WinStream creates a virtual audio device on your Windows system, acting as a bri
 
 ### Building from Source
 
-1. Clone the repository: `git clone https://github.com/yourusername/WinStream.git`
+1. Clone the repository: `git clone https://github.com/bananz0/WinStream.git`
 2. Open the solution in Visual Studio 2019 or later.
 3. Build the solution in Release mode.
 4. The driver components require the Windows Driver Kit (WDK) to compile.
@@ -54,6 +54,34 @@ WinStream creates a virtual audio device on your Windows system, acting as a bri
 ### Contributing
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for more information on how to get involved.
+
+#### Completed:
+- [x] Basic UI setup
+- [x] AirPlay device discovery implementation
+
+#### In Progress:
+- [ ] AirPlay connection authentication
+- [ ] Audio streaming to AirPlay devices
+
+#### TODO:
+- [ ] Develop Windows audio driver for virtual audio device
+- [ ] Implement volume control integration with Windows
+- [ ] Add error handling and recovery mechanisms
+- [ ] Optimize for low latency streaming
+- [ ] Implement RTP packet creation and sending
+- [ ] Handle RTCP (RTP Control Protocol) for quality control
+- [ ] Add support for multiple simultaneous AirPlay receivers
+- [ ] Create installer for easy deployment
+- [ ] Write comprehensive documentation and user guide
+- [ ] Implement automatic updates mechanism
+- [ ] Add logging system for troubleshooting
+- [ ] Conduct thorough testing across various Windows versions and AirPlay devices
+- [ ] Optimize UI for better user experience
+- [ ] Implement settings persistence between sessions
+
+### Contributing
+
+We welcome contributions! If you'd like to help with any of the TODO items or have other improvements in mind, please see our [Contributing Guidelines](CONTRIBUTING.md) for more information on how to get involved.
 
 ### Acknowledgements
 
