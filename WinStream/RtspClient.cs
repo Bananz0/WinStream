@@ -31,9 +31,19 @@ namespace WinStream.Network
             _reader = new StreamReader(_stream);
             _cSeq = 0;
 
-            // Get local IP address
+            // Get local IP address and normalize it
             var localEndPoint = (IPEndPoint)_client.Client.LocalEndPoint;
-            LocalIp = localEndPoint.Address.ToString();
+            var localIpRaw = localEndPoint.Address.ToString();
+            
+            // Remove IPv6-mapped IPv4 prefix if present (::ffff:192.168.1.1 -> 192.168.1.1)
+            if (localIpRaw.StartsWith("::ffff:"))
+            {
+                LocalIp = localIpRaw.Substring(7);
+            }
+            else
+            {
+                LocalIp = localIpRaw;
+            }
 
             // Generate Client-Instance
             _clientInstance = GenerateClientInstance();
@@ -108,10 +118,16 @@ namespace WinStream.Network
             return await SendRequest(request);
         }
 
-        public async Task<string> SendSetup(string target, int clientRtpPort, int controlPort, int timingPort)
+        public async Task<string> SendSetup(string target, int controlPort, int timingPort)
         {
             var headers = GetCommonHeaders();
-            headers.Add("Transport", $"RTP/AVP/UDP;unicast;client_port={clientRtpPort}");
+            // AirPlay requires specific transport parameters:
+            // - RTP/AVP/UDP for UDP transport
+            // - unicast mode
+            // - interleaved for data channel
+            // - mode=record for streaming to device
+            // - control_port and timing_port for RTCP control and timing sync
+            headers.Add("Transport", $"RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port={controlPort};timing_port={timingPort}");
             string request = BuildRequest("SETUP", target, headers);
             var response = await SendRequest(request);
             ParseTransport(response);

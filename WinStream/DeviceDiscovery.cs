@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Zeroconf;
@@ -83,8 +85,9 @@ namespace WinStream.Network
                     AirPlayVersion = GetTxtRecordValue(host, "srcvers"),
                     SerialNumber = GetTxtRecordValue(host, "serialNumber"),
                     PublicCUAirPlayPairingIdentity = GetTxtRecordValue(host, "pi"),
-                    PublicCUSystemPairingIdentity = GetTxtRecordValue(host, "psi"),
+                    PublicCUSystemPairingIdentity =  GetTxtRecordValue(host, "psi"),
                     PublicKey = GetTxtRecordValue(host, "pk"),
+                    RsaPublicKey = ParseRsaPublicKey(GetTxtRecordValue(host, "pk")),
                     HouseholdID = GetTxtRecordValue(host, "hmid"),
                     GroupUUID = GetTxtRecordValue(host, "gid"),
                     IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
@@ -188,6 +191,78 @@ namespace WinStream.Network
         {
             var airplayHost = airplayResults.FirstOrDefault(h => h.IPAddresses.Contains(raopHost.IPAddresses.FirstOrDefault()));
             return airplayHost?.DisplayName.Split('@').FirstOrDefault() ?? raopHost.DisplayName;
+        }
+
+        private static RSAParameters? ParseRsaPublicKey(string base64PublicKey)
+        {
+            if (string.IsNullOrEmpty(base64PublicKey))
+            {
+                return null;
+            }
+
+            try
+            {
+                // The pk field contains a base64-encoded public key
+                var publicKeyBytes = Convert.FromBase64String(base64PublicKey);
+                Debug.WriteLine($"Raw public key length: {publicKeyBytes.Length} bytes");
+                
+                // Check if this is an Ed25519/Curve25519 key (32 bytes) - AirPlay 2 devices
+                // Ed25519 public keys are exactly 32 bytes
+                if (publicKeyBytes.Length == 32)
+                {
+                    Debug.WriteLine("Detected Ed25519/Curve25519 public key (32 bytes) - this is an AirPlay 2 device");
+                    Logger.LogMessage("Device uses Ed25519 public key (AirPlay 2). RSA encryption not supported for this device.", "authentication");
+                    // Return null for RSA since this device uses Ed25519, not RSA
+                    // AirPlay 2 devices require HomeKit pairing protocol instead of RSA encryption
+                    return null;
+                }
+                
+                // RSA keys are typically 256+ bytes for 2048-bit keys
+                if (publicKeyBytes.Length < 128)
+                {
+                    Debug.WriteLine($"Key too short for RSA ({publicKeyBytes.Length} bytes). Likely not an RSA key.");
+                    Logger.LogMessage($"Public key is {publicKeyBytes.Length} bytes - not an RSA key", "authentication");
+                    return null;
+                }
+                
+                using var rsa = RSA.Create();
+                
+                // Try different import methods for RSA keys
+                
+                // Method 1: Try RSAPublicKey format (PKCS#1 public key)
+                try
+                {
+                    rsa.ImportRSAPublicKey(publicKeyBytes, out _);
+                    Debug.WriteLine("Successfully parsed RSA key using ImportRSAPublicKey (PKCS#1)");
+                    Logger.LogMessage("Successfully parsed RSA public key using PKCS#1 format", "authentication");
+                    return rsa.ExportParameters(false);
+                }
+                catch (Exception ex1)
+                {
+                    Debug.WriteLine($"PKCS#1 import failed: {ex1.Message}");
+                    
+                    // Method 2: Try SubjectPublicKeyInfo format (X.509)
+                    try
+                    {
+                        rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
+                        Debug.WriteLine("Successfully parsed RSA key using ImportSubjectPublicKeyInfo (X.509)");
+                        Logger.LogMessage("Successfully parsed RSA public key using X.509 format", "authentication");
+                        return rsa.ExportParameters(false);
+                    }
+                    catch (Exception ex2)
+                    {
+                        Debug.WriteLine($"X.509 import failed: {ex2.Message}");
+                        Logger.LogMessage($"Failed to parse as RSA key - PKCS#1: {ex1.Message}, X.509: {ex2.Message}", "authentication");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to decode public key: {ex.Message}");
+                Logger.LogMessage($"Base64 decode failed: {ex.Message}", "authentication");
+            }
+            
+            return null;
         }
     }
 }

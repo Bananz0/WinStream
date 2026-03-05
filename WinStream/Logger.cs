@@ -13,5 +13,14 @@ namespace WinStream.Network
             File.AppendAllText(logFilePath, $"{DateTime.Now}: {ex}{Environment.NewLine}");
             Debug.WriteLine($"Exception logged to file: {logFilePath}");
         }
+
+        public static void LogMessage(string message, string category = "general")
+        {
+            var logFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinStream", "Logs", $"{category}.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath));
+            var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
+            File.AppendAllText(logFilePath, logEntry);
+            Debug.WriteLine($"[{category}] {message}");
+        }
     }
 }

@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Network;
@@ -18,6 +17,7 @@ namespace WinStream
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
         private DispatcherTimer scanTimer;
+        private AirPlayConnectionResult _currentConnection;
 
         public MainWindow()
         {
@@ -79,20 +79,52 @@ namespace WinStream
                     Debug.WriteLine($"Connecting to {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}");
                     UpdateUI(false);
                     progressRing.Visibility = Visibility.Visible;
-                    statusTextBlock.Text = string.Empty;
+                    statusTextBlock.Text = "Connecting...";
 
                     try
                     {
-                        using var rsaPublicKey = RSA.Create();
-                        await DeviceConnection.ConnectToAirPlayServer(deviceInfo.IPAddress, deviceInfo.Port, rsaPublicKey);
-                        statusTextBlock.Text = "Connected successfully.";
-                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
+                        // Stop any existing streaming session
+                        if (_currentConnection?.AudioSession != null)
+                        {
+                            statusTextBlock.Text = "Stopping previous session...";
+                            await DeviceConnection.StopStreamingAsync();
+                            audioSourceTextBlock.Text = "Audio source: not streaming";
+                        }
+
+                        // Connect and start streaming
+                        statusTextBlock.Text = "Establishing connection...";
+                        var result = await DeviceConnection.ConnectAndStreamAsync(deviceInfo, startStreaming: true);
+                        _currentConnection = result;
+                        
+                        if (result.Success)
+                        {
+                            if (result.AudioSession?.IsStreaming == true)
+                            {
+                                statusTextBlock.Text = "Streaming audio";
+                                statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
+                                button.Content = "Disconnect";
+                                audioSourceTextBlock.Text = $"Audio source: {result.AudioSession.CaptureDeviceName}";
+                            }
+                            else
+                            {
+                                statusTextBlock.Text = "Connected (audio capture unavailable)";
+                                statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Orange);
+                                audioSourceTextBlock.Text = "Audio source: capture failed";
+                            }
+                        }
+                        else
+                        {
+                            statusTextBlock.Text = $"Failed: {result.Message}";
+                            statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
+                            audioSourceTextBlock.Text = "Audio source: not streaming";
+                        }
                     }
                     catch (Exception ex)
                     {
-                        statusTextBlock.Text = "Connection failed.";
+                        statusTextBlock.Text = $"Error: {ex.Message}";
                         statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
                         Debug.WriteLine($"Connection error: {ex.Message}");
+                        Logger.LogException(ex);
                     }
                     finally
                     {

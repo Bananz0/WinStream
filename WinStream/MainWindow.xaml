@@ -11,6 +11,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <!-- Search and Filter Panel -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Left" Margin="10">
@@ -64,5 +65,9 @@
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
+        <!-- Audio source status bar -->
+        <Border Grid.Row="2" BorderThickness="0,1,0,0" Padding="10,6">
+            <TextBlock x:Name="audioSourceTextBlock" Text="Audio source: not streaming" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        </Border>
     </Grid>
 </Window>
