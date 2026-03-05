@@ -1,6 +1,5 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections.Generic;
@@ -9,258 +8,193 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.Graphics;
 using WinStream.Network;
 
 namespace WinStream
 {
     public sealed partial class MainWindow : Window
     {
-        public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
-        private DispatcherTimer scanTimer;
+        public ObservableCollection<DeviceInfo> DeviceList { get; } = new();
+        private DispatcherTimer _scanTimer;
         private AirPlayConnectionResult _currentConnection;
 
         public MainWindow()
         {
             InitializeComponent();
-            Debug.WriteLine("Application started, UI initialized.");
 
-            InitializeTimer();
+            // Mica material (Windows 11+)
+            if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
+                SystemBackdrop = new MicaBackdrop();
+
+            // Initial window size
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+            var appWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
+            appWindow.Resize(new SizeInt32(540, 680));
+
+            InitializeScanTimer();
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
-        private void InitializeTimer()
+        private void InitializeScanTimer()
         {
-            scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            scanTimer.Tick += async (s, e) => await DiscoverAndDisplayDevicesAsync();
-            scanTimer.Start();
-        }
-
-        private async void SearchButton_Click(object sender, RoutedEventArgs e)
-        {
-            Debug.WriteLine("Search button clicked.");
-            await DiscoverAndDisplayDevicesAsync();
+            _scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _scanTimer.Tick += async (_, _) => await DiscoverAndDisplayDevicesAsync();
+            _scanTimer.Start();
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
-        {
-            Debug.WriteLine("Refresh button clicked.");
-            await DiscoverAndDisplayDevicesAsync();
-        }
+            => await DiscoverAndDisplayDevicesAsync();
 
         private void FilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            ApplyFilter(filterTextBox.Text.ToLower());
-        }
+            => ApplyFilter(filterTextBox.Text.ToLowerInvariant());
 
         private void ApplyFilter(string filterText)
         {
-            if (string.IsNullOrWhiteSpace(filterText))
-            {
-                devicesList.ItemsSource = DeviceList;
-            }
-            else
-            {
-                devicesList.ItemsSource = DeviceList.Where(d =>
-                    d.DisplayName.ToLower().Contains(filterText) ||
-                    d.IPAddress.ToLower().Contains(filterText));
-            }
+            devicesRepeater.ItemsSource = string.IsNullOrWhiteSpace(filterText)
+                ? DeviceList
+                : (System.Collections.IEnumerable)DeviceList.Where(d =>
+                    d.DisplayName.ToLowerInvariant().Contains(filterText) ||
+                    d.IPAddress.ToLowerInvariant().Contains(filterText));
         }
 
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
+            if (sender is not Button { DataContext: DeviceInfo deviceInfo })
+                return;
+
+            // Disconnect if already streaming
+            if (deviceInfo.IsStreaming)
             {
-                var container = (button.Parent as FrameworkElement)?.Parent as Grid;
-                if (container != null)
+                deviceInfo.StatusText = "Disconnecting...";
+                await DeviceConnection.StopStreamingAsync();
+                deviceInfo.IsStreaming = false;
+                deviceInfo.StatusText = string.Empty;
+                _currentConnection = null;
+                UpdateStreamingStatus(null);
+                return;
+            }
+
+            UpdateUI(false);
+            deviceInfo.IsConnecting = true;
+            deviceInfo.StatusText = "Connecting...";
+
+            try
+            {
+                // Stop any existing session first
+                if (_currentConnection?.AudioSession != null)
                 {
-                    var progressRing = container.FindName("connectProgressRing") as ProgressRing;
-                    var statusTextBlock = container.FindName("connectStatusTextBlock") as TextBlock;
-
-                    Debug.WriteLine($"Connecting to {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}");
-                    UpdateUI(false);
-                    progressRing.Visibility = Visibility.Visible;
-                    statusTextBlock.Text = "Connecting...";
-
-                    try
+                    await DeviceConnection.StopStreamingAsync();
+                    foreach (var d in DeviceList)
                     {
-                        // Stop any existing streaming session
-                        if (_currentConnection?.AudioSession != null)
-                        {
-                            statusTextBlock.Text = "Stopping previous session...";
-                            await DeviceConnection.StopStreamingAsync();
-                            audioSourceTextBlock.Text = "Audio source: not streaming";
-                        }
-
-                        // Connect and start streaming
-                        statusTextBlock.Text = "Establishing connection...";
-                        var result = await DeviceConnection.ConnectAndStreamAsync(deviceInfo, startStreaming: true);
-                        _currentConnection = result;
-                        
-                        if (result.Success)
-                        {
-                            if (result.AudioSession?.IsStreaming == true)
-                            {
-                                statusTextBlock.Text = "Streaming audio";
-                                statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
-                                button.Content = "Disconnect";
-                                audioSourceTextBlock.Text = $"Audio source: {result.AudioSession.CaptureDeviceName}";
-                            }
-                            else
-                            {
-                                statusTextBlock.Text = "Connected (audio capture unavailable)";
-                                statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Orange);
-                                audioSourceTextBlock.Text = "Audio source: capture failed";
-                            }
-                        }
-                        else
-                        {
-                            statusTextBlock.Text = $"Failed: {result.Message}";
-                            statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
-                            audioSourceTextBlock.Text = "Audio source: not streaming";
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        statusTextBlock.Text = $"Error: {ex.Message}";
-                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
-                        Debug.WriteLine($"Connection error: {ex.Message}");
-                        Logger.LogException(ex);
-                    }
-                    finally
-                    {
-                        progressRing.Visibility = Visibility.Collapsed;
-                        UpdateUI(true);
+                        d.IsStreaming = false;
+                        d.StatusText = string.Empty;
                     }
                 }
+
+                var result = await DeviceConnection.ConnectAndStreamAsync(deviceInfo, startStreaming: true);
+                _currentConnection = result;
+
+                if (result.Success)
+                {
+                    if (result.AudioSession?.IsStreaming == true)
+                    {
+                        deviceInfo.IsStreaming = true;
+                        deviceInfo.StatusText = string.Empty;
+                        UpdateStreamingStatus(result.AudioSession.CaptureDeviceName);
+                    }
+                    else
+                    {
+                        deviceInfo.StatusText = "Connected";
+                    }
+                }
+                else
+                {
+                    deviceInfo.StatusText = "Failed";
+                    Logger.LogMessage(result.Message, "connection");
+                }
+            }
+            catch (Exception ex)
+            {
+                deviceInfo.StatusText = "Error";
+                Logger.LogException(ex);
+            }
+            finally
+            {
+                deviceInfo.IsConnecting = false;
+                UpdateUI(true);
             }
         }
 
         private async Task DiscoverAndDisplayDevicesAsync()
         {
             UpdateUI(false);
-            progressBar.Visibility = Visibility.Visible;
-            var cts = new CancellationTokenSource();
+            scanProgressRing.IsActive = true;
 
             try
             {
+                using var cts = new CancellationTokenSource();
                 var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync(cts.Token);
                 UpdateDeviceList(discoveredDevices);
-                searchButton.Content = $"Devices Updated ({DeviceList.Count})";
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error during device discovery: {ex.Message}");
-                searchButton.Content = "Discovery Error";
+                Debug.WriteLine($"Discovery error: {ex.Message}");
             }
             finally
             {
-                progressBar.Visibility = Visibility.Collapsed;
+                scanProgressRing.IsActive = false;
                 UpdateUI(true);
-            }
-        }
-
-
-        private void ExpandToggle_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is ToggleButton toggleButton)
-            {
-                var parentGrid = toggleButton.Parent as Grid;
-                if (parentGrid != null)
-                {
-                    var expandedInfo = parentGrid.FindName("ExpandedInfo") as StackPanel;
-                    if (expandedInfo != null)
-                    {
-                        expandedInfo.Visibility = toggleButton.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-                    }
-                }
             }
         }
 
         private void UpdateDeviceList(List<DeviceInfo> discoveredDevices)
         {
-            var currentDevices = new HashSet<string>(discoveredDevices.Select(d => d.IPAddress));
+            var currentAddresses = new System.Collections.Generic.HashSet<string>(
+                discoveredDevices.Select(d => d.IPAddress));
 
             foreach (var device in DeviceList.ToList())
             {
-                if (!currentDevices.Contains(device.IPAddress))
-                {
+                if (!currentAddresses.Contains(device.IPAddress))
                     DeviceList.Remove(device);
-                }
             }
 
-            foreach (var discoveredDevice in discoveredDevices)
+            foreach (var discovered in discoveredDevices)
             {
-                var existingDevice = DeviceList.FirstOrDefault(d => d.IPAddress == discoveredDevice.IPAddress);
-                if (existingDevice != null)
+                var existing = DeviceList.FirstOrDefault(d => d.IPAddress == discovered.IPAddress);
+                if (existing != null)
                 {
-                    existingDevice.DisplayName = discoveredDevice.DisplayName;
-                    existingDevice.Manufacturer = discoveredDevice.Manufacturer;
-                    existingDevice.Model = discoveredDevice.Model;
-                    existingDevice.IPAddress = discoveredDevice.IPAddress;
-                    existingDevice.ToolTipText = CreateTooltipSummary(existingDevice);
+                    existing.DisplayName = discovered.DisplayName;
+                    existing.Manufacturer = discovered.Manufacturer;
+                    existing.Model = discovered.Model;
                 }
                 else
                 {
-                    discoveredDevice.ToolTipText = CreateTooltipSummary(discoveredDevice);
-                    DeviceList.Add(discoveredDevice);
+                    DeviceList.Add(discovered);
                 }
             }
-
-        }
-        private string CreateTooltipSummary(DeviceInfo device)
-        {
-            return $"Device Name: {device.DeviceName}\n" +
-                   $"IP Address: {device.IPAddress}\n" +
-                   $"Port: {device.Port}\n" +
-                   $"Manufacturer: {device.Manufacturer}\n" +
-                   $"Model: {device.Model}\n" +
-                   $"Firmware Version: {device.FirmwareVersion}\n" +
-                   $"OS Version: {device.OSVersion}\n" +
-                   $"Bluetooth Address: {device.BluetoothAddress}\n" +
-                   $"Device ID: {device.DeviceID}\n" +
-                   $"Protocol Version: {device.ProtocolVersion}\n" +
-                   $"AirPlay Version: {device.AirPlayVersion}\n" +
-                   $"Serial Number: {device.SerialNumber}\n" +
-                   $"Public CU AirPlay Pairing Identity: {device.PublicCUAirPlayPairingIdentity}\n" +
-                   $"Public CU System Pairing Identity: {device.PublicCUSystemPairingIdentity}\n" +
-                   $"Public Key: {device.PublicKey}\n" +
-                   $"Household ID: {device.HouseholdID}\n" +
-                   $"Group UUID: {device.GroupUUID}\n" +
-                   $"Is Group Leader: {device.IsGroupLeader}\n" +
-                   $"Required Sender Features: {device.RequiredSenderFeatures}\n" +
-                   $"System Flags: {device.SystemFlags}";
         }
 
-        private async void InfoButton_Click(object sender, RoutedEventArgs e)
+        private void UpdateStreamingStatus(string captureDeviceName)
         {
-            if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
+            if (captureDeviceName != null)
             {
-                var dialog = new ContentDialog()
-                {
-                    Title = deviceInfo.DisplayName,
-                    Content = new ScrollViewer
-                    {
-                        Content = new TextBlock
-                        {
-                            Text = deviceInfo.ToolTipText,
-                            TextWrapping = TextWrapping.Wrap
-                        },
-                        VerticalScrollMode = ScrollMode.Auto,
-                        HorizontalScrollMode = ScrollMode.Disabled
-                    },
-                    CloseButtonText = "Close"
-                };
-
-                dialog.XamlRoot = this.Content.XamlRoot;
-                await dialog.ShowAsync();
+                audioSourceTextBlock.Text = $"Audio source: {captureDeviceName}";
+                streamingDot.Visibility = Visibility.Visible;
+                streamingLabel.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                audioSourceTextBlock.Text = "Audio source: not streaming";
+                streamingDot.Visibility = Visibility.Collapsed;
+                streamingLabel.Visibility = Visibility.Collapsed;
             }
         }
 
         private void UpdateUI(bool isEnabled)
         {
-            searchButton.IsEnabled = isEnabled;
             refreshButton.IsEnabled = isEnabled;
         }
     }
 }
-
