@@ -11,8 +11,14 @@ namespace WinStream.Network
 {
     public static class DeviceDiscovery
     {
+        private static readonly TimeSpan DefaultDiscoveryWindow = TimeSpan.FromMilliseconds(1800);
+        private const string DiscoveryWindowMsEnvVar = "WINSTREAM_DISCOVERY_WINDOW_MS";
+
         private static readonly Dictionary<string, DeviceInfo> Devices = new();
         private static readonly Dictionary<string, int> DeviceMissCounts = new();
+        private static readonly Dictionary<string, RSAParameters?> ParsedRsaKeyCache = new();
+        private static readonly HashSet<string> LoggedUnsupportedKeyFingerprints = new();
+        private static readonly object KeyCacheLock = new();
         private static CancellationTokenSource _cts;
 
         public static event EventHandler<List<DeviceInfo>> DevicesUpdated;
@@ -62,38 +68,67 @@ namespace WinStream.Network
             _cts?.Cancel();
         }
 
+        public static List<DeviceInfo> GetKnownDevicesSnapshot()
+        {
+            return Devices.Values.ToList();
+        }
+
         internal static async Task<List<DeviceInfo>> DiscoverDevicesAsync(CancellationToken cancellationToken)
         {
             try
             {
-                var raopResults = await ZeroconfResolver.ResolveAsync("_raop._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
-                var airplayResults = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+                var discoveryWindow = ResolveDiscoveryWindow();
+                var raopTask = SafeResolveAsync("_raop._tcp.local.", discoveryWindow, cancellationToken);
+                var airplayTask = SafeResolveAsync("_airplay._tcp.local.", discoveryWindow, cancellationToken);
+                await Task.WhenAll(raopTask, airplayTask);
 
-                var currentDevices = raopResults.Select(host => new DeviceInfo
+                var raopResults = raopTask.Result;
+                var airplayResults = airplayTask.Result;
+
+                var currentDevices = new List<DeviceInfo>();
+                foreach (var host in raopResults)
                 {
-                    DisplayName = ExtractDeviceName(host, airplayResults),
-                    IPAddress = host.IPAddresses.FirstOrDefault(),
-                    Port = host.Services.FirstOrDefault().Value.Port,
-                    ToolTipText = $"IP Address: {host.IPAddresses.FirstOrDefault()}",
-                    Manufacturer = GetTxtRecordValue(host, "manufacturer"),
-                    Model = GetTxtRecordValue(host, "model"),
-                    FirmwareVersion = GetTxtRecordValue(host, "fv"),
-                    OSVersion = GetTxtRecordValue(host, "osvers"),
-                    BluetoothAddress = GetTxtRecordValue(host, "btaddr"),
-                    DeviceID = GetTxtRecordValue(host, "deviceid"),
-                    ProtocolVersion = GetTxtRecordValue(host, "protovers"),
-                    AirPlayVersion = GetTxtRecordValue(host, "srcvers"),
-                    SerialNumber = GetTxtRecordValue(host, "serialNumber"),
-                    PublicCUAirPlayPairingIdentity = GetTxtRecordValue(host, "pi"),
-                    PublicCUSystemPairingIdentity =  GetTxtRecordValue(host, "psi"),
-                    PublicKey = GetTxtRecordValue(host, "pk"),
-                    RsaPublicKey = ParseRsaPublicKey(GetTxtRecordValue(host, "pk")),
-                    HouseholdID = GetTxtRecordValue(host, "hmid"),
-                    GroupUUID = GetTxtRecordValue(host, "gid"),
-                    IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
-                    RequiredSenderFeatures = TryParseLong(GetTxtRecordValue(host, "rsf")),
-                    SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags"))
-                }).ToList();
+                    var ipAddress = host.IPAddresses?.FirstOrDefault();
+                    if (string.IsNullOrWhiteSpace(ipAddress))
+                    {
+                        continue;
+                    }
+
+                    var service = host.Services?.FirstOrDefault().Value;
+                    if (service == null || service.Port <= 0)
+                    {
+                        continue;
+                    }
+
+                    var publicKey = GetTxtRecordValue(host, "pk");
+                    currentDevices.Add(new DeviceInfo
+                    {
+                        DisplayName = ExtractDeviceName(host, airplayResults),
+                        IPAddress = ipAddress,
+                        Port = service.Port,
+                        ToolTipText = $"IP Address: {ipAddress}",
+                        Manufacturer = GetTxtRecordValue(host, "manufacturer"),
+                        Model = GetTxtRecordValue(host, "model"),
+                        FirmwareVersion = GetTxtRecordValue(host, "fv"),
+                        OSVersion = GetTxtRecordValue(host, "osvers"),
+                        BluetoothAddress = GetTxtRecordValue(host, "btaddr"),
+                        DeviceID = GetTxtRecordValue(host, "deviceid"),
+                        ProtocolVersion = GetTxtRecordValue(host, "protovers"),
+                        AirPlayVersion = GetTxtRecordValue(host, "srcvers"),
+                        SerialNumber = GetTxtRecordValue(host, "serialNumber"),
+                        PublicCUAirPlayPairingIdentity = GetTxtRecordValue(host, "pi"),
+                        PublicCUSystemPairingIdentity = GetTxtRecordValue(host, "psi"),
+                        PublicKey = publicKey,
+                        RsaPublicKey = ParseRsaPublicKey(publicKey),
+                        SupportedCodecs = GetTxtRecordValue(host, "cn"),
+                        EncryptionTypes = GetTxtRecordValue(host, "et"),
+                        HouseholdID = GetTxtRecordValue(host, "hmid"),
+                        GroupUUID = GetTxtRecordValue(host, "gid"),
+                        IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
+                        RequiredSenderFeatures = TryParseLong(GetTxtRecordValue(host, "rsf")),
+                        SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags"))
+                    });
+                }
 
                 ProcessDiscoveredDevices(currentDevices);
                 return Devices.Values.ToList();
@@ -101,8 +136,61 @@ namespace WinStream.Network
             catch (OperationCanceledException)
             {
                 Console.WriteLine("Device discovery operation was canceled due to timeout.");
-                return new List<DeviceInfo>(); // or handle accordingly
+                return GetKnownDevicesSnapshot();
             }
+            catch (Exception ex)
+            {
+                Logger.LogMessage($"Discovery failed: {ex.Message}", "discovery");
+                return GetKnownDevicesSnapshot();
+            }
+        }
+
+        private static async Task<IReadOnlyList<IZeroconfHost>> SafeResolveAsync(string serviceType, TimeSpan window, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var resolveTask = ZeroconfResolver.ResolveAsync(serviceType, window);
+                if (!cancellationToken.CanBeCanceled)
+                {
+                    return await resolveTask;
+                }
+
+                var cancelTask = Task.Delay(Timeout.Infinite, cancellationToken);
+                var completed = await Task.WhenAny(resolveTask, cancelTask);
+                if (completed == cancelTask)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                return await resolveTask;
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                // Zeroconf may cancel internally when no response is received in the
+                // discovery window. Treat this as "no results" instead of hard failure.
+                return Array.Empty<IZeroconfHost>();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogMessage($"Resolve failed for {serviceType}: {ex.Message}", "discovery");
+                return Array.Empty<IZeroconfHost>();
+            }
+        }
+
+        private static TimeSpan ResolveDiscoveryWindow()
+        {
+            var raw = Environment.GetEnvironmentVariable(DiscoveryWindowMsEnvVar);
+            if (int.TryParse(raw, out var ms) && ms >= 250 && ms <= 10000)
+            {
+                return TimeSpan.FromMilliseconds(ms);
+            }
+
+            return DefaultDiscoveryWindow;
         }
 
         private static void ProcessDiscoveredDevices(List<DeviceInfo> currentDevices)
@@ -114,7 +202,6 @@ namespace WinStream.Network
                 if (!Devices.ContainsKey(device.IPAddress))
                 {
                     Devices[device.IPAddress] = device;
-                    PrintDeviceInfo(device); // Print device info when it's first discovered
                 }
                 DeviceMissCounts[device.IPAddress] = 0; // Reset miss count
             }
@@ -178,6 +265,8 @@ namespace WinStream.Network
             Console.WriteLine($"Public CU AirPlay Pairing Identity: {device.PublicCUAirPlayPairingIdentity}");
             Console.WriteLine($"Public CU System Pairing Identity: {device.PublicCUSystemPairingIdentity}");
             Console.WriteLine($"Public Key: {device.PublicKey}");
+            Console.WriteLine($"Supported Codecs (cn): {device.SupportedCodecs}");
+            Console.WriteLine($"Encryption Types (et): {device.EncryptionTypes}");
             Console.WriteLine($"Household ID: {device.HouseholdID}");
             Console.WriteLine($"Group UUID: {device.GroupUUID}");
             Console.WriteLine($"Is Group Leader: {device.IsGroupLeader}");
@@ -200,6 +289,14 @@ namespace WinStream.Network
                 return null;
             }
 
+            lock (KeyCacheLock)
+            {
+                if (ParsedRsaKeyCache.TryGetValue(base64PublicKey, out var cached))
+                {
+                    return cached;
+                }
+            }
+
             try
             {
                 // The pk field contains a base64-encoded public key
@@ -210,19 +307,21 @@ namespace WinStream.Network
                 // Ed25519 public keys are exactly 32 bytes
                 if (publicKeyBytes.Length == 32)
                 {
-                    Debug.WriteLine("Detected Ed25519/Curve25519 public key (32 bytes) - this is an AirPlay 2 device");
-                    Logger.LogMessage("Device uses Ed25519 public key (AirPlay 2). RSA encryption not supported for this device.", "authentication");
+                    Debug.WriteLine("Detected non-RSA public key (32 bytes), likely AirPlay 2.");
+                    LogUnsupportedKeyOnce(base64PublicKey,
+                        "Device uses non-RSA public key (32 bytes), likely AirPlay 2. WinStream will use unencrypted mode.");
                     // Return null for RSA since this device uses Ed25519, not RSA
                     // AirPlay 2 devices require HomeKit pairing protocol instead of RSA encryption
-                    return null;
+                    return CacheRsaPublicKeyResult(base64PublicKey, null);
                 }
                 
                 // RSA keys are typically 256+ bytes for 2048-bit keys
                 if (publicKeyBytes.Length < 128)
                 {
-                    Debug.WriteLine($"Key too short for RSA ({publicKeyBytes.Length} bytes). Likely not an RSA key.");
-                    Logger.LogMessage($"Public key is {publicKeyBytes.Length} bytes - not an RSA key", "authentication");
-                    return null;
+                    Debug.WriteLine($"Detected non-RSA public key ({publicKeyBytes.Length} bytes).");
+                    LogUnsupportedKeyOnce(base64PublicKey,
+                        $"Device uses non-RSA public key ({publicKeyBytes.Length} bytes). WinStream will use unencrypted mode.");
+                    return CacheRsaPublicKeyResult(base64PublicKey, null);
                 }
                 
                 using var rsa = RSA.Create();
@@ -235,7 +334,7 @@ namespace WinStream.Network
                     rsa.ImportRSAPublicKey(publicKeyBytes, out _);
                     Debug.WriteLine("Successfully parsed RSA key using ImportRSAPublicKey (PKCS#1)");
                     Logger.LogMessage("Successfully parsed RSA public key using PKCS#1 format", "authentication");
-                    return rsa.ExportParameters(false);
+                    return CacheRsaPublicKeyResult(base64PublicKey, rsa.ExportParameters(false));
                 }
                 catch (Exception ex1)
                 {
@@ -247,22 +346,59 @@ namespace WinStream.Network
                         rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
                         Debug.WriteLine("Successfully parsed RSA key using ImportSubjectPublicKeyInfo (X.509)");
                         Logger.LogMessage("Successfully parsed RSA public key using X.509 format", "authentication");
-                        return rsa.ExportParameters(false);
+                        return CacheRsaPublicKeyResult(base64PublicKey, rsa.ExportParameters(false));
                     }
                     catch (Exception ex2)
                     {
                         Debug.WriteLine($"X.509 import failed: {ex2.Message}");
-                        Logger.LogMessage($"Failed to parse as RSA key - PKCS#1: {ex1.Message}, X.509: {ex2.Message}", "authentication");
+                        LogUnsupportedKeyOnce(base64PublicKey,
+                            $"Device key is not RSA (PKCS#1 and X.509 import failed). WinStream will use unencrypted mode.");
                     }
                 }
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Failed to decode public key: {ex.Message}");
-                Logger.LogMessage($"Base64 decode failed: {ex.Message}", "authentication");
+                LogUnsupportedKeyOnce(base64PublicKey, $"Public key decode failed: {ex.Message}");
             }
             
-            return null;
+            return CacheRsaPublicKeyResult(base64PublicKey, null);
+        }
+
+        private static RSAParameters? CacheRsaPublicKeyResult(string base64PublicKey, RSAParameters? result)
+        {
+            lock (KeyCacheLock)
+            {
+                ParsedRsaKeyCache[base64PublicKey] = result;
+            }
+
+            return result;
+        }
+
+        private static void LogUnsupportedKeyOnce(string base64PublicKey, string message)
+        {
+            string fingerprint;
+            try
+            {
+                var normalizedKeyBytes = Convert.FromBase64String(base64PublicKey);
+                using var sha = SHA256.Create();
+                var hash = sha.ComputeHash(normalizedKeyBytes);
+                fingerprint = Convert.ToHexString(hash);
+            }
+            catch
+            {
+                fingerprint = base64PublicKey;
+            }
+
+            lock (KeyCacheLock)
+            {
+                if (!LoggedUnsupportedKeyFingerprints.Add(fingerprint))
+                {
+                    return;
+                }
+            }
+
+            Logger.LogMessage(message, "authentication");
         }
     }
 }

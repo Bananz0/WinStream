@@ -98,7 +98,8 @@
                                                FontSize="12"
                                                VerticalAlignment="Center"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                    <Button Content="{x:Bind ConnectButtonText, Mode=OneWay}"
+                                    <Button Tag="{x:Bind}"
+                                            Content="{x:Bind ConnectButtonText, Mode=OneWay}"
                                             Click="ConnectButton_Click"
                                             Style="{StaticResource AccentButtonStyle}"
                                             MinWidth="90"/>

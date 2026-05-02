@@ -18,6 +18,7 @@ namespace WinStream.Audio
         private readonly IPEndPoint _serverEndpoint;
         private readonly int _framesPerPacket;
         private readonly int _sampleRate;
+        private readonly AudioCodec _audioCodec;
         
         private ushort _sequenceNumber;
         private uint _rtpTimestamp;
@@ -41,7 +42,7 @@ namespace WinStream.Audio
         /// <param name="serverPort">Server audio port from SETUP response</param>
         /// <param name="framesPerPacket">Audio frames per RTP packet (typically 352)</param>
         /// <param name="sampleRate">Audio sample rate (typically 44100)</param>
-        public RtpAudioStreamer(string serverIp, int serverPort, int framesPerPacket = 352, int sampleRate = 44100)
+        public RtpAudioStreamer(string serverIp, int serverPort, int framesPerPacket = 352, int sampleRate = 44100, AudioCodec audioCodec = AudioCodec.AppleLossless)
         {
             _serverEndpoint = new IPEndPoint(IPAddress.Parse(serverIp), serverPort);
             _audioSocket = new UdpClient();
@@ -49,13 +50,14 @@ namespace WinStream.Audio
             
             _framesPerPacket = framesPerPacket;
             _sampleRate = sampleRate;
+            _audioCodec = audioCodec;
             
             // Initialize RTP state
             _sequenceNumber = (ushort)new Random().Next(0, ushort.MaxValue);
             _rtpTimestamp = (uint)new Random().Next(0, int.MaxValue);
             _ssrc = (uint)new Random().Next();
             
-            Logger.LogMessage($"RTP Streamer initialized - Server: {serverIp}:{serverPort}, SSRC: {_ssrc:X8}", "audio");
+            Logger.LogMessage($"RTP Streamer initialized - Server: {serverIp}:{serverPort}, SSRC: {_ssrc:X8}, Codec: {_audioCodec}", "audio");
         }
 
         /// <summary>
@@ -67,41 +69,14 @@ namespace WinStream.Audio
             if (alacData == null || alacData.Length == 0)
                 return;
 
-            // Build RTP packet
-            // RTP Header: 12 bytes + optional ALAC header (4 bytes) + payload
+            // Build RTP packet with ALAC payload (12-byte RTP + 4-byte ALAC header + payload)
             var rtpPacket = new byte[12 + 4 + alacData.Length];
-            int offset = 0;
+            int offset = WriteRtpHeader(rtpPacket, marker: true);
 
-            // Byte 0: V=2, P=0, X=0, CC=0
-            rtpPacket[offset++] = (RTP_VERSION << 6); // 0x80
-
-            // Byte 1: M=1 (marker), PT=96
-            rtpPacket[offset++] = (byte)(0x80 | RTP_PAYLOAD_TYPE); // 0xE0
-
-            // Bytes 2-3: Sequence number (big-endian)
-            rtpPacket[offset++] = (byte)(_sequenceNumber >> 8);
-            rtpPacket[offset++] = (byte)(_sequenceNumber & 0xFF);
-
-            // Bytes 4-7: Timestamp (big-endian)
-            rtpPacket[offset++] = (byte)(_rtpTimestamp >> 24);
-            rtpPacket[offset++] = (byte)(_rtpTimestamp >> 16);
-            rtpPacket[offset++] = (byte)(_rtpTimestamp >> 8);
-            rtpPacket[offset++] = (byte)(_rtpTimestamp & 0xFF);
-
-            // Bytes 8-11: SSRC (big-endian)
-            rtpPacket[offset++] = (byte)(_ssrc >> 24);
-            rtpPacket[offset++] = (byte)(_ssrc >> 16);
-            rtpPacket[offset++] = (byte)(_ssrc >> 8);
-            rtpPacket[offset++] = (byte)(_ssrc & 0xFF);
-
-            // ALAC-specific header (4 bytes) - describes the audio packet
-            // This is the "ALAC specific config" required by AirPlay
             rtpPacket[offset++] = 0x00; // Flags
             rtpPacket[offset++] = 0x00; // Reserved
-            rtpPacket[offset++] = (byte)(_framesPerPacket >> 8); // Frames per packet (high)
-            rtpPacket[offset++] = (byte)(_framesPerPacket & 0xFF); // Frames per packet (low)
-
-            // Copy ALAC payload
+            rtpPacket[offset++] = (byte)(_framesPerPacket >> 8);
+            rtpPacket[offset++] = (byte)(_framesPerPacket & 0xFF);
             Buffer.BlockCopy(alacData, 0, rtpPacket, offset, alacData.Length);
 
             try
@@ -126,9 +101,34 @@ namespace WinStream.Audio
         /// <param name="pcmData">Raw PCM audio data (16-bit stereo)</param>
         public async Task SendPcmPacketAsync(byte[] pcmData)
         {
-            // For now, send PCM directly - some AirPlay receivers accept this
-            // In production, this should be ALAC encoded
-            await SendAudioPacketAsync(pcmData);
+            if (pcmData == null || pcmData.Length == 0)
+            {
+                return;
+            }
+
+            // RTP L16 expects big-endian signed 16-bit PCM.
+            var payload = new byte[pcmData.Length];
+            for (int i = 0; i + 1 < pcmData.Length; i += 2)
+            {
+                payload[i] = pcmData[i + 1];
+                payload[i + 1] = pcmData[i];
+            }
+
+            var rtpPacket = new byte[12 + payload.Length];
+            var headerOffset = WriteRtpHeader(rtpPacket, marker: true);
+            Buffer.BlockCopy(payload, 0, rtpPacket, headerOffset, payload.Length);
+
+            try
+            {
+                await _audioSocket.SendAsync(rtpPacket, rtpPacket.Length);
+                _sequenceNumber++;
+                _rtpTimestamp += (uint)_framesPerPacket;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error sending RTP PCM packet: {ex.Message}");
+                Logger.LogMessage($"RTP PCM send error: {ex.Message}", "audio");
+            }
         }
 
         /// <summary>
@@ -141,7 +141,14 @@ namespace WinStream.Audio
             
             for (int i = 0; i < packetCount; i++)
             {
-                await SendAudioPacketAsync(silence);
+                if (_audioCodec == AudioCodec.AppleLossless)
+                {
+                    await SendAudioPacketAsync(silence);
+                }
+                else
+                {
+                    await SendPcmPacketAsync(silence);
+                }
                 await Task.Delay((_framesPerPacket * 1000) / _sampleRate); // ~8ms per packet
             }
         }
@@ -183,6 +190,24 @@ namespace WinStream.Audio
             _streamingCts?.Dispose();
             _audioSocket?.Close();
             _audioSocket?.Dispose();
+        }
+
+        private int WriteRtpHeader(byte[] buffer, bool marker)
+        {
+            int offset = 0;
+            buffer[offset++] = (RTP_VERSION << 6); // 0x80
+            buffer[offset++] = (byte)((marker ? 0x80 : 0x00) | RTP_PAYLOAD_TYPE);
+            buffer[offset++] = (byte)(_sequenceNumber >> 8);
+            buffer[offset++] = (byte)(_sequenceNumber & 0xFF);
+            buffer[offset++] = (byte)(_rtpTimestamp >> 24);
+            buffer[offset++] = (byte)(_rtpTimestamp >> 16);
+            buffer[offset++] = (byte)(_rtpTimestamp >> 8);
+            buffer[offset++] = (byte)(_rtpTimestamp & 0xFF);
+            buffer[offset++] = (byte)(_ssrc >> 24);
+            buffer[offset++] = (byte)(_ssrc >> 16);
+            buffer[offset++] = (byte)(_ssrc >> 8);
+            buffer[offset++] = (byte)(_ssrc & 0xFF);
+            return offset;
         }
     }
 }

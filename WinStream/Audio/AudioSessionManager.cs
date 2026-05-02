@@ -15,6 +15,7 @@ namespace WinStream.Audio
     {
         // Core components
         private AudioCaptureService _captureService;
+        private Mp3TestAudioSource _mp3TestSource;
         private AlacEncoder _alacEncoder;
         private RtpAudioStreamer _rtpStreamer;
         private TimingService _timingService;
@@ -26,6 +27,7 @@ namespace WinStream.Audio
         private readonly int _controlPort;
         private readonly int _timingPort;
         private readonly int _audioLatency;
+        private readonly AudioCodec _audioCodec;
 
         // Audio configuration
         private const int SAMPLE_RATE = 44100;
@@ -37,17 +39,23 @@ namespace WinStream.Audio
         private bool _isStreaming;
         private CancellationTokenSource _streamingCts;
         private Task _streamingTask;
+        private bool _useMp3TestSource;
+        private string _audioSourceName = "Unknown";
 
         // Audio buffer for smoothing
         private readonly ConcurrentQueue<byte[]> _audioBuffer;
         private readonly int _targetBufferSize = 10; // packets to buffer
+
+        // Test source configuration
+        private const string TestMp3UrlEnvVar = "WINSTREAM_TEST_MP3_URL";
+        private const string DefaultTestMp3Url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
 
         // Events
         public event EventHandler<string> StatusChanged;
         public event EventHandler<Exception> ErrorOccurred;
 
         public bool IsStreaming => _isStreaming;
-        public string CaptureDeviceName => _captureService?.CaptureDeviceName ?? "Unknown";
+        public string CaptureDeviceName => _audioSourceName;
 
         /// <summary>
         /// Creates a new audio session manager
@@ -57,19 +65,21 @@ namespace WinStream.Audio
         /// <param name="controlPort">Control port from SETUP response</param>
         /// <param name="timingPort">Timing port from SETUP response</param>
         /// <param name="audioLatency">Audio latency in samples from RECORD response</param>
-        public AudioSessionManager(string deviceIp, int serverPort, int controlPort, int timingPort, int audioLatency)
+        public AudioSessionManager(string deviceIp, int serverPort, int controlPort, int timingPort, int audioLatency, AudioCodec audioCodec = AudioCodec.AppleLossless)
         {
             _deviceIp = deviceIp;
             _serverPort = serverPort;
             _controlPort = controlPort;
             _timingPort = timingPort;
             _audioLatency = audioLatency;
+            _audioCodec = audioCodec;
 
             _audioBuffer = new ConcurrentQueue<byte[]>();
 
             Logger.LogMessage($"Audio session manager created for {deviceIp}", "session");
             Logger.LogMessage($"  Server port: {serverPort}, Control port: {controlPort}, Timing port: {timingPort}", "session");
             Logger.LogMessage($"  Audio latency: {audioLatency} samples ({(audioLatency * 1000.0 / SAMPLE_RATE):F1}ms)", "session");
+            Logger.LogMessage($"  Audio codec: {_audioCodec}", "session");
         }
 
         /// <summary>
@@ -82,11 +92,18 @@ namespace WinStream.Audio
                 StatusChanged?.Invoke(this, "Initializing audio components...");
 
                 // Create ALAC encoder
-                _alacEncoder = new AlacEncoder(FRAMES_PER_PACKET, SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE);
-                Logger.LogMessage("ALAC encoder created", "session");
+                if (_audioCodec == AudioCodec.AppleLossless)
+                {
+                    _alacEncoder = new AlacEncoder(FRAMES_PER_PACKET, SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE);
+                    Logger.LogMessage("ALAC encoder created", "session");
+                }
+                else
+                {
+                    Logger.LogMessage("Using L16 mode - ALAC encoder disabled", "session");
+                }
 
                 // Create RTP streamer
-                _rtpStreamer = new RtpAudioStreamer(_deviceIp, _serverPort, FRAMES_PER_PACKET, SAMPLE_RATE);
+                _rtpStreamer = new RtpAudioStreamer(_deviceIp, _serverPort, FRAMES_PER_PACKET, SAMPLE_RATE, _audioCodec);
                 Logger.LogMessage("RTP streamer created", "session");
 
                 // Create timing service
@@ -97,25 +114,37 @@ namespace WinStream.Audio
                 _controlService = new ControlService(_deviceIp, _controlPort);
                 Logger.LogMessage("Control service created", "session");
 
-                // Create and initialize audio capture
-                _captureService = new AudioCaptureService(SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE, FRAMES_PER_PACKET);
-                
-                if (!await _captureService.InitializeAsync())
+                // MP3 test mode can be forced with an environment variable for transport testing.
+                var configuredTestSource = Environment.GetEnvironmentVariable(TestMp3UrlEnvVar);
+                if (!string.IsNullOrWhiteSpace(configuredTestSource))
                 {
-                    Logger.LogMessage("Failed to initialize audio capture", "session");
-                    StatusChanged?.Invoke(this, "Failed to initialize audio capture");
-                    return false;
+                    if (!await TryInitializeMp3TestSourceAsync(configuredTestSource))
+                    {
+                        StatusChanged?.Invoke(this, "Failed to initialize MP3 test source");
+                        return false;
+                    }
                 }
-
-                if (!await _captureService.CreateLoopbackCaptureAsync())
+                else
                 {
-                    Logger.LogMessage("Failed to create loopback capture", "session");
-                    StatusChanged?.Invoke(this, "Failed to create loopback capture - check audio permissions");
-                    return false;
+                    // Create and initialize audio capture
+                    _captureService = new AudioCaptureService(SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE, FRAMES_PER_PACKET);
+                    
+                    if (!await _captureService.InitializeAsync() || !await _captureService.CreateLoopbackCaptureAsync())
+                    {
+                        Logger.LogMessage("Audio capture init failed; falling back to MP3 test source", "session");
+                        if (!await TryInitializeMp3TestSourceAsync(DefaultTestMp3Url))
+                        {
+                            StatusChanged?.Invoke(this, "Failed to initialize audio capture and MP3 fallback");
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        _captureService.AudioDataAvailable += OnAudioDataAvailable;
+                        _audioSourceName = _captureService.CaptureDeviceName;
+                        _useMp3TestSource = false;
+                    }
                 }
-
-                // Wire up audio data event
-                _captureService.AudioDataAvailable += OnAudioDataAvailable;
 
                 StatusChanged?.Invoke(this, "Audio components initialized");
                 Logger.LogMessage("All audio components initialized successfully", "session");
@@ -162,8 +191,15 @@ namespace WinStream.Audio
                 
                 await _rtpStreamer.SendSilenceAsync(prebufferPackets);
 
-                // Start audio capture
-                _captureService.StartCapture();
+                // Start active audio source
+                if (_useMp3TestSource)
+                {
+                    _mp3TestSource.Start();
+                }
+                else
+                {
+                    _captureService.StartCapture();
+                }
 
                 // Start streaming task
                 _streamingTask = Task.Run(() => StreamingLoop(_streamingCts.Token));
@@ -201,7 +237,14 @@ namespace WinStream.Audio
             catch { }
 
             // Stop all services
-            _captureService?.StopCapture();
+            if (_useMp3TestSource)
+            {
+                _mp3TestSource?.Stop();
+            }
+            else
+            {
+                _captureService?.StopCapture();
+            }
             _controlService?.Stop();
             _timingService?.Stop();
             _rtpStreamer?.StopStreaming();
@@ -249,29 +292,30 @@ namespace WinStream.Audio
                     // Try to get audio data from buffer
                     if (_audioBuffer.TryDequeue(out var audioData))
                     {
-                        // Fill packet buffer
-                        int bytesToCopy = Math.Min(audioData.Length, packetBuffer.Length - packetBufferOffset);
-                        Buffer.BlockCopy(audioData, 0, packetBuffer, packetBufferOffset, bytesToCopy);
-                        packetBufferOffset += bytesToCopy;
-
-                        // Handle remaining data if any
-                        int remaining = audioData.Length - bytesToCopy;
-                        if (remaining > 0)
+                        // Consume the full captured buffer; dropping the tail causes near-silent output.
+                        int sourceOffset = 0;
+                        while (sourceOffset < audioData.Length)
                         {
-                            // Store remaining for next iteration
-                            var remainingData = new byte[remaining];
-                            Buffer.BlockCopy(audioData, bytesToCopy, remainingData, 0, remaining);
-                            // Re-queue at front (we'll process it next)
-                        }
+                            int bytesToCopy = Math.Min(audioData.Length - sourceOffset, packetBuffer.Length - packetBufferOffset);
+                            Buffer.BlockCopy(audioData, sourceOffset, packetBuffer, packetBufferOffset, bytesToCopy);
+                            packetBufferOffset += bytesToCopy;
+                            sourceOffset += bytesToCopy;
 
-                        // If we have a full packet, send it
-                        while (packetBufferOffset >= packetBuffer.Length)
-                        {
-                            // Encode to ALAC
-                            var alacData = _alacEncoder.Encode(packetBuffer);
+                            if (packetBufferOffset < packetBuffer.Length)
+                            {
+                                continue;
+                            }
 
-                            // Send via RTP
-                            await _rtpStreamer.SendAudioPacketAsync(alacData);
+                            if (_audioCodec == AudioCodec.AppleLossless)
+                            {
+                                // Encode to ALAC
+                                var alacData = _alacEncoder.Encode(packetBuffer);
+                                await _rtpStreamer.SendAudioPacketAsync(alacData);
+                            }
+                            else
+                            {
+                                await _rtpStreamer.SendPcmPacketAsync(packetBuffer);
+                            }
                             packetsSent++;
 
                             // Update control service with current timestamp
@@ -361,8 +405,15 @@ namespace WinStream.Audio
                     pcmData[offset + 3] = (byte)((sample >> 8) & 0xFF);
                 }
 
-                var alacData = _alacEncoder.Encode(pcmData);
-                await _rtpStreamer.SendAudioPacketAsync(alacData);
+                if (_audioCodec == AudioCodec.AppleLossless)
+                {
+                    var alacData = _alacEncoder.Encode(pcmData);
+                    await _rtpStreamer.SendAudioPacketAsync(alacData);
+                }
+                else
+                {
+                    await _rtpStreamer.SendPcmPacketAsync(pcmData);
+                }
                 
                 _controlService.UpdateTimestamp(_rtpStreamer.CurrentTimestamp);
                 
@@ -372,12 +423,28 @@ namespace WinStream.Audio
             Logger.LogMessage("Test tone complete", "session");
         }
 
+        private async Task<bool> TryInitializeMp3TestSourceAsync(string source)
+        {
+            _mp3TestSource = new Mp3TestAudioSource(SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE, FRAMES_PER_PACKET);
+            if (!await _mp3TestSource.InitializeAsync(source))
+            {
+                return false;
+            }
+
+            _mp3TestSource.AudioDataAvailable += OnAudioDataAvailable;
+            _audioSourceName = $"MP3: {source}";
+            _useMp3TestSource = true;
+            Logger.LogMessage($"Using MP3 test source: {source}", "session");
+            return true;
+        }
+
         public void Dispose()
         {
             StopStreamingAsync().Wait(2000);
             
             _streamingCts?.Dispose();
             _captureService?.Dispose();
+            _mp3TestSource?.Dispose();
             _alacEncoder?.Dispose();
             _rtpStreamer?.Dispose();
             _timingService?.Dispose();

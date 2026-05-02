@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using Microsoft.UI.Xaml;
@@ -33,6 +34,8 @@ namespace WinStream.Network
         public string PublicCUSystemPairingIdentity { get; set; }
         public string PublicKey { get; set; }
         public RSAParameters? RsaPublicKey { get; set; }
+        public string SupportedCodecs { get; set; }
+        public string EncryptionTypes { get; set; }
         public string HouseholdID { get; set; }
         public string GroupUUID { get; set; }
         public bool IsGroupLeader { get; set; }
@@ -44,6 +47,35 @@ namespace WinStream.Network
         public bool HasRsaPublicKey => RsaPublicKey.HasValue;
         public bool HasEd25519PublicKey => !string.IsNullOrEmpty(PublicKey) && !HasRsaPublicKey;
         public bool IsAirPlay2Device => HasEd25519PublicKey;
+        public bool SupportsAlac => SupportsCodec(1);
+        public bool SupportsL16 => SupportsCodec(0);
+        public bool SupportsUnencryptedRaop => SupportsEncryptionType(0);
+
+        private bool SupportsCodec(int codecId)
+        {
+            if (string.IsNullOrWhiteSpace(SupportedCodecs))
+            {
+                return false;
+            }
+
+            return SupportedCodecs
+                .Split(',')
+                .Select(v => v.Trim())
+                .Any(v => int.TryParse(v, out var parsed) && parsed == codecId);
+        }
+
+        private bool SupportsEncryptionType(int encryptionType)
+        {
+            if (string.IsNullOrWhiteSpace(EncryptionTypes))
+            {
+                return true;
+            }
+
+            return EncryptionTypes
+                .Split(',')
+                .Select(v => v.Trim())
+                .Any(v => int.TryParse(v, out var parsed) && parsed == encryptionType);
+        }
 
         /// <summary>
         /// Segoe MDL2 glyph selected by device model/name.

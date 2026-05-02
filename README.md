@@ -39,6 +39,35 @@ WinStream creates a virtual audio device on your Windows system, acting as a bri
    * Use Windows volume controls as normal - WinStream will respect these settings.
    * Fine-tune volume within the WinStream application if needed.
 
+### MP3 Transport Test Mode (No Loopback Capture)
+
+If loopback capture is unavailable or unstable, WinStream can stream decoded MP3 audio instead:
+
+1. Set environment variable `WINSTREAM_TEST_MP3_URL` to an `http(s)` MP3 URL or local file path.
+2. Launch WinStream and connect as usual.
+3. WinStream will use the MP3 source for RTP packets instead of WASAPI loopback capture.
+
+Example URL that works for testing:
+`https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3`
+
+### Startup / Discovery Tuning
+
+Discovery now runs with a fast default scan window and parallel service queries.
+Optional override:
+
+- `WINSTREAM_DISCOVERY_WINDOW_MS` (250-10000)
+
+Example:
+`setx WINSTREAM_DISCOVERY_WINDOW_MS 1200`
+
+### RTP Codec Test Toggle
+
+If a receiver accepts session setup but you hear no audio, try PCM mode:
+
+- `WINSTREAM_AUDIO_CODEC=l16`
+
+This switches SDP/RTP payload from AppleLossless to RTP `L16/44100/2` for troubleshooting.
+
 ### Requirements
 
 * Windows 10 (64-bit) or later
