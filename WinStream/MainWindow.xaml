@@ -6,9 +6,10 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Title="AirPlay Discovery">
+    Title="WinStream Settings">
     <Grid Margin="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
@@ -19,8 +20,40 @@
             <Button x:Name="refreshButton" Content="Refresh" Margin="5" Click="RefreshButton_Click"/>
             <ProgressBar x:Name="progressBar" Width="100" Height="20" IsIndeterminate="True" Visibility="Collapsed"/>
         </StackPanel>
+        <!-- Capture endpoint picker -->
+        <Grid Grid.Row="1" Margin="10,0,10,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="120"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Capture device" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <ComboBox x:Name="captureDeviceComboBox"
+                      Grid.Column="1"
+                      HorizontalAlignment="Stretch"
+                      SelectionChanged="CaptureDeviceComboBox_SelectionChanged"/>
+            <ToggleSwitch x:Name="monitorCaptureToggle"
+                          Grid.Column="2"
+                          OffContent="Monitor"
+                          OnContent="Monitoring"
+                          Margin="12,0,12,0"
+                          Toggled="MonitorCaptureToggle_Toggled"/>
+            <ProgressBar x:Name="captureLevelBar"
+                         Grid.Column="3"
+                         Minimum="0"
+                         Maximum="1"
+                         Height="12"
+                         VerticalAlignment="Center"/>
+            <TextBlock x:Name="captureStatusText"
+                       Grid.Column="4"
+                       VerticalAlignment="Center"
+                       Margin="8,0,0,0"
+                       Text="Idle"/>
+        </Grid>
         <!-- Devices List -->
-        <ListView Grid.Row="1" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">
+        <ListView Grid.Row="2" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="local:DeviceInfo">
                     <Grid>

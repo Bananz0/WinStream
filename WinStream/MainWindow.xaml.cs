@@ -12,6 +12,8 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Audio;
+using WinStream.Core.Audio;
 using WinStream.Network;
 
 namespace WinStream
@@ -19,9 +21,12 @@ namespace WinStream
     public sealed partial class MainWindow : Window
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
-        private DispatcherTimer scanTimer;
+        private readonly CaptureMonitorService _captureMonitor = new();
+        private readonly DispatcherTimer _scanTimer;
+        private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
         private bool _allowClose;
+        private bool _suppressCaptureSelectionEvents;
 
         public MainWindow()
         {
@@ -29,12 +34,22 @@ namespace WinStream
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
-            _appWindow.Resize(new Windows.Graphics.SizeInt32(640, 500));
+            _appWindow.Resize(new Windows.Graphics.SizeInt32(760, 560));
             _appWindow.Closing += OnAppWindowClosing;
 
-            Debug.WriteLine("Application started, UI initialized.");
+            _scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _scanTimer.Tick += async (_, _) => await DiscoverAndDisplayDevicesAsync();
+            _scanTimer.Start();
 
-            InitializeTimer();
+            _captureLevelTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _captureLevelTimer.Tick += (_, _) => UpdateCaptureLevelUi();
+            _captureLevelTimer.Start();
+
+            _captureMonitor.StateChanged += (_, _) =>
+                DispatcherQueue.TryEnqueue(RefreshCaptureStatus);
+
+            LoadCaptureEndpoints();
+            RestoreCaptureSettings();
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
@@ -54,7 +69,9 @@ namespace WinStream
         public void CloseForExit()
         {
             _allowClose = true;
-            scanTimer.Stop();
+            _scanTimer.Stop();
+            _captureLevelTimer.Stop();
+            _ = _captureMonitor.DisposeAsync().AsTask();
             Close();
         }
 
@@ -69,28 +86,20 @@ namespace WinStream
             sender.Hide();
         }
 
-        private void InitializeTimer()
-        {
-            scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            scanTimer.Tick += async (s, e) => await DiscoverAndDisplayDevicesAsync();
-            scanTimer.Start();
-        }
-
         private async void SearchButton_Click(object sender, RoutedEventArgs e)
         {
-            Debug.WriteLine("Search button clicked.");
             await DiscoverAndDisplayDevicesAsync();
         }
 
         private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
-            Debug.WriteLine("Refresh button clicked.");
+            LoadCaptureEndpoints();
             await DiscoverAndDisplayDevicesAsync();
         }
 
         private void FilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
         {
-            ApplyFilter(filterTextBox.Text.ToLower());
+            ApplyFilter(filterTextBox.Text.ToLowerInvariant());
         }
 
         private void ApplyFilter(string filterText)
@@ -102,9 +111,113 @@ namespace WinStream
             else
             {
                 devicesList.ItemsSource = DeviceList.Where(d =>
-                    d.DisplayName.ToLower().Contains(filterText) ||
-                    d.IPAddress.ToLower().Contains(filterText));
+                    (d.DisplayName?.ToLowerInvariant().Contains(filterText) ?? false) ||
+                    (d.IPAddress?.ToLowerInvariant().Contains(filterText) ?? false));
             }
+        }
+
+        private async void CaptureDeviceComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressCaptureSelectionEvents)
+            {
+                return;
+            }
+
+            if (captureDeviceComboBox.SelectedItem is RenderEndpointInfo endpoint)
+            {
+                await _captureMonitor.SetSelectedEndpointAsync(endpoint.Id);
+                RefreshCaptureStatus();
+            }
+        }
+
+        private async void MonitorCaptureToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_suppressCaptureSelectionEvents)
+            {
+                return;
+            }
+
+            await _captureMonitor.SetMonitoringAsync(monitorCaptureToggle.IsOn);
+            RefreshCaptureStatus();
+        }
+
+        private void LoadCaptureEndpoints()
+        {
+            _suppressCaptureSelectionEvents = true;
+            try
+            {
+                var endpoints = _captureMonitor.ListEndpoints();
+                captureDeviceComboBox.ItemsSource = endpoints;
+
+                var selectedId = _captureMonitor.Settings.SelectedRenderDeviceId;
+                var selected = endpoints.FirstOrDefault(e =>
+                                   string.Equals(e.Id, selectedId, StringComparison.OrdinalIgnoreCase))
+                               ?? endpoints.FirstOrDefault(e => e.IsDefault)
+                               ?? endpoints.FirstOrDefault();
+                captureDeviceComboBox.SelectedItem = selected;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to enumerate capture endpoints: {ex.Message}");
+                captureStatusText.Text = "No audio devices";
+            }
+            finally
+            {
+                _suppressCaptureSelectionEvents = false;
+            }
+        }
+
+        private void RestoreCaptureSettings()
+        {
+            _suppressCaptureSelectionEvents = true;
+            try
+            {
+                monitorCaptureToggle.IsOn = _captureMonitor.Settings.MonitorCapture;
+            }
+            finally
+            {
+                _suppressCaptureSelectionEvents = false;
+            }
+
+            if (_captureMonitor.Settings.MonitorCapture)
+            {
+                _ = _captureMonitor.SetMonitoringAsync(true);
+            }
+
+            RefreshCaptureStatus();
+        }
+
+        private void UpdateCaptureLevelUi()
+        {
+            if (!_captureMonitor.IsCapturing)
+            {
+                captureLevelBar.Value = 0;
+                return;
+            }
+
+            // Soften display: RMS is typically << 1.0 for normal content.
+            captureLevelBar.Value = Math.Clamp(_captureMonitor.CurrentRms * 4.0, 0, 1);
+        }
+
+        private void RefreshCaptureStatus()
+        {
+            if (!_captureMonitor.IsCapturing)
+            {
+                captureStatusText.Text = "Idle";
+                captureStatusText.Foreground = new SolidColorBrush(Colors.Gray);
+                return;
+            }
+
+            if (_captureMonitor.IsSilent)
+            {
+                captureStatusText.Text = "Silent";
+                captureStatusText.Foreground = new SolidColorBrush(Colors.Orange);
+                return;
+            }
+
+            var format = _captureMonitor.Format;
+            captureStatusText.Text = format is null ? "Capturing" : format.ToString();
+            captureStatusText.Foreground = new SolidColorBrush(Colors.SeaGreen);
         }
 
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -127,12 +240,12 @@ namespace WinStream
                         using var rsaPublicKey = RSA.Create();
                         await DeviceConnection.ConnectToAirPlayServer(deviceInfo.IPAddress, deviceInfo.Port, rsaPublicKey);
                         statusTextBlock.Text = "Connected successfully.";
-                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Green);
+                        statusTextBlock.Foreground = new SolidColorBrush(Colors.Green);
                     }
                     catch (Exception ex)
                     {
                         statusTextBlock.Text = "Connection failed.";
-                        statusTextBlock.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Red);
+                        statusTextBlock.Foreground = new SolidColorBrush(Colors.Red);
                         Debug.WriteLine($"Connection error: {ex.Message}");
                     }
                     finally
@@ -167,7 +280,6 @@ namespace WinStream
                 UpdateUI(true);
             }
         }
-
 
         private void ExpandToggle_Click(object sender, RoutedEventArgs e)
         {
@@ -214,8 +326,8 @@ namespace WinStream
                     DeviceList.Add(discoveredDevice);
                 }
             }
-
         }
+
         private string CreateTooltipSummary(DeviceInfo device)
         {
             return $"Device Name: {device.DeviceName}\n" +
@@ -272,4 +384,3 @@ namespace WinStream
         }
     }
 }
-

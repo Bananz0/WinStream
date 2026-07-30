@@ -32,6 +32,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240607001" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Zeroconf" Version="3.6.11" />
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
