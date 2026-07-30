@@ -47,4 +47,17 @@ public class SessionStateMachineTests
 
         Assert.Contains("Disconnected -> Streaming", error.Message);
     }
+
+    [Fact]
+    public void Streaming_CanEnterDegradedAndReconnecting()
+    {
+        var machine = new SessionStateMachine();
+        machine.TransitionTo(SessionState.Connecting);
+        machine.TransitionTo(SessionState.Streaming);
+        machine.TransitionTo(SessionState.Degraded, "silent");
+        machine.TransitionTo(SessionState.Reconnecting, "network");
+        machine.TransitionTo(SessionState.Streaming);
+
+        Assert.Equal(SessionState.Streaming, machine.State);
+    }
 }

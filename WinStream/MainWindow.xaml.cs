@@ -257,11 +257,13 @@ namespace WinStream
 
                     try
                     {
-                        if (_streamingOrchestrator.State == SessionState.Streaming &&
-                            ReferenceEquals(_streamingOrchestrator.CurrentReceiver, deviceInfo))
+                        if (_streamingOrchestrator.ConnectedReceivers.Any(receiver =>
+                                ReceiverEquals(receiver, deviceInfo)))
                         {
-                            await _streamingOrchestrator.DisconnectAsync();
-                            statusTextBlock.Text = "Disconnected.";
+                            await _streamingOrchestrator.DisconnectAsync(deviceInfo);
+                            statusTextBlock.Text = _streamingOrchestrator.ConnectedReceivers.Count == 0
+                                ? "Disconnected."
+                                : $"Removed. {_streamingOrchestrator.State} ({_streamingOrchestrator.ConnectedReceivers.Count} left).";
                             statusTextBlock.Foreground = new SolidColorBrush(Colors.Gray);
                             button.Content = "Connect";
                             return;
@@ -274,8 +276,12 @@ namespace WinStream
                         await _streamingOrchestrator.ConnectAsync(deviceInfo, source);
                         await _streamingOrchestrator.SetVolumeAsync(
                             (float)streamVolumeSlider.Value);
-                        statusTextBlock.Text = "Streaming.";
-                        statusTextBlock.Foreground = new SolidColorBrush(Colors.Green);
+                        statusTextBlock.Text =
+                            $"{_streamingOrchestrator.State} ({_streamingOrchestrator.ConnectedReceivers.Count} room(s)).";
+                        statusTextBlock.Foreground = new SolidColorBrush(
+                            _streamingOrchestrator.State == SessionState.Degraded
+                                ? Colors.Orange
+                                : Colors.Green);
                         button.Content = "Disconnect";
                     }
                     catch (Exception ex)
@@ -411,6 +417,18 @@ namespace WinStream
                 dialog.XamlRoot = this.Content.XamlRoot;
                 await dialog.ShowAsync();
             }
+        }
+
+        private static bool ReceiverEquals(DeviceInfo left, DeviceInfo right)
+        {
+            if (!string.IsNullOrWhiteSpace(left.DeviceID) &&
+                !string.IsNullOrWhiteSpace(right.DeviceID))
+            {
+                return string.Equals(left.DeviceID, right.DeviceID, StringComparison.Ordinal);
+            }
+
+            return string.Equals(left.IPAddress, right.IPAddress, StringComparison.Ordinal) &&
+                   left.Port == right.Port;
         }
 
         private void UpdateUI(bool isEnabled)

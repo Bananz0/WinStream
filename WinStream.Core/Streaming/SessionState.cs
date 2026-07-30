@@ -5,6 +5,8 @@ public enum SessionState
     Disconnected,
     Connecting,
     Streaming,
+    Degraded,
+    Reconnecting,
     Disconnecting,
     Failed
 }

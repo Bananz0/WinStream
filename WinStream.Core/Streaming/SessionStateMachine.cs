@@ -5,15 +5,48 @@ public sealed class SessionStateMachine
     private static readonly IReadOnlyDictionary<SessionState, SessionState[]> Allowed =
         new Dictionary<SessionState, SessionState[]>
         {
-            [SessionState.Disconnected] = [SessionState.Connecting],
+            [SessionState.Disconnected] =
+                [SessionState.Connecting, SessionState.Reconnecting],
             [SessionState.Connecting] =
-                [SessionState.Streaming, SessionState.Failed, SessionState.Disconnected],
+            [
+                SessionState.Streaming,
+                SessionState.Failed,
+                SessionState.Disconnected,
+                SessionState.Reconnecting
+            ],
             [SessionState.Streaming] =
-                [SessionState.Disconnecting, SessionState.Failed],
+            [
+                SessionState.Disconnecting,
+                SessionState.Failed,
+                SessionState.Degraded,
+                SessionState.Reconnecting
+            ],
+            [SessionState.Degraded] =
+            [
+                SessionState.Streaming,
+                SessionState.Reconnecting,
+                SessionState.Disconnecting,
+                SessionState.Failed,
+                SessionState.Disconnected
+            ],
+            [SessionState.Reconnecting] =
+            [
+                SessionState.Streaming,
+                SessionState.Degraded,
+                SessionState.Failed,
+                SessionState.Disconnected,
+                SessionState.Disconnecting,
+                SessionState.Connecting
+            ],
             [SessionState.Disconnecting] =
                 [SessionState.Disconnected, SessionState.Failed],
             [SessionState.Failed] =
-                [SessionState.Connecting, SessionState.Disconnecting, SessionState.Disconnected]
+            [
+                SessionState.Connecting,
+                SessionState.Disconnecting,
+                SessionState.Disconnected,
+                SessionState.Reconnecting
+            ]
         };
 
     public event EventHandler<SessionStateChanged>? StateChanged;
@@ -38,5 +71,17 @@ public sealed class SessionStateMachine
         StateChanged?.Invoke(
             this,
             new SessionStateChanged(previous, next, reason));
+    }
+
+    public void Reset(SessionState state = SessionState.Disconnected)
+    {
+        var previous = State;
+        State = state;
+        if (previous != state)
+        {
+            StateChanged?.Invoke(
+                this,
+                new SessionStateChanged(previous, state));
+        }
     }
 }

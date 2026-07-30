@@ -11,6 +11,7 @@ using WinStream.Core.Audio;
 using WinStream.Core.Protocol.Raop;
 using WinStream.Core.Streaming;
 using WinStream.Network;
+using WinStream.Networking;
 
 namespace WinStream.Streaming;
 
@@ -87,6 +88,9 @@ public sealed class RaopSession : IAirPlaySession
                 _audioSocket = BindUdpSocket(address.AddressFamily);
                 _controlSocket = BindUdpSocket(address.AddressFamily);
                 _timingSocket = BindUdpSocket(address.AddressFamily);
+                UdpSocketConfigurer.SuppressUdpConnReset(_audioSocket);
+                UdpSocketConfigurer.SuppressUdpConnReset(_controlSocket);
+                UdpSocketConfigurer.SuppressUdpConnReset(_timingSocket);
                 EncryptionMaterial = RaopCrypto.CreateEncryptionMaterial(_receiver.PublicKey);
                 _encryptor = new AesAudioEncryptor(
                     EncryptionMaterial.AesKey,
