@@ -3,6 +3,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Core.Audio;
 using WinStream.Core.Streaming;
 using WinStream.Network;
 
@@ -12,6 +13,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 {
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private IAirPlaySession? _session;
+    private IAudioSource? _audioSource;
     private DeviceInfo? _receiver;
     private bool _disposed;
 
@@ -23,10 +25,12 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     public async Task ConnectAsync(
         DeviceInfo receiver,
+        IAudioSource audioSource,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(receiver);
+        ArgumentNullException.ThrowIfNull(audioSource);
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -35,20 +39,33 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 await DisconnectCurrentAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            if (!audioSource.IsCapturing)
+            {
+                await audioSource.StartAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             var session = new RaopSession(receiver);
             session.StateChanged += OnSessionStateChanged;
             _session = session;
             _receiver = receiver;
+            _audioSource = audioSource;
+            audioSource.FrameAvailable += OnFrameAvailable;
             await session.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            throw;
         }
         finally
         {
             _lifecycle.Release();
         }
+    }
+
+    public Task SetVolumeAsync(
+        float volumeDb,
+        CancellationToken cancellationToken = default)
+    {
+        var session = _session;
+        return session is null
+            ? Task.CompletedTask
+            : session.SetVolumeAsync(volumeDb, cancellationToken);
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
@@ -84,8 +101,15 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
 
         var session = _session;
+        var audio = _audioSource;
         _session = null;
         _receiver = null;
+        _audioSource = null;
+        if (audio is not null)
+        {
+            audio.FrameAvailable -= OnFrameAvailable;
+        }
+
         session.StateChanged -= OnSessionStateChanged;
         await session.DisconnectAsync(cancellationToken).ConfigureAwait(false);
         await session.DisposeAsync().ConfigureAwait(false);
@@ -94,6 +118,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             new SessionStateChanged(
                 SessionState.Disconnecting,
                 SessionState.Disconnected));
+    }
+
+    private void OnFrameAvailable(object? sender, AudioFrame frame)
+    {
+        _session?.SubmitPcm(frame.Pcm, frame.Format);
     }
 
     private void OnSessionStateChanged(object? sender, SessionStateChanged change)

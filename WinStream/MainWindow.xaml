@@ -11,6 +11,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <!-- Search and Filter Panel -->
@@ -52,8 +53,29 @@
                        Margin="8,0,0,0"
                        Text="Idle"/>
         </Grid>
+        <Grid Grid.Row="2" Margin="10,0,10,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Stream volume" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Slider x:Name="streamVolumeSlider"
+                    Grid.Column="1"
+                    Minimum="-30"
+                    Maximum="0"
+                    StepFrequency="1"
+                    Value="-20"
+                    ValueChanged="StreamVolumeSlider_ValueChanged"/>
+            <TextBlock x:Name="streamVolumeText"
+                       Grid.Column="2"
+                       VerticalAlignment="Center"
+                       Margin="8,0,0,0"
+                       Text="-20 dB"
+                       Width="64"/>
+        </Grid>
         <!-- Devices List -->
-        <ListView Grid.Row="2" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">
+        <ListView Grid.Row="3" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="local:DeviceInfo">
                     <Grid>

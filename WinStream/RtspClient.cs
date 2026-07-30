@@ -102,6 +102,8 @@ public sealed class RtspClient : IAsyncDisposable
     public Task<RtspResponse> SendRecordAsync(
         string target,
         string sessionId,
+        ushort sequenceNumber,
+        uint rtpTimestamp,
         CancellationToken cancellationToken = default) =>
         SendAsync(
             "RECORD",
@@ -110,9 +112,25 @@ public sealed class RtspClient : IAsyncDisposable
             {
                 ["Session"] = sessionId,
                 ["Range"] = "npt=0-",
-                ["RTP-Info"] = "seq=0;rtptime=0"
+                ["RTP-Info"] = $"seq={sequenceNumber};rtptime={rtpTimestamp}"
             },
             null,
+            cancellationToken);
+
+    public Task<RtspResponse> SendSetParameterAsync(
+        string target,
+        string sessionId,
+        string parameterBody,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(
+            "SET_PARAMETER",
+            target,
+            new Dictionary<string, string>
+            {
+                ["Session"] = sessionId,
+                ["Content-Type"] = "text/parameters"
+            },
+            Encoding.ASCII.GetBytes(parameterBody),
             cancellationToken);
 
     public Task<RtspResponse> SendTeardownAsync(

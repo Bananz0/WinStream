@@ -1,11 +1,13 @@
 #nullable enable
 
 using System;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Core.Audio;
 using WinStream.Core.Protocol.Raop;
 using WinStream.Core.Streaming;
 using WinStream.Network;
@@ -14,16 +16,36 @@ namespace WinStream.Streaming;
 
 public sealed class RaopSession : IAirPlaySession
 {
-    private const int FramesPerPacket = 352;
+    private const int FramesPerPacket = AlacEncoder.FramesPerPacket;
+    private const uint DefaultLatencyFrames = 88200; // ~2s at 44.1 kHz
 
     private readonly DeviceInfo _receiver;
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
+    private readonly SemaphoreSlim _rtspGate = new(1, 1);
     private readonly SessionStateMachine _stateMachine = new();
+    private readonly PcmPacketBuffer _pcmBuffer = new();
+    private readonly ConcurrentDictionary<ushort, byte[]> _sentPackets = new();
+    private readonly object _mediaGate = new();
     private RtspClient? _rtspClient;
     private UdpClient? _audioSocket;
     private UdpClient? _controlSocket;
     private UdpClient? _timingSocket;
+    private AesAudioEncryptor? _encryptor;
+    private CancellationTokenSource? _mediaCts;
+    private Task? _controlLoop;
+    private Task? _timingLoop;
+    private Task? _syncLoop;
+    private IPEndPoint? _audioEndpoint;
+    private IPEndPoint? _controlEndpoint;
+    private IPEndPoint? _timingEndpoint;
     private string? _sessionId;
+    private string? _streamTarget;
+    private ushort _sequenceNumber;
+    private uint _rtpTimestamp;
+    private uint _ssrc;
+    private bool _sendMarker = true;
+    private bool _firstSync = true;
+    private float _volumeDb = -20f;
     private bool _disposed;
 
     public RaopSession(DeviceInfo receiver)
@@ -66,6 +88,9 @@ public sealed class RaopSession : IAirPlaySession
                 _controlSocket = BindUdpSocket(address.AddressFamily);
                 _timingSocket = BindUdpSocket(address.AddressFamily);
                 EncryptionMaterial = RaopCrypto.CreateEncryptionMaterial(_receiver.PublicKey);
+                _encryptor = new AesAudioEncryptor(
+                    EncryptionMaterial.AesKey,
+                    EncryptionMaterial.AesIv);
 
                 _rtspClient = new RtspClient(_receiver.IPAddress, _receiver.Port);
                 await _rtspClient.ConnectAsync(cancellationToken).ConfigureAwait(false);
@@ -77,6 +102,7 @@ public sealed class RaopSession : IAirPlaySession
 
                 var streamId = RandomNumberGenerator.GetInt32(1, int.MaxValue).ToString();
                 var targetBase = $"rtsp://{FormatHost(_receiver.IPAddress)}/{streamId}";
+                _streamTarget = $"{targetBase}/stream";
                 var sdp = BuildSdp(
                     _rtspClient.LocalIp,
                     _receiver.IPAddress,
@@ -102,12 +128,25 @@ public sealed class RaopSession : IAirPlaySession
                     ?? throw new InvalidOperationException(
                         "Receiver did not return an RTSP Session header.");
                 TransportInfo = RaopTransportInfo.Parse(setup.Transport);
+                BindRemoteEndpoints(address, TransportInfo);
+
+                _sequenceNumber = (ushort)RandomNumberGenerator.GetInt32(0, ushort.MaxValue);
+                _rtpTimestamp = (uint)RandomNumberGenerator.GetInt32(0, int.MaxValue);
+                _ssrc = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
+                _sendMarker = true;
+                _firstSync = true;
+                _pcmBuffer.Reset();
 
                 var record = await _rtspClient.SendRecordAsync(
-                    $"{targetBase}/stream",
+                    _streamTarget,
                     _sessionId,
+                    _sequenceNumber,
+                    _rtpTimestamp,
                     cancellationToken).ConfigureAwait(false);
                 record.EnsureSuccess("RECORD");
+
+                await SendVolumeInternalAsync(_volumeDb, cancellationToken).ConfigureAwait(false);
+                StartMediaLoops();
                 ChangeState(SessionState.Streaming);
             }
             catch (Exception ex)
@@ -123,6 +162,46 @@ public sealed class RaopSession : IAirPlaySession
         }
     }
 
+    public void SubmitPcm(ReadOnlyMemory<byte> pcm, AudioFormat format)
+    {
+        if (State != SessionState.Streaming ||
+            _audioSocket is null ||
+            _audioEndpoint is null ||
+            _encryptor is null)
+        {
+            return;
+        }
+
+        byte[][] packets;
+        lock (_mediaGate)
+        {
+            packets = new System.Collections.Generic.List<byte[]>(
+                _pcmBuffer.Push(pcm.Span, format)).ToArray();
+        }
+
+        foreach (var packetPcm in packets)
+        {
+            SendAudioPacket(packetPcm);
+        }
+    }
+
+    public async Task SetVolumeAsync(
+        float volumeDb,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _volumeDb = Math.Clamp(volumeDb, -144f, 0f);
+        if (State != SessionState.Streaming ||
+            _rtspClient is null ||
+            string.IsNullOrWhiteSpace(_sessionId) ||
+            string.IsNullOrWhiteSpace(_streamTarget))
+        {
+            return;
+        }
+
+        await SendVolumeInternalAsync(_volumeDb, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -134,12 +213,13 @@ public sealed class RaopSession : IAirPlaySession
             }
 
             ChangeState(SessionState.Disconnecting);
+            await StopMediaLoopsAsync().ConfigureAwait(false);
             if (_rtspClient is not null && !string.IsNullOrWhiteSpace(_sessionId))
             {
                 try
                 {
                     await _rtspClient.SendTeardownAsync(
-                        $"rtsp://{FormatHost(_receiver.IPAddress)}/stream",
+                        _streamTarget ?? $"rtsp://{FormatHost(_receiver.IPAddress)}/stream",
                         _sessionId,
                         cancellationToken).ConfigureAwait(false);
                 }
@@ -167,11 +247,287 @@ public sealed class RaopSession : IAirPlaySession
 
         await DisconnectAsync().ConfigureAwait(false);
         _lifecycle.Dispose();
+        _rtspGate.Dispose();
         _disposed = true;
+    }
+
+    private void SendAudioPacket(byte[] pcmPacket)
+    {
+        if (_audioSocket is null || _audioEndpoint is null || _encryptor is null)
+        {
+            return;
+        }
+
+        Span<byte> alac = stackalloc byte[AlacEncoder.GetMaxEncodedLength(pcmPacket.Length)];
+        var alacLength = AlacEncoder.Encode(pcmPacket, alac);
+        var payload = alac[..alacLength].ToArray();
+        _encryptor.EncryptInPlace(payload);
+
+        ushort sequence;
+        uint timestamp;
+        bool marker;
+        lock (_mediaGate)
+        {
+            sequence = _sequenceNumber++;
+            timestamp = _rtpTimestamp;
+            _rtpTimestamp += (uint)FramesPerPacket;
+            marker = _sendMarker;
+            _sendMarker = false;
+        }
+
+        Span<byte> packet = stackalloc byte[12 + payload.Length];
+        var length = RtpPacketizer.WriteAudioPacket(
+            packet,
+            sequence,
+            timestamp,
+            _ssrc,
+            payload,
+            marker);
+        var bytes = packet[..length].ToArray();
+        _sentPackets[sequence] = bytes;
+        TrimPacketCache(sequence);
+
+        try
+        {
+            _ = _audioSocket.SendAsync(bytes, _audioEndpoint);
+        }
+        catch
+        {
+            // Transient UDP send failures are ignored; reconnect handled in later phases.
+        }
+    }
+
+    private void TrimPacketCache(ushort latest)
+    {
+        // Keep roughly the last second of packets for retransmission.
+        var minKeep = (ushort)(latest - 100);
+        foreach (var key in _sentPackets.Keys)
+        {
+            var age = (ushort)(latest - key);
+            if (age > 100 && key < minKeep)
+            {
+                _sentPackets.TryRemove(key, out _);
+            }
+        }
+    }
+
+    private void StartMediaLoops()
+    {
+        _mediaCts = new CancellationTokenSource();
+        var token = _mediaCts.Token;
+        _controlLoop = Task.Run(() => RunControlLoopAsync(token), token);
+        _timingLoop = Task.Run(() => RunTimingLoopAsync(token), token);
+        _syncLoop = Task.Run(() => RunSyncLoopAsync(token), token);
+    }
+
+    private async Task StopMediaLoopsAsync()
+    {
+        if (_mediaCts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _mediaCts.CancelAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        await Task.WhenAll(
+            WaitSoft(_controlLoop),
+            WaitSoft(_timingLoop),
+            WaitSoft(_syncLoop)).ConfigureAwait(false);
+        _mediaCts.Dispose();
+        _mediaCts = null;
+        _controlLoop = null;
+        _timingLoop = null;
+        _syncLoop = null;
+    }
+
+    private async Task RunControlLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_controlSocket is null)
+        {
+            return;
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await _controlSocket
+                    .ReceiveAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (RtpPacketizer.TryReadResendRequest(
+                        result.Buffer,
+                        out var missed,
+                        out var count))
+                {
+                    for (ushort i = 0; i < count; i++)
+                    {
+                        var seq = (ushort)(missed + i);
+                        if (_sentPackets.TryGetValue(seq, out var packet))
+                        {
+                            await _controlSocket
+                                .SendAsync(packet, result.RemoteEndPoint, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch
+            {
+                // Keep listening while the session is alive.
+            }
+        }
+    }
+
+    private async Task RunTimingLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_timingSocket is null)
+        {
+            return;
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await _timingSocket
+                    .ReceiveAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var receivedNtp = NtpTime.Now();
+                if (!RtpPacketizer.TryReadTimingRequest(
+                        result.Buffer,
+                        out var sequence,
+                        out var sendNtp))
+                {
+                    continue;
+                }
+
+                var response = new byte[32];
+                var length = RtpPacketizer.WriteTimingResponse(
+                    response,
+                    sequence,
+                    sendNtp,
+                    receivedNtp,
+                    NtpTime.Now());
+                await _timingSocket
+                    .SendAsync(response.AsMemory(0, length), result.RemoteEndPoint, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch
+            {
+                // Keep listening while the session is alive.
+            }
+        }
+    }
+
+    private async Task RunSyncLoopAsync(CancellationToken cancellationToken)
+    {
+        if (_controlSocket is null || _controlEndpoint is null)
+        {
+            return;
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                uint now;
+                bool first;
+                lock (_mediaGate)
+                {
+                    now = _rtpTimestamp;
+                    first = _firstSync;
+                    _firstSync = false;
+                }
+
+                var nowMinusLatency = now - DefaultLatencyFrames;
+                var packet = new byte[20];
+                var length = RtpPacketizer.WriteSyncPacket(
+                    packet,
+                    nowMinusLatency,
+                    NtpTime.Now(),
+                    now,
+                    first);
+                await _controlSocket
+                    .SendAsync(packet.AsMemory(0, length), _controlEndpoint, cancellationToken)
+                    .ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch
+            {
+                // Keep syncing while the session is alive.
+            }
+        }
+    }
+
+    private async Task SendVolumeInternalAsync(
+        float volumeDb,
+        CancellationToken cancellationToken)
+    {
+        if (_rtspClient is null ||
+            string.IsNullOrWhiteSpace(_sessionId) ||
+            string.IsNullOrWhiteSpace(_streamTarget))
+        {
+            return;
+        }
+
+        await _rtspGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var body = $"volume: {volumeDb:0.000000}\r\n";
+            var response = await _rtspClient
+                .SendSetParameterAsync(_streamTarget, _sessionId, body, cancellationToken)
+                .ConfigureAwait(false);
+            response.EnsureSuccess("SET_PARAMETER");
+        }
+        finally
+        {
+            _rtspGate.Release();
+        }
+    }
+
+    private void BindRemoteEndpoints(IPAddress address, RaopTransportInfo transport)
+    {
+        if (transport.ServerPort is null or <= 0)
+        {
+            throw new InvalidOperationException("SETUP response omitted server_port.");
+        }
+
+        _audioEndpoint = new IPEndPoint(address, transport.ServerPort.Value);
+        _controlEndpoint = new IPEndPoint(
+            address,
+            transport.ControlPort ?? transport.ServerPort.Value);
+        _timingEndpoint = new IPEndPoint(
+            address,
+            transport.TimingPort ?? transport.ServerPort.Value);
     }
 
     private async Task ReleaseResourcesAsync()
     {
+        await StopMediaLoopsAsync().ConfigureAwait(false);
+        _sentPackets.Clear();
+        _pcmBuffer.Reset();
+        _encryptor?.Dispose();
+        _encryptor = null;
+
         if (_rtspClient is not null)
         {
             await _rtspClient.DisposeAsync().ConfigureAwait(false);
@@ -185,7 +541,11 @@ public sealed class RaopSession : IAirPlaySession
         _timingSocket?.Dispose();
         _timingSocket = null;
         _sessionId = null;
+        _streamTarget = null;
         TransportInfo = null;
+        _audioEndpoint = null;
+        _controlEndpoint = null;
+        _timingEndpoint = null;
     }
 
     private void ValidateReceiver()
@@ -210,6 +570,23 @@ public sealed class RaopSession : IAirPlaySession
     private void ChangeState(SessionState state, string? reason = null)
     {
         _stateMachine.TransitionTo(state, reason);
+    }
+
+    private static async Task WaitSoft(Task? task)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Cancellation / dispose races are expected.
+        }
     }
 
     private static UdpClient BindUdpSocket(AddressFamily addressFamily)

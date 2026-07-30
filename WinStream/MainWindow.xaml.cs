@@ -36,7 +36,7 @@ namespace WinStream
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
-            _appWindow.Resize(new Windows.Graphics.SizeInt32(760, 560));
+            _appWindow.Resize(new Windows.Graphics.SizeInt32(760, 620));
             _appWindow.Closing += OnAppWindowClosing;
 
             _scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
@@ -225,6 +225,21 @@ namespace WinStream
             captureStatusText.Foreground = new SolidColorBrush(Colors.SeaGreen);
         }
 
+        private async void StreamVolumeSlider_ValueChanged(
+            object sender,
+            RangeBaseValueChangedEventArgs e)
+        {
+            if (streamVolumeText is not null)
+            {
+                streamVolumeText.Text = $"{e.NewValue:0} dB";
+            }
+
+            if (_streamingOrchestrator.State == SessionState.Streaming)
+            {
+                await _streamingOrchestrator.SetVolumeAsync((float)e.NewValue);
+            }
+        }
+
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
@@ -252,8 +267,14 @@ namespace WinStream
                             return;
                         }
 
-                        await _streamingOrchestrator.ConnectAsync(deviceInfo);
-                        statusTextBlock.Text = "RTSP session ready.";
+                        await _captureMonitor.EnsureStartedAsync();
+                        var source = _captureMonitor.GetSourceForStreaming()
+                            ?? throw new InvalidOperationException(
+                                "Capture source is not available.");
+                        await _streamingOrchestrator.ConnectAsync(deviceInfo, source);
+                        await _streamingOrchestrator.SetVolumeAsync(
+                            (float)streamVolumeSlider.Value);
+                        statusTextBlock.Text = "Streaming.";
                         statusTextBlock.Foreground = new SolidColorBrush(Colors.Green);
                         button.Content = "Disconnect";
                     }

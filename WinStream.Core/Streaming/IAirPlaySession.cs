@@ -1,3 +1,5 @@
+using WinStream.Core.Audio;
+
 namespace WinStream.Core.Streaming;
 
 public interface IAirPlaySession : IAsyncDisposable
@@ -11,4 +13,8 @@ public interface IAirPlaySession : IAsyncDisposable
     Task ConnectAsync(CancellationToken cancellationToken = default);
 
     Task DisconnectAsync(CancellationToken cancellationToken = default);
+
+    void SubmitPcm(ReadOnlyMemory<byte> pcm, AudioFormat format);
+
+    Task SetVolumeAsync(float volumeDb, CancellationToken cancellationToken = default);
 }
