@@ -1,224 +1,248 @@
-﻿using System;
-using System.IO;
-using System.Net.Sockets;
-using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using System.Security.Cryptography;
+﻿#nullable enable
+
+using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using WinStream.Core.Protocol.Raop;
 
-namespace WinStream.Network
+namespace WinStream.Network;
+
+public sealed class RtspClient : IAsyncDisposable
 {
-    public class RtspClient : IDisposable
+    private const string UserAgent =
+        "WinStream/1.0 (Windows; RAOP sender)";
+
+    private readonly string _serverHost;
+    private readonly int _serverPort;
+    private readonly TcpClient _client = new();
+    private readonly string _clientInstance =
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
+    private NetworkStream? _stream;
+    private int _cSeq;
+    private bool _disposed;
+
+    public RtspClient(string serverHost, int serverPort)
     {
-        private readonly TcpClient _client;
-        private readonly NetworkStream _stream;
-        private readonly StreamWriter _writer;
-        private readonly StreamReader _reader;
-        private int _cSeq; // Sequence number for RTSP requests
-        private string _session; // Session ID for RTSP
-        private string _transport; // Transport header
-        private string _userAgent = "iTunes/9.2.1 (Macintosh; Intel Mac OS X 10.5.8) AppleWebKit/533.17.8";
-
-        public string LocalIp { get; private set; }
-        private string _clientInstance; // 64 random bytes in hex
-
-        public RtspClient(string serverIp, int serverPort, RSA rsaPublicKey)
+        ArgumentException.ThrowIfNullOrWhiteSpace(serverHost);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(serverPort);
+        if (serverPort > ushort.MaxValue)
         {
-            _client = new TcpClient(serverIp, serverPort);
-            _stream = _client.GetStream();
-            _writer = new StreamWriter(_stream) { AutoFlush = true };
-            _reader = new StreamReader(_stream);
-            _cSeq = 0;
-
-            // Get local IP address
-            var localEndPoint = (IPEndPoint)_client.Client.LocalEndPoint;
-            LocalIp = localEndPoint.Address.ToString();
-
-            // Generate Client-Instance
-            _clientInstance = GenerateClientInstance();
+            throw new ArgumentOutOfRangeException(nameof(serverPort));
         }
 
-        private string GenerateClientInstance()
+        _serverHost = NormalizeHost(serverHost);
+        _serverPort = serverPort;
+    }
+
+    public string LocalIp =>
+        (_client.Client.LocalEndPoint as IPEndPoint)?.Address.ToString()
+        ?? throw new InvalidOperationException("RTSP client is not connected.");
+
+    public async Task ConnectAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_client.Connected)
         {
-            var rng = new Random();
-            var bytes = new byte[64 / 2];
-            rng.NextBytes(bytes);
-            return BitConverter.ToString(bytes).Replace("-", "").ToLower();
+            return;
         }
 
-        private string GenerateAppleChallenge()
-        {
-            var randomBytes = new byte[16]; // 128 bits
-            using (var rng = RandomNumberGenerator.Create())
+        await _client.ConnectAsync(
+            _serverHost,
+            _serverPort,
+            cancellationToken).ConfigureAwait(false);
+        _stream = _client.GetStream();
+    }
+
+    public Task<RtspResponse> SendOptionsAsync(
+        CancellationToken cancellationToken = default) =>
+        SendAsync("OPTIONS", "*", null, null, cancellationToken);
+
+    public Task<RtspResponse> SendAnnounceAsync(
+        string target,
+        string sdp,
+        string appleChallenge,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(
+            "ANNOUNCE",
+            target,
+            new Dictionary<string, string>
             {
-                rng.GetBytes(randomBytes);
-            }
-            return Convert.ToBase64String(randomBytes).TrimEnd('=');
-        }
+                ["Content-Type"] = "application/sdp",
+                ["Apple-Challenge"] = appleChallenge
+            },
+            Encoding.ASCII.GetBytes(sdp),
+            cancellationToken);
 
-        private Dictionary<string, string> GetCommonHeaders()
-        {
-            return new Dictionary<string, string>
+    public Task<RtspResponse> SendSetupAsync(
+        string target,
+        int clientRtpPort,
+        int controlPort,
+        int timingPort,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(
+            "SETUP",
+            target,
+            new Dictionary<string, string>
             {
-                {"CSeq", (++_cSeq).ToString()},
-                {"User-Agent", _userAgent},
-                {"Client-Instance", _clientInstance}
-            };
-        }
+                ["Transport"] =
+                    "RTP/AVP/UDP;unicast;mode=record;" +
+                    $"client_port={clientRtpPort};" +
+                    $"control_port={controlPort};" +
+                    $"timing_port={timingPort}"
+            },
+            null,
+            cancellationToken);
 
-        private string BuildRequest(string method, string target, Dictionary<string, string> headers, string body = "")
+    public Task<RtspResponse> SendRecordAsync(
+        string target,
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(
+            "RECORD",
+            target,
+            new Dictionary<string, string>
+            {
+                ["Session"] = sessionId,
+                ["Range"] = "npt=0-",
+                ["RTP-Info"] = "seq=0;rtptime=0"
+            },
+            null,
+            cancellationToken);
+
+    public Task<RtspResponse> SendTeardownAsync(
+        string target,
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(
+            "TEARDOWN",
+            target,
+            new Dictionary<string, string> { ["Session"] = sessionId },
+            null,
+            cancellationToken);
+
+    private async Task<RtspResponse> SendAsync(
+        string method,
+        string target,
+        IReadOnlyDictionary<string, string>? headers,
+        byte[]? body,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var stream = _stream
+            ?? throw new InvalidOperationException("RTSP client is not connected.");
+        var request = BuildRequest(method, target, headers, body);
+        await stream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        return await ReadResponseAsync(stream, cancellationToken).ConfigureAwait(false);
+    }
+
+    private byte[] BuildRequest(
+        string method,
+        string target,
+        IReadOnlyDictionary<string, string>? headers,
+        byte[]? body)
+    {
+        var builder = new StringBuilder()
+            .Append(method).Append(' ').Append(target).Append(" RTSP/1.0\r\n")
+            .Append("CSeq: ").Append(++_cSeq).Append("\r\n")
+            .Append("User-Agent: ").Append(UserAgent).Append("\r\n")
+            .Append("Client-Instance: ").Append(_clientInstance).Append("\r\n");
+
+        if (headers is not null)
         {
-            var request = new StringBuilder();
-            request.AppendLine($"{method} {target} RTSP/1.0");
-
             foreach (var header in headers)
             {
-                request.AppendLine($"{header.Key}: {header.Value}");
-            }
-
-            if (!string.IsNullOrEmpty(body))
-            {
-                request.AppendLine($"Content-Length: {Encoding.UTF8.GetByteCount(body)}");
-            }
-
-            request.AppendLine();
-            if (!string.IsNullOrEmpty(body))
-            {
-                request.AppendLine(body);
-            }
-
-            return request.ToString();
-        }
-
-        public async Task<string> SendOptions(string target = "*")
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Apple-Challenge", GenerateAppleChallenge());
-            string request = BuildRequest("OPTIONS", target, headers);
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendAnnounce(string target, string sdp, string appleChallenge)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Content-Type", "application/sdp");
-            headers.Add("Apple-Challenge", appleChallenge);
-            string request = BuildRequest("ANNOUNCE", target, headers, sdp);
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendSetup(string target, int clientRtpPort, int controlPort, int timingPort)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Transport", $"RTP/AVP/UDP;unicast;client_port={clientRtpPort}");
-            string request = BuildRequest("SETUP", target, headers);
-            var response = await SendRequest(request);
-            ParseTransport(response);
-            return response;
-        }
-
-        public async Task<string> SendRecord(string target, string session)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Session", session);
-            headers.Add("Range", "npt=0-");
-            string request = BuildRequest("RECORD", target, headers);
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendTeardown(string target, string session)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Session", session);
-            string request = BuildRequest("TEARDOWN", target, headers);
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendSetParameter(string target, string parameter)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Content-Type", "text/parameters");
-            string request = BuildRequest("SET_PARAMETER", target, headers, parameter);
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendAuthSetup(string target, byte[] data)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Content-Type", "application/octet-stream");
-            string request = BuildRequest("POST", target, headers, Convert.ToBase64String(data));
-            return await SendRequest(request);
-        }
-
-        public async Task<string> SendFlush(string target, string session)
-        {
-            var headers = GetCommonHeaders();
-            headers.Add("Session", session);
-            headers.Add("RTP-Info", "seq=0;rtptime=0");
-            string request = BuildRequest("FLUSH", target, headers);
-            return await SendRequest(request);
-        }
-
-        private async Task<string> SendRequest(string request)
-        {
-            try
-            {
-                Console.WriteLine($"Sending request:\n{request}");
-                await _writer.WriteAsync(request);
-                var response = await ReadResponseAsync();
-                Console.WriteLine($"Received response:\n{response}");
-                return response;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error sending request: {ex.Message}");
-                return null;
+                builder.Append(header.Key).Append(": ").Append(header.Value).Append("\r\n");
             }
         }
 
-        private async Task<string> ReadResponseAsync()
+        if (body is { Length: > 0 })
         {
-            try
-            {
-                var response = new StringBuilder();
-                string line;
-                while (!string.IsNullOrWhiteSpace(line = await _reader.ReadLineAsync()))
-                {
-                    response.AppendLine(line);
-                    if (line.StartsWith("Session: "))
-                    {
-                        _session = line.Substring(9).Trim();
-                    }
-                }
-                return response.ToString();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error reading response: {ex.Message}");
-                return null;
-            }
+            builder.Append("Content-Length: ").Append(body.Length).Append("\r\n");
         }
 
-        private void ParseTransport(string response)
+        builder.Append("\r\n");
+        var headerBytes = Encoding.ASCII.GetBytes(builder.ToString());
+        if (body is not { Length: > 0 })
         {
-            var lines = response.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("Transport: "))
-                {
-                    _transport = line.Substring(11).Trim();
-                }
-            }
+            return headerBytes;
         }
 
-        public void Dispose()
-        {
-            _writer?.Dispose();
-            _reader?.Dispose();
-            _stream?.Dispose();
-            _client?.Close();
-            _client?.Dispose();
-        }
+        var request = new byte[headerBytes.Length + body.Length];
+        Buffer.BlockCopy(headerBytes, 0, request, 0, headerBytes.Length);
+        Buffer.BlockCopy(body, 0, request, headerBytes.Length, body.Length);
+        return request;
     }
+
+    private static async Task<RtspResponse> ReadResponseAsync(
+        NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        var headerBytes = new List<byte>(512);
+        var single = new byte[1];
+        while (headerBytes.Count < 64 * 1024)
+        {
+            var read = await stream.ReadAsync(single, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new IOException("Receiver closed the RTSP connection.");
+            }
+
+            headerBytes.Add(single[0]);
+            var count = headerBytes.Count;
+            if (count >= 4 &&
+                headerBytes[count - 4] == '\r' &&
+                headerBytes[count - 3] == '\n' &&
+                headerBytes[count - 2] == '\r' &&
+                headerBytes[count - 1] == '\n')
+            {
+                break;
+            }
+        }
+
+        var headerText = Encoding.ASCII.GetString(headerBytes.ToArray());
+        var preliminary = RtspResponse.Parse(headerText);
+        var contentLength = preliminary.Headers.TryGetValue("Content-Length", out var value) &&
+                            int.TryParse(value, out var parsed)
+            ? parsed
+            : 0;
+        var body = new byte[contentLength];
+        var offset = 0;
+        while (offset < body.Length)
+        {
+            var read = await stream.ReadAsync(
+                body.AsMemory(offset),
+                cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new IOException("Receiver closed the RTSP response body.");
+            }
+
+            offset += read;
+        }
+
+        return RtspResponse.Parse(headerText, body);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        _stream?.Dispose();
+        _client.Dispose();
+        _disposed = true;
+        return ValueTask.CompletedTask;
+    }
+
+    private static string NormalizeHost(string host) =>
+        host.Trim().TrimStart('[').TrimEnd(']');
 }

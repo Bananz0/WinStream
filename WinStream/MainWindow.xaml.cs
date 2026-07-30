@@ -9,12 +9,13 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
 using WinStream.Core.Audio;
+using WinStream.Core.Streaming;
 using WinStream.Network;
+using WinStream.Streaming;
 
 namespace WinStream
 {
@@ -22,6 +23,7 @@ namespace WinStream
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
         private readonly CaptureMonitorService _captureMonitor = new();
+        private readonly StreamingOrchestrator _streamingOrchestrator = new();
         private readonly DispatcherTimer _scanTimer;
         private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
@@ -47,6 +49,8 @@ namespace WinStream
 
             _captureMonitor.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(RefreshCaptureStatus);
+            _streamingOrchestrator.StateChanged += (_, _) =>
+                DispatcherQueue.TryEnqueue(() => UpdateUI(true));
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
@@ -72,6 +76,7 @@ namespace WinStream
             _scanTimer.Stop();
             _captureLevelTimer.Stop();
             _ = _captureMonitor.DisposeAsync().AsTask();
+            _ = _streamingOrchestrator.DisposeAsync().AsTask();
             Close();
         }
 
@@ -237,14 +242,24 @@ namespace WinStream
 
                     try
                     {
-                        using var rsaPublicKey = RSA.Create();
-                        await DeviceConnection.ConnectToAirPlayServer(deviceInfo.IPAddress, deviceInfo.Port, rsaPublicKey);
-                        statusTextBlock.Text = "Connected successfully.";
+                        if (_streamingOrchestrator.State == SessionState.Streaming &&
+                            ReferenceEquals(_streamingOrchestrator.CurrentReceiver, deviceInfo))
+                        {
+                            await _streamingOrchestrator.DisconnectAsync();
+                            statusTextBlock.Text = "Disconnected.";
+                            statusTextBlock.Foreground = new SolidColorBrush(Colors.Gray);
+                            button.Content = "Connect";
+                            return;
+                        }
+
+                        await _streamingOrchestrator.ConnectAsync(deviceInfo);
+                        statusTextBlock.Text = "RTSP session ready.";
                         statusTextBlock.Foreground = new SolidColorBrush(Colors.Green);
+                        button.Content = "Disconnect";
                     }
                     catch (Exception ex)
                     {
-                        statusTextBlock.Text = "Connection failed.";
+                        statusTextBlock.Text = $"Connection failed: {ex.Message}";
                         statusTextBlock.Foreground = new SolidColorBrush(Colors.Red);
                         Debug.WriteLine($"Connection error: {ex.Message}");
                     }
