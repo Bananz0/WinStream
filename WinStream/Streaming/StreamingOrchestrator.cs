@@ -44,6 +44,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     public PcmFanoutClock FanoutClock => _fanoutClock;
 
+    public bool EnableAirPlay2Experimental { get; set; }
+
     public async Task ConnectAsync(
         DeviceInfo receiver,
         IAudioSource audioSource,
@@ -61,6 +63,9 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 return;
             }
 
+            var protocol = ResolveProtocol(receiver);
+            EnsureHomogeneousWithExisting(protocol);
+
             EnsureAudioSource(audioSource);
             if (!_audioSource!.IsCapturing)
             {
@@ -68,9 +73,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             }
 
             SetAggregate(SessionState.Connecting, $"Connecting {SafeName(receiver)}");
-            var session = new RaopSession(receiver);
+            IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
+                ? new AirPlay2Session(receiver, EnableAirPlay2Experimental)
+                : new RaopSession(receiver);
             session.StateChanged += OnSessionStateChanged;
-            var entry = new SessionEntry(receiver, session);
+            var entry = new SessionEntry(receiver, session, protocol);
             _sessions[id] = entry;
             try
             {
@@ -401,11 +408,54 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             entry.Session.StateChanged -= OnSessionStateChanged;
             await entry.Session.DisposeAsync().ConfigureAwait(false);
 
-            var replacement = new RaopSession(entry.Receiver);
+            IAirPlaySession replacement = entry.Protocol == AirPlayProtocolKind.AirPlay2
+                ? new AirPlay2Session(entry.Receiver, EnableAirPlay2Experimental)
+                : new RaopSession(entry.Receiver);
             replacement.StateChanged += OnSessionStateChanged;
             entry.Session = replacement;
             await replacement.ConnectAsync(cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private AirPlayProtocolKind ResolveProtocol(DeviceInfo receiver)
+    {
+        var classic = AirPlayCapability.SupportsClassicRaop(
+            !string.IsNullOrWhiteSpace(receiver.PublicKey));
+        var ap2 = AirPlayCapability.SupportsAirPlay2(
+            !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
+            receiver.Features,
+            receiver.AirPlayVersion);
+        var preferred = AirPlayCapability.PreferredProtocol(
+            classic,
+            ap2,
+            EnableAirPlay2Experimental);
+        if (preferred == AirPlayProtocolKind.Unknown)
+        {
+            throw new InvalidOperationException(
+                "Receiver does not advertise a supported AirPlay audio protocol.");
+        }
+
+        if (preferred == AirPlayProtocolKind.AirPlay2 && !EnableAirPlay2Experimental)
+        {
+            if (classic)
+            {
+                return AirPlayProtocolKind.ClassicRaop;
+            }
+
+            throw new InvalidOperationException(
+                "This receiver appears to require AirPlay 2. " +
+                "Enable the experimental AirPlay 2 gate in settings (not production-ready).");
+        }
+
+        return preferred;
+    }
+
+    private void EnsureHomogeneousWithExisting(AirPlayProtocolKind incoming)
+    {
+        var protocols = _sessions.Values
+            .Select(entry => entry.Protocol)
+            .Append(incoming);
+        AirPlayCapability.EnsureHomogeneousSelection(protocols);
     }
 
     private async Task FailAllAsync(string reason)
@@ -522,11 +572,16 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     private static string SafeName(DeviceInfo receiver) => "receiver";
 
-    private sealed class SessionEntry(DeviceInfo receiver, IAirPlaySession session)
+    private sealed class SessionEntry(
+        DeviceInfo receiver,
+        IAirPlaySession session,
+        AirPlayProtocolKind protocol)
     {
         public DeviceInfo Receiver { get; } = receiver;
 
         public IAirPlaySession Session { get; set; } = session;
+
+        public AirPlayProtocolKind Protocol { get; } = protocol;
 
         public uint LastFanoutTimestamp { get; set; }
     }

@@ -34,6 +34,8 @@
         public bool IsGroupLeader { get; set; }
         public long RequiredSenderFeatures { get; set; }
         public long SystemFlags { get; set; }
+        public long Features { get; set; }
+        public string FeaturesRaw { get; set; }
 
         // Tooltip for displaying summarized info
         public string ToolTipText { get; set; }

@@ -89,7 +89,10 @@ namespace WinStream.Network
                     GroupUUID = GetTxtRecordValue(host, "gid"),
                     IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
                     RequiredSenderFeatures = TryParseLong(GetTxtRecordValue(host, "rsf")),
-                    SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags"))
+                    SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags")),
+                    FeaturesRaw = GetTxtRecordValue(host, "features"),
+                    Features = WinStream.Core.Streaming.AirPlayCapability.ParseFeatures(
+                        GetTxtRecordValue(host, "features"))
                 }).ToList();
 
                 ProcessDiscoveredDevices(currentDevices);

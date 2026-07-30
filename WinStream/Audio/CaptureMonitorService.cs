@@ -62,6 +62,14 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void SetAirPlay2Experimental(bool enabled)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _settings.EnableAirPlay2Experimental = enabled;
+        _settingsStore.Save(_settings);
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public async Task SetMonitoringAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

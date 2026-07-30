@@ -54,6 +54,9 @@ namespace WinStream
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
+            airPlay2GateToggle.IsOn = _captureMonitor.Settings.EnableAirPlay2Experimental;
+            _streamingOrchestrator.EnableAirPlay2Experimental =
+                _captureMonitor.Settings.EnableAirPlay2Experimental;
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
@@ -223,6 +226,13 @@ namespace WinStream
             var format = _captureMonitor.Format;
             captureStatusText.Text = format is null ? "Capturing" : format.ToString();
             captureStatusText.Foreground = new SolidColorBrush(Colors.SeaGreen);
+        }
+
+        private void AirPlay2GateToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            var enabled = airPlay2GateToggle.IsOn;
+            _streamingOrchestrator.EnableAirPlay2Experimental = enabled;
+            _captureMonitor.SetAirPlay2Experimental(enabled);
         }
 
         private async void StreamVolumeSlider_ValueChanged(
