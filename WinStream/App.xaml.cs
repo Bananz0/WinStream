@@ -1,29 +1,64 @@
-﻿using Microsoft.UI.Xaml;
-using Microsoft.UI.Windowing;
+﻿#nullable enable
+
+using Microsoft.Windows.AppLifecycle;
+using Microsoft.UI.Xaml;
 using System;
-using Microsoft.UI;
+using WinStream.Core;
+using WinStream.Tray;
 
 namespace WinStream
 {
     public partial class App : Application
     {
-        private Window m_window;
+        private MainWindow? _mainWindow;
+        private TrayIconService? _trayIcon;
+        private AppInstance? _appInstance;
 
         public App()
         {
-            this.InitializeComponent();
+            InitializeComponent();
         }
 
-        protected override void OnLaunched(LaunchActivatedEventArgs args)
+        protected override async void OnLaunched(LaunchActivatedEventArgs args)
         {
-            m_window = new MainWindow();
+            _appInstance = AppInstance.FindOrRegisterForKey(ProductIdentity.SingleInstanceKey);
+            if (!_appInstance.IsCurrent)
+            {
+                var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
+                await _appInstance.RedirectActivationToAsync(activation);
+                Environment.Exit(0);
+                return;
+            }
 
-            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(m_window);
-            WindowId windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
-            AppWindow appWindow = AppWindow.GetFromWindowId(windowId);
-            appWindow.Resize(new Windows.Graphics.SizeInt32(640, 400));  
+            _appInstance.Activated += OnAppInstanceActivated;
+            _mainWindow = new MainWindow();
+            _mainWindow.Activate();
 
-            m_window.Activate();
+            _trayIcon = new TrayIconService(_mainWindow.WindowHandle);
+            _trayIcon.OpenRequested += (_, _) => ShowMainWindow();
+            _trayIcon.ExitRequested += (_, _) => Quit();
+            _trayIcon.Initialize();
+
+            _mainWindow.HideToTray();
+        }
+
+        private void OnAppInstanceActivated(object? sender, AppActivationArguments args)
+        {
+            _mainWindow?.DispatcherQueue.TryEnqueue(ShowMainWindow);
+        }
+
+        private void ShowMainWindow()
+        {
+            _mainWindow?.ShowFromTray();
+        }
+
+        private void Quit()
+        {
+            _trayIcon?.Dispose();
+            _trayIcon = null;
+            _mainWindow?.CloseForExit();
+            _mainWindow = null;
+            Exit();
         }
     }
 }

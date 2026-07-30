@@ -2,6 +2,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Windowing;
+using Microsoft.UI;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -18,14 +20,53 @@ namespace WinStream
     {
         public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
         private DispatcherTimer scanTimer;
+        private readonly AppWindow _appWindow;
+        private bool _allowClose;
 
         public MainWindow()
         {
             InitializeComponent();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
+            _appWindow = AppWindow.GetFromWindowId(windowId);
+            _appWindow.Resize(new Windows.Graphics.SizeInt32(640, 500));
+            _appWindow.Closing += OnAppWindowClosing;
+
             Debug.WriteLine("Application started, UI initialized.");
 
             InitializeTimer();
             _ = DiscoverAndDisplayDevicesAsync();
+        }
+
+        public IntPtr WindowHandle => WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+        public void ShowFromTray()
+        {
+            _appWindow.Show();
+            Activate();
+        }
+
+        public void HideToTray()
+        {
+            _appWindow.Hide();
+        }
+
+        public void CloseForExit()
+        {
+            _allowClose = true;
+            scanTimer.Stop();
+            Close();
+        }
+
+        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        {
+            if (_allowClose)
+            {
+                return;
+            }
+
+            args.Cancel = true;
+            sender.Hide();
         }
 
         private void InitializeTimer()
