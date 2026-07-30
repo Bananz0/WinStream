@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
 using WinStream.Core.Audio;
+using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 using WinStream.Network;
 using WinStream.Streaming;
@@ -57,6 +58,8 @@ namespace WinStream
             airPlay2GateToggle.IsOn = _captureMonitor.Settings.EnableAirPlay2Experimental;
             _streamingOrchestrator.EnableAirPlay2Experimental =
                 _captureMonitor.Settings.EnableAirPlay2Experimental;
+            captureModeComboBox.SelectedIndex =
+                _captureMonitor.Settings.CaptureMode == CaptureMode.VirtualDriver ? 1 : 0;
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
@@ -233,6 +236,21 @@ namespace WinStream
             var enabled = airPlay2GateToggle.IsOn;
             _streamingOrchestrator.EnableAirPlay2Experimental = enabled;
             _captureMonitor.SetAirPlay2Experimental(enabled);
+        }
+
+        private void CaptureModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (captureModeComboBox.SelectedItem is ComboBoxItem item &&
+                item.Tag is string tag &&
+                Enum.TryParse<CaptureMode>(tag, out var mode))
+            {
+                _captureMonitor.SetCaptureMode(mode);
+                if (mode == CaptureMode.VirtualDriver)
+                {
+                    captureStatusText.Text = "Driver mode: install optional VAD (not in Store MSIX).";
+                    captureStatusText.Foreground = new SolidColorBrush(Colors.DarkOrange);
+                }
+            }
         }
 
         private async void StreamVolumeSlider_ValueChanged(

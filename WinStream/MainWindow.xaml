@@ -80,10 +80,17 @@
                           OffContent="AirPlay 2 off"
                           OnContent="AirPlay 2 experimental"
                           Toggled="AirPlay2GateToggle_Toggled"/>
+            <ComboBox x:Name="captureModeComboBox"
+                      Margin="16,0,0,0"
+                      Width="180"
+                      SelectionChanged="CaptureModeComboBox_SelectionChanged">
+                <ComboBoxItem Content="Loopback (Store)" Tag="Loopback"/>
+                <ComboBoxItem Content="Virtual driver (optional)" Tag="VirtualDriver"/>
+            </ComboBox>
             <TextBlock VerticalAlignment="Center"
                        Margin="12,0,0,0"
                        TextWrapping="Wrap"
-                       Text="Mixed AP1+AP2 groups are rejected. AP2 media path is gated."/>
+                       Text="Mixed AP1+AP2 rejected. Driver mode needs sideload package — not in MSIX."/>
         </StackPanel>
         <!-- Devices List -->
         <ListView Grid.Row="4" x:Name="devicesList" ItemsSource="{x:Bind DeviceList}" Margin="10">

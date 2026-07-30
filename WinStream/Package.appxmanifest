@@ -36,7 +36,7 @@
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
         DisplayName="WinStream"
-        Description="WinStream"
+        Description="Tray-first AirPlay audio sender for Windows. Captures system audio via WASAPI loopback and streams to classic RAOP receivers on your local network."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">
@@ -46,11 +46,11 @@
     </Application>
   </Applications>
 
+  <!-- Capability justifications: docs/store/capability-justifications.md -->
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
     <Capability Name="privateNetworkClientServer"/>
     <Capability Name="internetClientServer"/>
-    <uap3:Capability Name="backgroundMediaPlayback"/>
-    <DeviceCapability Name="bluetooth"/>
   </Capabilities>
 </Package>
+
