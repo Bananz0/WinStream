@@ -100,8 +100,8 @@ namespace WinStream.Network
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("Device discovery operation was canceled due to timeout.");
-                return new List<DeviceInfo>(); // or handle accordingly
+                WinStream.Core.Logging.AppLog.Info("discovery", "Device discovery canceled or timed out.");
+                return new List<DeviceInfo>();
             }
         }
 
@@ -114,7 +114,9 @@ namespace WinStream.Network
                 if (!Devices.ContainsKey(device.IPAddress))
                 {
                     Devices[device.IPAddress] = device;
-                    PrintDeviceInfo(device); // Print device info when it's first discovered
+                    WinStream.Core.Logging.AppLog.Info(
+                        "discovery",
+                        $"Discovered receiver model={device.Model}; port={device.Port}");
                 }
                 DeviceMissCounts[device.IPAddress] = 0; // Reset miss count
             }
@@ -158,33 +160,6 @@ namespace WinStream.Network
         private static long TryParseLong(string value)
         {
             return long.TryParse(value, out var result) ? result : 0;
-        }
-
-        private static void PrintDeviceInfo(DeviceInfo device)
-        {
-            Console.WriteLine($"Device Name: {device.DeviceName}");
-            Console.WriteLine($"Display Name: {device.DisplayName}");
-            Console.WriteLine($"IP Address: {device.IPAddress}");
-            Console.WriteLine($"Port: {device.Port}");
-            Console.WriteLine($"Manufacturer: {device.Manufacturer}");
-            Console.WriteLine($"Model: {device.Model}");
-            Console.WriteLine($"Firmware Version: {device.FirmwareVersion}");
-            Console.WriteLine($"OS Version: {device.OSVersion}");
-            Console.WriteLine($"Bluetooth Address: {device.BluetoothAddress}");
-            Console.WriteLine($"Device ID: {device.DeviceID}");
-            Console.WriteLine($"Protocol Version: {device.ProtocolVersion}");
-            Console.WriteLine($"AirPlay Version: {device.AirPlayVersion}");
-            Console.WriteLine($"Serial Number: {device.SerialNumber}");
-            Console.WriteLine($"Public CU AirPlay Pairing Identity: {device.PublicCUAirPlayPairingIdentity}");
-            Console.WriteLine($"Public CU System Pairing Identity: {device.PublicCUSystemPairingIdentity}");
-            Console.WriteLine($"Public Key: {device.PublicKey}");
-            Console.WriteLine($"Household ID: {device.HouseholdID}");
-            Console.WriteLine($"Group UUID: {device.GroupUUID}");
-            Console.WriteLine($"Is Group Leader: {device.IsGroupLeader}");
-            Console.WriteLine($"Required Sender Features: {device.RequiredSenderFeatures}");
-            Console.WriteLine($"System Flags: {device.SystemFlags}");
-            Console.WriteLine($"Tooltip Text: {device.ToolTipText}");
-            Console.WriteLine();
         }
 
         private static string ExtractDeviceName(IZeroconfHost raopHost, IReadOnlyList<IZeroconfHost> airplayResults)

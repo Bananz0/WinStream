@@ -55,8 +55,8 @@ Full steps: [docs/user-guide.md](docs/user-guide.md)
 
 ## Status
 
-Store MVP pipeline (loopback + classic RAOP single/multi-room + packaging docs) is implemented on branch `feat/winstream-full-product`. AirPlay 2 streaming and the virtual driver remain gated / optional stretch work.
+Code for the Store MVP pipeline (loopback + classic RAOP single/multi-room + packaging docs) is on branch `feat/winstream-full-product`. Manual device-matrix validation and Store Partner Center submission are still required before calling a build Store-ready. AirPlay 2 streaming and the virtual driver remain gated / optional stretch work.
 
 ## License
 
-See repository license file if present; otherwise all rights reserved by the project owners.
+[LICENSE.txt](LICENSE.txt) (Unlicense).

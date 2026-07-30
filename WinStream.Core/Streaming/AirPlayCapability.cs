@@ -48,14 +48,16 @@ public static class AirPlayCapability
         bool airPlay2,
         bool airPlay2GateEnabled)
     {
-        if (airPlay2 && airPlay2GateEnabled)
-        {
-            return AirPlayProtocolKind.AirPlay2;
-        }
-
+        // Prefer classic RAOP whenever the receiver advertises a pk — the AP2
+        // adapter is still a gated stub and must not steal dual-capable devices.
         if (classic)
         {
             return AirPlayProtocolKind.ClassicRaop;
+        }
+
+        if (airPlay2 && airPlay2GateEnabled)
+        {
+            return AirPlayProtocolKind.AirPlay2;
         }
 
         if (airPlay2)

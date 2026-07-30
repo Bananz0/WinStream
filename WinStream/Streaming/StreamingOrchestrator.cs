@@ -18,23 +18,23 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
     private readonly ReconnectBudget _reconnectBudget = new();
-    private readonly SessionStateMachine _aggregate = new();
+    private readonly object _sessionsGate = new();
     private readonly ResilienceMonitor _resilience = new();
     private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
     private IAudioSource? _audioSource;
     private DateTimeOffset? _silentSince;
     private CancellationTokenSource? _reconnectCts;
+    private SessionState _aggregateState = SessionState.Disconnected;
     private bool _disposed;
 
     public StreamingOrchestrator()
     {
-        _aggregate.StateChanged += (_, change) => StateChanged?.Invoke(this, change);
         _resilience.RecoverRequested += OnRecoverRequested;
     }
 
     public event EventHandler<SessionStateChanged>? StateChanged;
 
-    public SessionState State => _aggregate.State;
+    public SessionState State => _aggregateState;
 
     public DeviceInfo? CurrentReceiver =>
         _sessions.Values.Select(entry => entry.Receiver).FirstOrDefault();
@@ -58,9 +58,12 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         try
         {
             var id = ReceiverKey(receiver);
-            if (_sessions.ContainsKey(id))
+            lock (_sessionsGate)
             {
-                return;
+                if (_sessions.ContainsKey(id))
+                {
+                    return;
+                }
             }
 
             var protocol = ResolveProtocol(receiver);
@@ -78,7 +81,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 : new RaopSession(receiver);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
-            _sessions[id] = entry;
+            lock (_sessionsGate)
+            {
+                _sessions[id] = entry;
+            }
+
             try
             {
                 await session.ConnectAsync(cancellationToken).ConfigureAwait(false);
@@ -87,7 +94,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             catch
             {
                 session.StateChanged -= OnSessionStateChanged;
-                _sessions.Remove(id);
+                lock (_sessionsGate)
+                {
+                    _sessions.Remove(id);
+                }
+
                 await session.DisposeAsync().ConfigureAwait(false);
                 RefreshAggregate("connect-failed");
                 throw;
@@ -185,9 +196,13 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     private async Task RemoveSessionAsync(string key, CancellationToken cancellationToken)
     {
-        if (!_sessions.Remove(key, out var entry))
+        SessionEntry entry;
+        lock (_sessionsGate)
         {
-            return;
+            if (!_sessions.Remove(key, out entry!))
+            {
+                return;
+            }
         }
 
         entry.Session.StateChanged -= OnSessionStateChanged;
@@ -221,13 +236,17 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     {
         var frames = EstimateOutputFrames(frame);
         var tick = _fanoutClock.Advance(frames);
-        foreach (var entry in _sessions.Values.ToArray())
+        SessionEntry[] snapshot;
+        lock (_sessionsGate)
         {
-            // Identical fan-out stamp for every consumer of this PCM tick.
-            entry.LastFanoutTimestamp = tick.Timestamp;
+            snapshot = _sessions.Values.ToArray();
+        }
+
+        foreach (var entry in snapshot)
+        {
             if (entry.Session.State is SessionState.Streaming or SessionState.Degraded)
             {
-                entry.Session.SubmitPcm(frame.Pcm, frame.Format);
+                entry.Session.SubmitPcm(frame.Pcm, frame.Format, tick.Timestamp);
             }
         }
 
@@ -517,51 +536,17 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     private void SetAggregate(SessionState state, string? reason = null)
     {
-        try
+        if (_aggregateState == state)
         {
-            if (_aggregate.State == SessionState.Disconnected &&
-                state == SessionState.Disconnected)
-            {
-                return;
-            }
-
-            // Allow forced jumps for aggregate by reset when needed.
-            if (!CanTransition(_aggregate.State, state))
-            {
-                _aggregate.Reset(state);
-                if (!string.IsNullOrWhiteSpace(reason))
-                {
-                    AppLog.Info("stream", $"State={state}; {reason}");
-                }
-
-                return;
-            }
-
-            _aggregate.TransitionTo(state, reason);
-            if (!string.IsNullOrWhiteSpace(reason))
-            {
-                AppLog.Info("stream", $"State={state}; {reason}");
-            }
+            return;
         }
-        catch (InvalidOperationException)
-        {
-            _aggregate.Reset(state);
-            AppLog.Warn("stream", $"State forced to {state}");
-        }
-    }
 
-    private static bool CanTransition(SessionState from, SessionState to)
-    {
-        try
+        var previous = _aggregateState;
+        _aggregateState = state;
+        StateChanged?.Invoke(this, new SessionStateChanged(previous, state, reason));
+        if (!string.IsNullOrWhiteSpace(reason))
         {
-            var probe = new SessionStateMachine();
-            probe.Reset(from);
-            probe.TransitionTo(to);
-            return true;
-        }
-        catch
-        {
-            return false;
+            AppLog.Info("stream", $"State={state}; {reason}");
         }
     }
 
@@ -570,7 +555,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             ? receiver.DeviceID
             : $"{receiver.IPAddress}:{receiver.Port}";
 
-    private static string SafeName(DeviceInfo receiver) => "receiver";
+    private static string SafeName(DeviceInfo _) => "receiver";
 
     private sealed class SessionEntry(
         DeviceInfo receiver,
@@ -582,7 +567,5 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         public IAirPlaySession Session { get; set; } = session;
 
         public AirPlayProtocolKind Protocol { get; } = protocol;
-
-        public uint LastFanoutTimestamp { get; set; }
     }
 }

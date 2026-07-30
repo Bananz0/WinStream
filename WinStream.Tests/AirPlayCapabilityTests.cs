@@ -33,13 +33,40 @@ public class AirPlayCapabilityTests
     }
 
     [Fact]
-    public void Preferred_uses_ap2_when_gate_enabled()
+    public void Preferred_keeps_classic_even_when_ap2_gate_enabled()
     {
         var kind = AirPlayCapability.PreferredProtocol(
             classic: true,
             airPlay2: true,
             airPlay2GateEnabled: true);
 
+        Assert.Equal(AirPlayProtocolKind.ClassicRaop, kind);
+    }
+
+    [Fact]
+    public void Preferred_uses_ap2_only_when_classic_unavailable()
+    {
+        var kind = AirPlayCapability.PreferredProtocol(
+            classic: false,
+            airPlay2: true,
+            airPlay2GateEnabled: true);
+
         Assert.Equal(AirPlayProtocolKind.AirPlay2, kind);
+    }
+
+    [Theory]
+    [InlineData(true, 0, null, true)]
+    [InlineData(false, 1L << 30, null, true)]
+    [InlineData(false, 0, "366.0", true)]
+    [InlineData(false, 0, "100.0", false)]
+    public void SupportsAirPlay2_detects_pairing_features_and_version(
+        bool hasPairing,
+        long features,
+        string? version,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AirPlayCapability.SupportsAirPlay2(hasPairing, features, version));
     }
 }

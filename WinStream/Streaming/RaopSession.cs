@@ -65,9 +65,9 @@ public sealed class RaopSession : IAirPlaySession
 
     public SessionState State => _stateMachine.State;
 
-    public RaopEncryptionMaterial? EncryptionMaterial { get; private set; }
+    private RaopEncryptionMaterial? _encryptionMaterial;
 
-    public RaopTransportInfo? TransportInfo { get; private set; }
+    private RaopTransportInfo? _transportInfo;
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
@@ -91,10 +91,10 @@ public sealed class RaopSession : IAirPlaySession
                 UdpSocketConfigurer.SuppressUdpConnReset(_audioSocket);
                 UdpSocketConfigurer.SuppressUdpConnReset(_controlSocket);
                 UdpSocketConfigurer.SuppressUdpConnReset(_timingSocket);
-                EncryptionMaterial = RaopCrypto.CreateEncryptionMaterial(_receiver.PublicKey);
+                _encryptionMaterial = RaopCrypto.CreateEncryptionMaterial(_receiver.PublicKey);
                 _encryptor = new AesAudioEncryptor(
-                    EncryptionMaterial.AesKey,
-                    EncryptionMaterial.AesIv);
+                    _encryptionMaterial.AesKey,
+                    _encryptionMaterial.AesIv);
 
                 _rtspClient = new RtspClient(_receiver.IPAddress, _receiver.Port);
                 await _rtspClient.ConnectAsync(cancellationToken).ConfigureAwait(false);
@@ -111,7 +111,7 @@ public sealed class RaopSession : IAirPlaySession
                     _rtspClient.LocalIp,
                     _receiver.IPAddress,
                     streamId,
-                    EncryptionMaterial);
+                    _encryptionMaterial);
                 var challenge = Convert.ToBase64String(
                     RandomNumberGenerator.GetBytes(16)).TrimEnd('=');
                 var announce = await _rtspClient.SendAnnounceAsync(
@@ -131,8 +131,8 @@ public sealed class RaopSession : IAirPlaySession
                 _sessionId = setup.SessionId
                     ?? throw new InvalidOperationException(
                         "Receiver did not return an RTSP Session header.");
-                TransportInfo = RaopTransportInfo.Parse(setup.Transport);
-                BindRemoteEndpoints(address, TransportInfo);
+                _transportInfo = RaopTransportInfo.Parse(setup.Transport);
+                BindRemoteEndpoints(address, _transportInfo);
 
                 _sequenceNumber = (ushort)RandomNumberGenerator.GetInt32(0, ushort.MaxValue);
                 _rtpTimestamp = (uint)RandomNumberGenerator.GetInt32(0, int.MaxValue);
@@ -166,7 +166,10 @@ public sealed class RaopSession : IAirPlaySession
         }
     }
 
-    public void SubmitPcm(ReadOnlyMemory<byte> pcm, AudioFormat format)
+    public void SubmitPcm(
+        ReadOnlyMemory<byte> pcm,
+        AudioFormat format,
+        uint? sharedMediaTimestamp = null)
     {
         if (State != SessionState.Streaming ||
             _audioSocket is null ||
@@ -179,6 +182,11 @@ public sealed class RaopSession : IAirPlaySession
         byte[][] packets;
         lock (_mediaGate)
         {
+            if (sharedMediaTimestamp.HasValue)
+            {
+                _rtpTimestamp = sharedMediaTimestamp.Value;
+            }
+
             packets = new System.Collections.Generic.List<byte[]>(
                 _pcmBuffer.Push(pcm.Span, format)).ToArray();
         }
@@ -531,6 +539,12 @@ public sealed class RaopSession : IAirPlaySession
         _pcmBuffer.Reset();
         _encryptor?.Dispose();
         _encryptor = null;
+        if (_encryptionMaterial is not null)
+        {
+            CryptographicOperations.ZeroMemory(_encryptionMaterial.AesKey);
+            CryptographicOperations.ZeroMemory(_encryptionMaterial.AesIv);
+            _encryptionMaterial = null;
+        }
 
         if (_rtspClient is not null)
         {
@@ -546,7 +560,7 @@ public sealed class RaopSession : IAirPlaySession
         _timingSocket = null;
         _sessionId = null;
         _streamTarget = null;
-        TransportInfo = null;
+        _transportInfo = null;
         _audioEndpoint = null;
         _controlEndpoint = null;
         _timingEndpoint = null;

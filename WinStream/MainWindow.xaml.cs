@@ -76,13 +76,13 @@ namespace WinStream
             _appWindow.Hide();
         }
 
-        public void CloseForExit()
+        public async Task CloseForExitAsync()
         {
             _allowClose = true;
             _scanTimer.Stop();
             _captureLevelTimer.Stop();
-            _ = _captureMonitor.DisposeAsync().AsTask();
-            _ = _streamingOrchestrator.DisposeAsync().AsTask();
+            await _captureMonitor.DisposeAsync();
+            await _streamingOrchestrator.DisposeAsync();
             Close();
         }
 
@@ -400,26 +400,22 @@ namespace WinStream
 
         private string CreateTooltipSummary(DeviceInfo device)
         {
-            return $"Device Name: {device.DeviceName}\n" +
-                   $"IP Address: {device.IPAddress}\n" +
-                   $"Port: {device.Port}\n" +
-                   $"Manufacturer: {device.Manufacturer}\n" +
+            var classic = AirPlayCapability.SupportsClassicRaop(
+                !string.IsNullOrWhiteSpace(device.PublicKey));
+            var ap2 = AirPlayCapability.SupportsAirPlay2(
+                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
+                device.Features,
+                device.AirPlayVersion);
+            var protocol = classic
+                ? "Classic RAOP"
+                : ap2
+                    ? "AirPlay 2 (gated)"
+                    : "Unknown";
+            return $"Name: {device.DisplayName}\n" +
                    $"Model: {device.Model}\n" +
-                   $"Firmware Version: {device.FirmwareVersion}\n" +
-                   $"OS Version: {device.OSVersion}\n" +
-                   $"Bluetooth Address: {device.BluetoothAddress}\n" +
-                   $"Device ID: {device.DeviceID}\n" +
-                   $"Protocol Version: {device.ProtocolVersion}\n" +
-                   $"AirPlay Version: {device.AirPlayVersion}\n" +
-                   $"Serial Number: {device.SerialNumber}\n" +
-                   $"Public CU AirPlay Pairing Identity: {device.PublicCUAirPlayPairingIdentity}\n" +
-                   $"Public CU System Pairing Identity: {device.PublicCUSystemPairingIdentity}\n" +
-                   $"Public Key: {device.PublicKey}\n" +
-                   $"Household ID: {device.HouseholdID}\n" +
-                   $"Group UUID: {device.GroupUUID}\n" +
-                   $"Is Group Leader: {device.IsGroupLeader}\n" +
-                   $"Required Sender Features: {device.RequiredSenderFeatures}\n" +
-                   $"System Flags: {device.SystemFlags}";
+                   $"IP: {device.IPAddress}\n" +
+                   $"Port: {device.Port}\n" +
+                   $"Protocol: {protocol}";
         }
 
         private async void InfoButton_Click(object sender, RoutedEventArgs e)

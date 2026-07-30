@@ -75,7 +75,7 @@
                        Text="-20 dB"
                        Width="64"/>
         </Grid>
-        <StackPanel Grid.Row="2" Margin="10,0,10,10" Orientation="Horizontal">
+        <StackPanel Grid.Row="3" Margin="10,0,10,10" Orientation="Horizontal">
             <ToggleSwitch x:Name="airPlay2GateToggle"
                           OffContent="AirPlay 2 off"
                           OnContent="AirPlay 2 experimental"

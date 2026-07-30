@@ -60,4 +60,36 @@ public class RtpPacketizerTests
         Assert.Equal(9, seq);
         Assert.Equal(0x1111111122222222UL, ntp);
     }
+
+    [Fact]
+    public void WriteSyncPacket_sets_extension_on_first()
+    {
+        var destination = new byte[20];
+        var length = RtpPacketizer.WriteSyncPacket(
+            destination,
+            nowMinusLatency: 100,
+            ntpTimestamp: 0x0102030405060708UL,
+            now: 200,
+            first: true);
+
+        Assert.Equal(20, length);
+        Assert.Equal(0x90, destination[0]);
+        Assert.Equal(0xd4, destination[1]);
+        Assert.Equal(100u, BinaryPrimitives.ReadUInt32BigEndian(destination.AsSpan(4)));
+        Assert.Equal(200u, BinaryPrimitives.ReadUInt32BigEndian(destination.AsSpan(16)));
+    }
+
+    [Fact]
+    public void TryReadResendRequest_parses_range()
+    {
+        var packet = new byte[8];
+        packet[0] = 0x80;
+        packet[1] = 0x55;
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(4), 12);
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(6), 3);
+
+        Assert.True(RtpPacketizer.TryReadResendRequest(packet, out var missed, out var count));
+        Assert.Equal(12, missed);
+        Assert.Equal(3, count);
+    }
 }

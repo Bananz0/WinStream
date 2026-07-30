@@ -14,7 +14,10 @@ public interface IAirPlaySession : IAsyncDisposable
 
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 
-    void SubmitPcm(ReadOnlyMemory<byte> pcm, AudioFormat format);
+    void SubmitPcm(
+        ReadOnlyMemory<byte> pcm,
+        AudioFormat format,
+        uint? sharedMediaTimestamp = null);
 
     Task SetVolumeAsync(float volumeDb, CancellationToken cancellationToken = default);
 }

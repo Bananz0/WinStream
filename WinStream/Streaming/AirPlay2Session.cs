@@ -70,7 +70,10 @@ public sealed class AirPlay2Session : IAirPlaySession
         return Task.CompletedTask;
     }
 
-    public void SubmitPcm(ReadOnlyMemory<byte> pcm, AudioFormat format)
+    public void SubmitPcm(
+        ReadOnlyMemory<byte> pcm,
+        AudioFormat format,
+        uint? sharedMediaTimestamp = null)
     {
         // No-op until AP2 media path exists.
     }

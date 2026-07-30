@@ -36,7 +36,7 @@ namespace WinStream
 
             _trayIcon = new TrayIconService(_mainWindow.WindowHandle);
             _trayIcon.OpenRequested += (_, _) => ShowMainWindow();
-            _trayIcon.ExitRequested += (_, _) => Quit();
+            _trayIcon.ExitRequested += (_, _) => _ = QuitAsync();
             _trayIcon.Initialize();
 
             _mainWindow.HideToTray();
@@ -52,12 +52,16 @@ namespace WinStream
             _mainWindow?.ShowFromTray();
         }
 
-        private void Quit()
+        private async System.Threading.Tasks.Task QuitAsync()
         {
             _trayIcon?.Dispose();
             _trayIcon = null;
-            _mainWindow?.CloseForExit();
-            _mainWindow = null;
+            if (_mainWindow is not null)
+            {
+                await _mainWindow.CloseForExitAsync();
+                _mainWindow = null;
+            }
+
             Exit();
         }
     }
