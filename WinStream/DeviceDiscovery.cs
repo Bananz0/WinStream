@@ -45,7 +45,7 @@ namespace WinStream.Network
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("Discovery was canceled or timed out.");
+                WinStream.Core.Logging.AppLog.Info("discovery", "Background discovery canceled.");
             }
             finally
             {

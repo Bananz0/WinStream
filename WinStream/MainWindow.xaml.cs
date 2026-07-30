@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
 using WinStream.Core.Audio;
+using WinStream.Core.Logging;
 using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 using WinStream.Network;
@@ -169,7 +170,7 @@ namespace WinStream
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Failed to enumerate capture endpoints: {ex.Message}");
+                AppLog.Warn("capture", $"Failed to enumerate capture endpoints: {ex.GetType().Name}");
                 captureStatusText.Text = "No audio devices";
             }
             finally
@@ -278,7 +279,7 @@ namespace WinStream
                     var progressRing = container.FindName("connectProgressRing") as ProgressRing;
                     var statusTextBlock = container.FindName("connectStatusTextBlock") as TextBlock;
 
-                    Debug.WriteLine($"Connecting to {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}");
+                    AppLog.Info("ui", "Connecting to selected receiver.");
                     UpdateUI(false);
                     progressRing.Visibility = Visibility.Visible;
                     statusTextBlock.Text = string.Empty;
@@ -316,7 +317,7 @@ namespace WinStream
                     {
                         statusTextBlock.Text = $"Connection failed: {ex.Message}";
                         statusTextBlock.Foreground = new SolidColorBrush(Colors.Red);
-                        Debug.WriteLine($"Connection error: {ex.Message}");
+                        AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
                     }
                     finally
                     {
@@ -341,7 +342,7 @@ namespace WinStream
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error during device discovery: {ex.Message}");
+                AppLog.Error("ui", $"Discovery error: {ex.GetType().Name}");
                 searchButton.Content = "Discovery Error";
             }
             finally
