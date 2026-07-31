@@ -135,32 +135,32 @@ public static class BinaryPlist
         switch (value)
         {
             case IReadOnlyDictionary<string, object> dict:
-            {
-                var pairs = dict.OrderBy(p => p.Key, StringComparer.Ordinal).ToList();
-                var refs = new int[pairs.Count * 2];
-                for (var i = 0; i < pairs.Count; i++)
                 {
-                    refs[i] = objects.Count;
-                    Collect(pairs[i].Key, objects, children);
-                    refs[pairs.Count + i] = objects.Count;
-                    Collect(Normalize(pairs[i].Value), objects, children);
-                }
+                    var pairs = dict.OrderBy(p => p.Key, StringComparer.Ordinal).ToList();
+                    var refs = new int[pairs.Count * 2];
+                    for (var i = 0; i < pairs.Count; i++)
+                    {
+                        refs[i] = objects.Count;
+                        Collect(pairs[i].Key, objects, children);
+                        refs[pairs.Count + i] = objects.Count;
+                        Collect(Normalize(pairs[i].Value), objects, children);
+                    }
 
-                children[index] = refs;
-                break;
-            }
+                    children[index] = refs;
+                    break;
+                }
             case IReadOnlyList<object> list:
-            {
-                var refs = new int[list.Count];
-                for (var i = 0; i < list.Count; i++)
                 {
-                    refs[i] = objects.Count;
-                    Collect(Normalize(list[i]), objects, children);
-                }
+                    var refs = new int[list.Count];
+                    for (var i = 0; i < list.Count; i++)
+                    {
+                        refs[i] = objects.Count;
+                        Collect(Normalize(list[i]), objects, children);
+                    }
 
-                children[index] = refs;
-                break;
-            }
+                    children[index] = refs;
+                    break;
+                }
         }
     }
 

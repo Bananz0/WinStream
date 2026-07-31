@@ -15,6 +15,8 @@ public sealed class EventChannel : IAsyncDisposable
     private Task? _loop;
     private bool _disposed;
 
+    public event EventHandler<Exception>? Faulted;
+
     public async Task ConnectAsync(
         string host,
         int eventPort,
@@ -31,7 +33,9 @@ public sealed class EventChannel : IAsyncDisposable
             _tcp.GetStream(),
             eventsReadKey,
             eventsWriteKey);
-        _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // Keep-alive must outlive the Connect cancellation token (reconnect budgets
+        // cancel that token after success). Own a private CTS until DisposeAsync.
+        _loopCts = new CancellationTokenSource();
         _loop = Task.Run(() => KeepAliveLoopAsync(_loopCts.Token), CancellationToken.None);
     }
 
@@ -43,8 +47,6 @@ public sealed class EventChannel : IAsyncDisposable
             {
                 var chunk = await _crypto!.ReadNextChunkAsync(cancellationToken)
                     .ConfigureAwait(false);
-                // Accumulate until headers; for Phase 4 keep-alive any inbound command
-                // is answered with a generic RTSP 200 so the receiver does not tear down.
                 if (chunk.Length == 0)
                 {
                     continue;
@@ -61,13 +63,13 @@ public sealed class EventChannel : IAsyncDisposable
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Expected on disconnect.
+            // Expected on dispose.
         }
-        catch
+        catch (Exception ex)
         {
-            // Event drop surfaces via session resilience / UI leave-streaming budget.
+            Faulted?.Invoke(this, ex);
         }
     }
 

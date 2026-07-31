@@ -46,14 +46,6 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
 
     public string DeviceId { get; set; } = "AA:BB:CC:DD:EE:FF";
 
-    public string LocalIp { get; set; } = "127.0.0.1";
-
-    /// <summary>
-    /// When true (default), RECORD runs after session SETUP and before stream SETUP
-    /// (OwnTone / Apple order). When false, stream SETUP then RECORD.
-    /// </summary>
-    public bool RecordBeforeStreamSetup { get; set; } = true;
-
     public async Task ConnectAndPairAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

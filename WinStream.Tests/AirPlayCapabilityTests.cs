@@ -65,7 +65,7 @@ public class AirPlayCapabilityTests
     [InlineData(true, false, true, AirPlayProtocolKind.ClassicRaop)]
     [InlineData(true, false, false, AirPlayProtocolKind.ClassicRaop)]
     [InlineData(false, false, true, AirPlayProtocolKind.Unknown)]
-    public void PreferredProtocolPhase4Target_truth_table(
+    public void PreferredProtocol_truth_table(
         bool classic,
         bool airPlay2,
         bool gate,
@@ -73,7 +73,7 @@ public class AirPlayCapabilityTests
     {
         Assert.Equal(
             expected,
-            AirPlayCapability.PreferredProtocolPhase4Target(classic, airPlay2, gate));
+            AirPlayCapability.PreferredProtocol(classic, airPlay2, gate));
     }
 
     [Theory]

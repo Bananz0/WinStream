@@ -96,19 +96,6 @@ public static class AirPlayCapability
         bool airPlay2,
         bool airPlay2GateEnabled)
     {
-        // Phase 4+: prefer AP2 when the experimental gate is on for dual-capable
-        // receivers; gate off keeps classic for dual-capable Macs that still need RAOP.
-        return PreferredProtocolPhase4Target(classic, airPlay2, airPlay2GateEnabled);
-    }
-
-    /// <summary>
-    /// Canonical prefer-AP2 routing (also used by <see cref="PreferredProtocol"/>).
-    /// </summary>
-    public static AirPlayProtocolKind PreferredProtocolPhase4Target(
-        bool classic,
-        bool airPlay2,
-        bool airPlay2GateEnabled)
-    {
         if (classic && airPlay2)
         {
             return airPlay2GateEnabled

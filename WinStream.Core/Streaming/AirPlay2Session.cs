@@ -90,8 +90,7 @@ public sealed class AirPlay2Session : IAirPlaySession
 
                 var client = new EncryptedRtspClient(_receiver.IPAddress, _receiver.Port)
                 {
-                    DeviceId = ResolveDeviceId(_receiver),
-                    RecordBeforeStreamSetup = true
+                    DeviceId = ResolveDeviceId(_receiver)
                 };
                 _control = client;
 
@@ -101,6 +100,7 @@ public sealed class AirPlay2Session : IAirPlaySession
                 await client.SessionSetupAsync(cancellationToken).ConfigureAwait(false);
 
                 _events = new EventChannel();
+                _events.Faulted += OnEventChannelFaulted;
                 await _events.ConnectAsync(
                     _receiver.IPAddress,
                     client.EventPort,
@@ -108,22 +108,11 @@ public sealed class AirPlay2Session : IAirPlaySession
                     client.Pairing.EventsReadKey.ToArray(),
                     cancellationToken).ConfigureAwait(false);
 
-                if (client.RecordBeforeStreamSetup)
-                {
-                    await client.RecordAsync(cancellationToken).ConfigureAwait(false);
-                    await client.StreamSetupAsync(
-                        GetLocalPort(_controlSocket),
-                        _shk,
-                        cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await client.StreamSetupAsync(
-                        GetLocalPort(_controlSocket),
-                        _shk,
-                        cancellationToken).ConfigureAwait(false);
-                    await client.RecordAsync(cancellationToken).ConfigureAwait(false);
-                }
+                await client.RecordAsync(cancellationToken).ConfigureAwait(false);
+                await client.StreamSetupAsync(
+                    GetLocalPort(_controlSocket),
+                    _shk,
+                    cancellationToken).ConfigureAwait(false);
 
                 _audioEndpoint = new IPEndPoint(address, client.DataPort);
                 _sequenceNumber = (ushort)RandomNumberGenerator.GetInt32(0, ushort.MaxValue);
@@ -243,6 +232,15 @@ public sealed class AirPlay2Session : IAirPlaySession
         _disposed = true;
     }
 
+    private void OnEventChannelFaulted(object? sender, Exception ex)
+    {
+        AppLog.Warn("ap2", $"Event channel fault: {ex.GetType().Name}");
+        if (State == SessionState.Streaming)
+        {
+            _stateMachine.TransitionTo(SessionState.Failed, "AirPlay event channel closed.");
+        }
+    }
+
     private void SendAudioPacket(byte[] pcmPacket)
     {
         if (_audioSocket is null || _audioEndpoint is null || _shk is null)
@@ -295,6 +293,7 @@ public sealed class AirPlay2Session : IAirPlaySession
     {
         if (_events is not null)
         {
+            _events.Faulted -= OnEventChannelFaulted;
             await _events.DisposeAsync().ConfigureAwait(false);
             _events = null;
         }
