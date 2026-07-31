@@ -34,6 +34,7 @@ public class AudioFrameSendPumpOffloadTests
             capacity: 8,
             _ => Interlocked.Increment(ref sent));
         pump.BlockWorkerForTests();
+        using var entered = pump.ArmWorkerEnteredSignalForTests();
         pump.Start();
 
         pump.Enqueue(new AudioFrame(
@@ -41,7 +42,7 @@ public class AudioFrameSendPumpOffloadTests
             new AudioFormat(44100, 2, 16),
             1));
 
-        await Task.Delay(40);
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(2)));
         Assert.Equal(0, sent);
         Assert.Equal(0, pump.SendCount);
 
@@ -54,5 +55,21 @@ public class AudioFrameSendPumpOffloadTests
 
         Assert.Equal(1, sent);
         Assert.Equal(1, pump.SendCount);
+    }
+
+    [Fact]
+    public async Task Enqueue_overflow_increments_QueueDropCount()
+    {
+        await using var pump = new AudioFrameSendPump(
+            capacity: 2,
+            _ => { });
+
+        // Do not Start — assert queue policy without a racing worker drain.
+        pump.Enqueue(new AudioFrame(new byte[] { 1 }, new AudioFormat(44100, 2, 16), 1));
+        pump.Enqueue(new AudioFrame(new byte[] { 2 }, new AudioFormat(44100, 2, 16), 2));
+        pump.Enqueue(new AudioFrame(new byte[] { 3 }, new AudioFormat(44100, 2, 16), 3));
+
+        Assert.Equal(1, pump.QueueDropCount);
+        Assert.Equal(2, pump.QueueDepth);
     }
 }

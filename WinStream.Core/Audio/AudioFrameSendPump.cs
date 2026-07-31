@@ -8,6 +8,7 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
     private readonly BoundedAudioFrameQueue _queue;
     private readonly Action<AudioFrame> _send;
     private readonly ManualResetEventSlim _workerGate = new(true);
+    private ManualResetEventSlim? _workerEnteredGate;
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private long _sendCount;
@@ -56,6 +57,13 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
     /// <summary>Test seam: allow the worker to proceed.</summary>
     internal void UnblockWorkerForTests() => _workerGate.Set();
 
+    /// <summary>Test seam: signaled once the worker is about to wait on the gate.</summary>
+    internal ManualResetEventSlim ArmWorkerEnteredSignalForTests()
+    {
+        _workerEnteredGate = new ManualResetEventSlim(false);
+        return _workerEnteredGate;
+    }
+
     private void RunWorker(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -76,6 +84,7 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
 
             try
             {
+                _workerEnteredGate?.Set();
                 _workerGate.Wait(cancellationToken);
             }
             catch (OperationCanceledException)
@@ -84,8 +93,18 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
             }
 
             var started = Environment.TickCount64;
-            _send(frame);
-            Interlocked.Increment(ref _sendCount);
+            try
+            {
+                _send(frame);
+                Interlocked.Increment(ref _sendCount);
+            }
+            catch (Exception ex)
+            {
+                Logging.AppLog.Error(
+                    "stream",
+                    $"Encode/send failed; continuing pump: {ex.GetType().Name}: {ex.Message}");
+            }
+
             var elapsed = Environment.TickCount64 - started;
             if (elapsed >= 8)
             {

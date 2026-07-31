@@ -14,6 +14,9 @@ namespace WinStream.Streaming;
 
 public sealed class StreamingOrchestrator : IAsyncDisposable
 {
+    // ~1.5 s of 10 ms frames at drop-oldest under CPU spikes before late audio is discarded.
+    private const int SendQueueCapacity = 64;
+
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
@@ -168,7 +171,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             _audioSource.DeviceInvalidated += OnDeviceInvalidated;
             _audioSource.CaptureFailed += OnCaptureFailed;
             _fanoutClock.Reset();
-            _sendPump = new AudioFrameSendPump(capacity: 64, DispatchQueuedFrame);
+            _sendPump = new AudioFrameSendPump(SendQueueCapacity, DispatchQueuedFrame);
             _sendPump.Start();
             return;
         }
@@ -223,9 +226,20 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
         foreach (var entry in snapshot)
         {
-            if (entry.Session.State is SessionState.Streaming or SessionState.Degraded)
+            if (entry.Session.State is not (SessionState.Streaming or SessionState.Degraded))
+            {
+                continue;
+            }
+
+            try
             {
                 entry.Session.SubmitPcm(frame.Pcm, frame.Format, stamp);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error(
+                    "stream",
+                    $"SubmitPcm failed for {entry.Receiver.DisplayName}: {ex.GetType().Name}: {ex.Message}");
             }
         }
 

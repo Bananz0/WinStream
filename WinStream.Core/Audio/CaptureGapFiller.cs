@@ -24,6 +24,23 @@ public static class CaptureGapFiller
     }
 
     /// <summary>
+    /// Marks the start of a gap once. Returns true when this call opens a new gap.
+    /// </summary>
+    public static bool TryBeginGap(ref int inGapFlag, ref long gapCount)
+    {
+        if (Interlocked.CompareExchange(ref inGapFlag, 1, 0) != 0)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref gapCount);
+        return true;
+    }
+
+    public static void EndGap(ref int inGapFlag) =>
+        Interlocked.Exchange(ref inGapFlag, 0);
+
+    /// <summary>
     /// Zeroed PCM16 covering <paramref name="gapMilliseconds"/> (capped).
     /// </summary>
     public static byte[] CreateSilence(AudioFormat format, double gapMilliseconds)
@@ -38,7 +55,4 @@ public static class CaptureGapFiller
 
         return new byte[frames * format.BlockAlign];
     }
-
-    public static byte[] CreateSilenceChunk(AudioFormat format) =>
-        CreateSilence(format, ChunkMilliseconds);
 }

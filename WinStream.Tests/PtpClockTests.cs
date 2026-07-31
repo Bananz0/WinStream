@@ -64,15 +64,17 @@ public class PtpClockTests
         var clock = new PtpClock(1);
         clock.SetOffsetForTests(offsetNs: 1_000_000_000L, masterClockId: 7);
 
-        // Steady sample near the EMA — accepted.
+        // Steady sample near the EMA — accepted (α=0.2 → +2 ms toward +10 ms).
         clock.ApplyOffsetForTests(masterNs: 1_010_000_000L, localNs: 0);
         Assert.Equal(0, clock.SpikesRejectedForTests);
+        Assert.Equal(1_002_000_000L, clock.OffsetNanosecondsForTests);
 
         var before = clock.NowNanoseconds;
 
         // 200 ms jump vs EMA — rejected.
         clock.ApplyOffsetForTests(masterNs: 1_200_000_000L, localNs: 0);
         Assert.Equal(1, clock.SpikesRejectedForTests);
+        Assert.Equal(1_002_000_000L, clock.OffsetNanosecondsForTests);
 
         // Offset must not jump by ~200 ms.
         var after = clock.NowNanoseconds;

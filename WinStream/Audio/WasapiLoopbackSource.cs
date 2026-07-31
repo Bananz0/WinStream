@@ -75,11 +75,11 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     public bool IsSilent => RmsCalculator.IsSilent(CurrentRms);
 
-    /// <summary>How many capture callbacks arrived after a &gt;50 ms gap (Phase 1 telemetry).</summary>
-    public long CaptureGapCount => Interlocked.Read(ref _captureGapCount);
+    /// <summary>How many sustained capture gaps were opened (developer telemetry).</summary>
+    internal long CaptureGapCount => Interlocked.Read(ref _captureGapCount);
 
     /// <summary>Most recent inter-callback interval in Stopwatch ticks.</summary>
-    public long LastInterCallbackTicks => Interlocked.Read(ref _lastInterCallbackTicks);
+    internal long LastInterCallbackTicks => Interlocked.Read(ref _lastInterCallbackTicks);
 
     public string? PreferredEndpointId
     {
@@ -116,17 +116,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
             StopCaptureLocked();
         }
 
-        gapCts?.Cancel();
-        try
-        {
-            gapLoop?.Wait(TimeSpan.FromSeconds(1));
-        }
-        catch (AggregateException)
-        {
-            // Expected on cancel.
-        }
-
-        gapCts?.Dispose();
+        JoinGapFill(gapCts, gapLoop);
         return Task.CompletedTask;
     }
 
@@ -271,19 +261,14 @@ public sealed class WasapiLoopbackSource : IAudioSource
             return;
         }
 
+        // Gap silence is timer-only (RunGapFillLoopAsync) so resume and the timer
+        // never double-insert. Callbacks only refresh QPC / telemetry.
         var now = Stopwatch.GetTimestamp();
         var previous = Interlocked.Exchange(ref _lastCallbackQpc, now);
-        Interlocked.Exchange(ref _inGap, 0);
+        CaptureGapFiller.EndGap(ref _inGap);
         if (previous != 0)
         {
-            var delta = now - previous;
-            Interlocked.Exchange(ref _lastInterCallbackTicks, delta);
-            if (CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
-            {
-                var gapMs = CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency);
-                Interlocked.Increment(ref _captureGapCount);
-                EmitSilence(gapMs);
-            }
+            Interlocked.Exchange(ref _lastInterCallbackTicks, now - previous);
         }
 
         var copy = Pcm16Converter.ToPcm16(e.Buffer.AsSpan(0, e.BytesRecorded), _sourceFormat);
@@ -327,13 +312,12 @@ public sealed class WasapiLoopbackSource : IAudioSource
             var delta = Stopwatch.GetTimestamp() - last;
             if (!CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
             {
-                Interlocked.Exchange(ref _inGap, 0);
+                CaptureGapFiller.EndGap(ref _inGap);
                 continue;
             }
 
-            if (Interlocked.CompareExchange(ref _inGap, 1, 0) == 0)
+            if (CaptureGapFiller.TryBeginGap(ref _inGap, ref _captureGapCount))
             {
-                Interlocked.Increment(ref _captureGapCount);
                 AppLog.Info("capture", "Loopback gap — inserting silence to keep RTP continuous");
             }
 

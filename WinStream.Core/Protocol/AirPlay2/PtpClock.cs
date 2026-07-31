@@ -58,7 +58,6 @@ public sealed class PtpClock : IAsyncDisposable
     private ushort _syncSequence;
     private bool _syncPending;
     private long _offsetNs;
-    private long _emaOffsetNs;
     private ulong _masterClockId;
     private int _samples;
     private int _spikesRejected;
@@ -181,7 +180,6 @@ public sealed class PtpClock : IAsyncDisposable
     internal void SetOffsetForTests(long offsetNs, ulong masterClockId)
     {
         Interlocked.Exchange(ref _offsetNs, offsetNs);
-        Interlocked.Exchange(ref _emaOffsetNs, offsetNs);
         Volatile.Write(ref _masterClockId, masterClockId);
         if (Interlocked.CompareExchange(ref _samples, 1, 0) == 0)
         {
@@ -195,6 +193,9 @@ public sealed class PtpClock : IAsyncDisposable
 
     /// <summary>How many Follow_Up samples were rejected as spikes.</summary>
     internal int SpikesRejectedForTests => Volatile.Read(ref _spikesRejected);
+
+    /// <summary>Current smoothed offset (EMA state) for unit tests.</summary>
+    internal long OffsetNanosecondsForTests => Interlocked.Read(ref _offsetNs);
 
     private static UdpClient BindPort(int port)
     {
@@ -357,7 +358,6 @@ public sealed class PtpClock : IAsyncDisposable
         if (samples == 0)
         {
             Interlocked.Exchange(ref _offsetNs, offset);
-            Interlocked.Exchange(ref _emaOffsetNs, offset);
             Interlocked.Exchange(ref _samples, 1);
             AppLog.Info(
                 "ptp",
@@ -366,7 +366,7 @@ public sealed class PtpClock : IAsyncDisposable
             return;
         }
 
-        var ema = Interlocked.Read(ref _emaOffsetNs);
+        var ema = Interlocked.Read(ref _offsetNs);
         var delta = Math.Abs(offset - ema);
         if (delta > SpikeRejectNanoseconds)
         {
@@ -376,7 +376,6 @@ public sealed class PtpClock : IAsyncDisposable
         }
 
         var smoothed = ema + (long)(EmaAlpha * (offset - ema));
-        Interlocked.Exchange(ref _emaOffsetNs, smoothed);
         Interlocked.Exchange(ref _offsetNs, smoothed);
         Interlocked.Increment(ref _samples);
         MaybeLogPtpDelta(delta, rejected: false);
@@ -385,18 +384,12 @@ public sealed class PtpClock : IAsyncDisposable
     private void MaybeLogPtpDelta(long deltaNs, bool rejected)
     {
         var nowMs = Environment.TickCount64;
-        var last = Interlocked.Read(ref _lastPtpDeltaLogMs);
-        if (nowMs - last < 1_000 && !rejected)
+        if (!rejected && nowMs - Interlocked.Read(ref _lastPtpDeltaLogMs) < 1_000)
         {
             return;
         }
 
-        if (Interlocked.CompareExchange(ref _lastPtpDeltaLogMs, nowMs, last) != last &&
-            !rejected)
-        {
-            return;
-        }
-
+        Interlocked.Exchange(ref _lastPtpDeltaLogMs, nowMs);
         if (rejected || deltaNs > 1_000_000)
         {
             AppLog.Info(
