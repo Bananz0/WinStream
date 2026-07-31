@@ -235,5 +235,13 @@ if ($installed) {
     Write-Host "  Version: $($installed.Version)"
     Write-Host "  Install: $($installed.InstallLocation)"
 }
-Write-Host '  Launch from Start Menu: WinStream'
+
+Write-Host 'Launching WinStream...'
+$startApp = Get-StartApps | Where-Object { $_.Name -eq 'WinStream' } | Select-Object -First 1
+if ($startApp) {
+    Start-Process -FilePath ("shell:AppsFolder\" + $startApp.AppID)
+} else {
+    Write-Host '  Could not auto-launch - open WinStream from the Start Menu.'
+}
+
 Write-Host 'Done.'

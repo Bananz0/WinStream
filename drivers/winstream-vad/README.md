@@ -37,14 +37,26 @@ See [UPSTREAM.md](UPSTREAM.md) for source and license provenance.
 - Matching Windows SDK/WDK 10.0.28000.x
 - Desktop development with C++ and Spectre-mitigated libraries
 
-Build from a VS Developer PowerShell (NuGet WDK packages under `drivers/winstream-vad/packages/` must be restored first):
+Build with the repo script, which restores the packages and picks the right MSBuild:
 
 ```powershell
-nuget restore drivers\winstream-vad\packages.config -PackagesDirectory drivers\winstream-vad\packages
-msbuild drivers\winstream-vad\WinStreamVad.sln /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-winstream-vad.ps1
 ```
 
-Package output lands under `drivers\winstream-vad\x64\Release\package\` (`WinStreamVad.sys`, `.inf`, `.cat`). Inf2Cat targets Windows 11+ (`10_CO_X64` and later) to match the INF’s `NTamd64.10.0...22000` decoration.
+Package output lands under `drivers\winstream-vad\x64\Release\package\` (`WinStreamVad.sys`, `.inf`, `.cat`) plus a build manifest at `artifacts\driver\build-manifest.json`. Inf2Cat targets Windows 11+ (`10_CO_X64` and later) to match the INF’s `NTamd64.10.0...22000` decoration.
+
+**Use the 64-bit MSBuild.** This is a correctness requirement, not a preference:
+
+```powershell
+# Correct — <VS>\MSBuild\Current\Bin\amd64\MSBuild.exe
+nuget restore drivers\winstream-vad\packages.config -PackagesDirectory drivers\winstream-vad\packages
+& "$vs\MSBuild\Current\Bin\amd64\MSBuild.exe" drivers\winstream-vad\WinStreamVad.sln `
+    /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+```
+
+The 32-bit MSBuild on `Bin\` makes the driver targets resolve x86 copies of `InfVerif.dll` and `ApiValidator.exe`. The `Microsoft.Windows.WDK.x64` package ships neither, so the build emits `WinStreamVad.sys`, then fails INF verification and catalog generation — a confusing "the driver built but the package didn't" state.
+
+A full WDK installation is not required; the WDK arrives through the NuGet packages in `packages.config`. Visual Studio with the C++ toolset is enough.
 
 ## Signing ladder
 
@@ -61,14 +73,67 @@ Never commit certificates, private keys, `.sys`, `.cat`, packaged installers, CA
 Destructive; use a disposable x64 VM with a snapshot:
 
 1. Enable TESTSIGNING and reboot (`bcdedit /set testsigning on`).
-2. From an elevated prompt in the package folder:
+2. Build a test-signed package and install it from an elevated prompt:
 
 ```powershell
-pnputil /add-driver WinStreamVad.inf /install
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-winstream-vad.ps1 -TestSign
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-winstream-vad.ps1
 ```
 
+The install script refuses to run without elevation or TESTSIGNING, stops when Secure Boot is on (it overrides TESTSIGNING), and warns when HVCI is running, since that lets the package install while the driver silently fails to load.
+
 3. Validate Device Manager shows `ROOT\WINSTREAMVAD` and a render endpoint named `WinStream Virtual Audio`.
-4. Run `docs/testing/virtual-driver-checklist.md`, then remove the device/package and restore the VM snapshot.
+4. Measure the endpoint rather than trusting it:
+
+```powershell
+dotnet run --project tools\VadProbe\VadProbe.csproj -c Release -- --seconds 60
+```
+
+5. Run `docs/testing/virtual-driver-checklist.md`, then uninstall and restore the snapshot:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-winstream-vad.ps1 -Uninstall
+```
+
+### Packet-size constraints
+
+The render WaveRT interface advertises `DEVPKEY_KsAudio_PacketSize_Constraints2`
+(`ksmedia.h`, Windows 10 1607+) on the wave filter's `KSCATEGORY_AUDIO` interface
+before `PcRegisterSubdevice`. The DEFAULT processing mode declares 144 frames —
+3 ms at the fixed 48 kHz format — over a **1 ms transport minimum**.
+
+The minimum must stay strictly below the per-mode packet size. Windows ignores a
+mode constraint that is not higher than the transport minimum, so the earlier
+3 ms/3 ms pairing would have silently discarded the 3 ms claim and left the
+endpoint at the 10 ms default. SYSVAD uses the same shape: a 2 ms minimum under a
+128-sample DEFAULT mode.
+
+Declaring a period the driver cannot actually service does not produce a polite
+fallback — it produces glitches. Low-latency operation also requires registering
+driver-owned threads through `PcAddStreamResource` so Windows can isolate them.
+
+That property is a **claim the driver makes**, not a measurement. `VadProbe`
+reports it as `Declared`, separately from the `Measured` callback p95, and only
+the measured number can satisfy `LinkSlaEligibility`. For comparison, an ordinary
+AMD HD Audio endpoint on the dev machine declares a 10 ms minimum period and
+measures 64 ms loopback p95.
+
+### Validating a 3 ms period
+
+Two signals together, neither sufficient alone:
+
+1. `VadProbe` — measured WASAPI callback cadence at the requested period.
+2. A glitch-free trace over the same run:
+
+```powershell
+wpr -start Media.wprp -filemode
+# run the VadProbe soak
+wpr -stop vad-3ms.etl
+```
+
+Open the trace in Media eXperience Analyzer and check the Audio Glitches view;
+`Microsoft-Windows-Audio` is the authoritative provider. Enable Driver Verifier
+against `WinStreamVad.sys` on the lab VM while testing.
 
 Do not ship DevCon. The production installer uses SetupAPI and supported PnPUtil operations.
 

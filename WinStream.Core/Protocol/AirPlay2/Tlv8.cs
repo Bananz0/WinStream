@@ -11,6 +11,7 @@ public static class Tlv8
     public const byte EncryptedData = 0x05;
     public const byte State = 0x06;
     public const byte Error = 0x07;
+    public const byte Signature = 0x0A;
     public const byte Flags = 0x13;
 
     public static byte[] Encode(IReadOnlyList<(byte Type, byte[] Value)> entries)

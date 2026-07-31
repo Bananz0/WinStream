@@ -45,7 +45,7 @@ namespace WinStream.Core.Network
                         PublicKey = FirstValue(txt, "pk"),
                         EncryptionTypes = FirstValue(txt, "et"),
                         FeaturesRaw = features,
-                        Features = WinStream.Core.Streaming.AirPlayCapability.ParseFeatures(features)
+                        Features = AirPlayFeatures.Parse(features)
                     };
                 }).ToList();
             }

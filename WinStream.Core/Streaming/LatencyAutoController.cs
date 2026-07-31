@@ -1,6 +1,5 @@
 namespace WinStream.Core.Streaming;
 
-using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.Raop;
 
 /// <summary>
@@ -20,11 +19,11 @@ public sealed class LatencyAutoController
     public const uint VeryLowFrames = 22050;
     public const uint ExperimentalFrames = 11025;
 
-    /// <summary>One ALAC packet — absolute Lab probe floor.</summary>
-    public const uint LabPacketFrames = AlacEncoder.FramesPerPacket;
-
     /// <summary>Absolute minimum frames for SetEffectiveLatencyFrames (packet floor).</summary>
     public const uint PacketFloorFrames = AlacEncoder.FramesPerPacket;
+
+    /// <summary>One ALAC packet — absolute Lab probe floor.</summary>
+    public const uint LabPacketFrames = PacketFloorFrames;
 
     /// <summary>Apple SETUP folklore min (~250 ms). Used when L ≥ this value.</summary>
     public const uint LatencyMinFrames = 11025;
@@ -45,7 +44,11 @@ public sealed class LatencyAutoController
 
     public bool IsAutoEnabled => _autoEnabled;
 
-    /// <summary>Resets for a new connect / reconnect. Auto always restarts at the floor.</summary>
+    /// <summary>
+    /// Resets for a new user connect / first session. Auto always restarts at the floor.
+    /// A resilience reconnect rebuilds the session with the current effective frames and
+    /// does not call this method, so a climbed Auto step survives the reconnect.
+    /// </summary>
     public void ResetForConnect(PlaybackResponsiveness mode)
     {
         _autoEnabled = mode == PlaybackResponsiveness.Auto;
@@ -125,13 +128,6 @@ public sealed class LatencyAutoController
     public static uint SetupLatencyMax(uint effectiveFrames) =>
         Math.Max(CeilingFrames, effectiveFrames);
 
-    public static uint ClampEffectiveFrames(uint frames)
-    {
-        if (frames < PacketFloorFrames)
-        {
-            return PacketFloorFrames;
-        }
-
-        return frames;
-    }
+    public static uint ClampEffectiveFrames(uint frames) =>
+        Math.Max(PacketFloorFrames, frames);
 }

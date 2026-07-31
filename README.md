@@ -12,6 +12,7 @@ Stream system audio from a Windows PC to classic AirPlay / RAOP receivers (HomeP
 - Multi-room fan-out with Degraded / Reconnecting resilience
 - Settings persistence; optional experimental AirPlay 2 **gate** (media path not production-ready)
 - Optional virtual audio driver track **outside** Store (`drivers/winstream-vad/`)
+- Off-by-default **WinStream Link** companion path (`tools/LinkRx`, `tools/LinkRx.Pi`) — not AirPlay, see below
 
 
 
@@ -79,6 +80,12 @@ Signing password lives only in `.env` (`WINSTREAM_PACKAGE_CERTIFICATE_PASSWORD`)
 
 Full steps: [docs/user-guide.md](docs/user-guide.md)
 
+## WinStream Link (experimental companion)
+
+A separate low-latency path to a receiver you run yourself — **not** AirPlay, and it cannot reach a HomePod. Disabled unless `LinkFeatureEnabled` is set; when enabled it is mutually exclusive with AirPlay output. Run `tools/LinkRx` (Windows) or `tools/LinkRx.Pi` (Raspberry Pi + ALSA), then Scan or type the IP in the app.
+
+The 8–10 ms average target is **not** validated: it requires the test-signed virtual audio driver and a wired-lab measurement per [docs/testing/link-e2e-measurement.md](docs/testing/link-e2e-measurement.md).
+
 ## Packaging / Store
 
 - Manifest: `WinStream/Package.appxmanifest`
@@ -98,6 +105,7 @@ Full steps: [docs/user-guide.md](docs/user-guide.md)
 | `WinStream.Tests/`       | xUnit tests                             |
 | `docs/`                  | Plan, research, user guide, Store notes |
 | `drivers/winstream-vad/` | Optional non-Store driver scaffold      |
+| `tools/LinkRx*/`         | WinStream Link companion receivers      |
 
 
 

@@ -1,3 +1,4 @@
+using WinStream.Core;
 using WinStream.Core.Network;
 using WinStream.Core.Streaming;
 
@@ -14,6 +15,18 @@ public class AutoConnectTests
             sessionState: SessionState.Disconnected,
             connectionInFlight: false,
             attemptsAvailable: true));
+    }
+
+    [Fact]
+    public void Does_not_attempt_while_Lab_responsiveness_is_selected()
+    {
+        Assert.False(AutoConnectPolicy.ShouldAttempt(
+            enabled: true,
+            lastReceiverKey: "kitchen",
+            sessionState: SessionState.Disconnected,
+            connectionInFlight: false,
+            attemptsAvailable: true,
+            responsiveness: PlaybackResponsiveness.LabPacket));
     }
 
     [Theory]

@@ -5,10 +5,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Core;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
 using WinStream.Core.Persistence;
+using WinStream.Core.Protocol.AirPlay2;
 using WinStream.Core.Streaming;
 
 namespace WinStream.Streaming;
@@ -20,6 +22,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private const int SendQueueCapacity = 64;
 
     private readonly string? _senderDeviceId;
+    private readonly IPairingCredentialStore _pairingStore;
+    private Func<CancellationToken, Task<string?>>? _requestPairingPinAsync;
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
@@ -35,6 +39,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private SessionState _aggregateState = SessionState.Disconnected;
     private PlaybackResponsiveness _responsiveness = PlaybackResponsiveness.Auto;
     private AudioFidelity _fidelity = AudioFidelity.Auto;
+    private float _volumeDb;
     private long _dropsAtWindowStart;
     private long _slowAtWindowStart;
     private DateTimeOffset _signalWindowStart = DateTimeOffset.UtcNow;
@@ -44,11 +49,22 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     /// <param name="senderDeviceId">
     /// Persisted per-install sender MAC for AirPlay 2 sessions, resolved by the app.
     /// </param>
-    public StreamingOrchestrator(string? senderDeviceId = null)
+    public StreamingOrchestrator(
+        string? senderDeviceId = null,
+        IPairingCredentialStore? pairingStore = null)
     {
         _senderDeviceId = senderDeviceId;
+        _pairingStore = pairingStore ?? new PairingCredentialStore();
         _resilience.RecoverRequested += OnRecoverRequested;
     }
+
+    /// <summary>
+    /// Supplies the UI callback that collects the AirPlay code shown on the receiver
+    /// during first-time persistent pairing. Return <c>null</c> to cancel and fall
+    /// back to transient pairing.
+    /// </summary>
+    public void SetPairingPinPrompt(Func<CancellationToken, Task<string?>>? requestPinAsync) =>
+        _requestPairingPinAsync = requestPinAsync;
 
     public event EventHandler<SessionStateChanged>? StateChanged;
 
@@ -56,12 +72,19 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     public uint EffectiveLatencyFrames => _latency.EffectiveFrames;
 
+    /// <summary>
+    /// The preset the sessions actually run. Only advances on a successful apply, so the
+    /// UI can fall back to it when a preset is refused.
+    /// </summary>
+    public PlaybackResponsiveness Responsiveness => _responsiveness;
+
     public IReadOnlyList<DeviceInfo> ConnectedReceivers =>
         _sessions.Values.Select(entry => entry.Receiver).ToList();
 
     /// <summary>
-    /// Stores quality prefs for the next connect. Live preset changes apply on reconnect;
-    /// Auto mid-session raises still use the controller independently.
+    /// Stores quality prefs for the next connect. Live preset changes go through
+    /// <see cref="ApplyStreamingQualityAsync"/>; Auto mid-session raises still use
+    /// the controller independently.
     /// </summary>
     public void ConfigureStreamingQuality(
         PlaybackResponsiveness responsiveness,
@@ -69,6 +92,22 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     {
         _responsiveness = responsiveness;
         _fidelity = fidelity;
+    }
+
+    /// <summary>
+    /// Applies a fidelity preference to live sessions without restarting them.
+    /// </summary>
+    /// <remarks>
+    /// Conversion policy is a property of the PCM buffer, not of SETUP, so unlike
+    /// <see cref="PlaybackResponsiveness"/> it needs no renegotiation with the receiver.
+    /// </remarks>
+    public void SetAudioFidelity(AudioFidelity fidelity)
+    {
+        _fidelity = fidelity;
+        foreach (var entry in _sessions.Values.ToArray())
+        {
+            entry.Session.SetAudioFidelity(fidelity);
+        }
     }
 
     public async Task ConnectAsync(
@@ -109,22 +148,10 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 isFirstSession = _sessions.Count == 0;
             }
 
-            if (_responsiveness == PlaybackResponsiveness.LabPacket && !isFirstSession)
+            if (LabSessionPolicy.BlocksAdditionalReceiver(_responsiveness, isFirstSession))
             {
-                throw new InvalidOperationException(
-                    "Lab latency mode supports only one receiver. Switch to Experimental or Auto for multi-room.");
+                throw new InvalidOperationException(LabSessionPolicy.MultiRoomBlockedMessage);
             }
-
-            if (!isFirstSession &&
-                _latency.EffectiveFrames < LatencyAutoController.LatencyMinFrames)
-            {
-                throw new InvalidOperationException(
-                    "Lab latency mode supports only one receiver. Disconnect first or switch presets.");
-            }
-
-            IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(receiver, _senderDeviceId)
-                : new RaopSession(receiver);
 
             if (isFirstSession)
             {
@@ -133,8 +160,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 ResetSignalWindowCounters();
             }
 
-            session.SetEffectiveLatencyFrames(_latency.EffectiveFrames);
-            session.SetAudioFidelity(_fidelity);
+            var session = CreateConfiguredSession(receiver, protocol);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
             lock (_sessionsGate)
@@ -173,12 +199,88 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Applies new quality prefs immediately. Live AirPlay 2 sessions renegotiate
+    /// latency only at SETUP, so each session is torn down and rebuilt in place —
+    /// the old session is fully disposed first to release the exclusive PTP ports.
+    /// </summary>
+    public async Task ApplyStreamingQualityAsync(
+        PlaybackResponsiveness responsiveness,
+        AudioFidelity fidelity,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            SessionEntry[] snapshot;
+            lock (_sessionsGate)
+            {
+                snapshot = _sessions.Values.ToArray();
+            }
+
+            if (LabSessionPolicy.BlocksQualityApply(responsiveness, snapshot.Length))
+            {
+                throw new InvalidOperationException(LabSessionPolicy.MultiRoomBlockedMessage);
+            }
+
+            _responsiveness = responsiveness;
+            _fidelity = fidelity;
+            if (snapshot.Length == 0)
+            {
+                AppLog.Info(
+                    "stream",
+                    $"Quality stored for next connect responsiveness={responsiveness} fidelity={fidelity}");
+                return;
+            }
+
+            _latency.ResetForConnect(responsiveness);
+            _audioStartedMarked = false;
+            ResetSignalWindowCounters();
+            SetAggregate(SessionState.Reconnecting, "Applying streaming quality");
+
+            foreach (var entry in snapshot)
+            {
+                try
+                {
+                    await RebuildEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The previous session is already disposed, so a half-built entry
+                    // would strand the receiver in the connected list.
+                    var failed = entry.Session;
+                    failed.StateChanged -= OnSessionStateChanged;
+                    lock (_sessionsGate)
+                    {
+                        _sessions.Remove(Core.Network.ReceiverKey.For(entry.Receiver));
+                    }
+
+                    await failed.DisposeAsync().ConfigureAwait(false);
+                    RefreshAggregate("quality-apply-failed");
+                    throw;
+                }
+            }
+
+            AppLog.Info(
+                "stream",
+                $"Applied quality latencyFrames={_latency.EffectiveFrames} " +
+                $"responsiveness={_responsiveness} fidelity={_fidelity}");
+            RefreshAggregate("quality-applied");
+        }
+        finally
+        {
+            _lifecycle.Release();
+        }
+    }
+
     public Task SetVolumeAsync(
         float volumeDb,
         CancellationToken cancellationToken = default)
     {
+        _volumeDb = Math.Clamp(volumeDb, -144f, 0f);
         var tasks = _sessions.Values
-            .Select(entry => entry.Session.SetVolumeAsync(volumeDb, cancellationToken))
+            .Select(entry => entry.Session.SetVolumeAsync(_volumeDb, cancellationToken))
             .ToArray();
         return Task.WhenAll(tasks);
     }
@@ -564,24 +666,37 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 // ignore
             }
 
-            var retired = entry.Session;
-            retired.StateChanged -= OnSessionStateChanged;
-
-            IAirPlaySession replacement = entry.Protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(entry.Receiver, _senderDeviceId)
-                : new RaopSession(entry.Receiver);
-            replacement.StateChanged += OnSessionStateChanged;
-
-            // Publish the replacement before disposing the old session so the send
-            // pump never observes an entry pointing at disposed state.
-            lock (_sessionsGate)
-            {
-                entry.Session = replacement;
-            }
-
-            await retired.DisposeAsync().ConfigureAwait(false);
-            await replacement.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            await RebuildEntryAsync(entry, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Replaces a session in place, preserving its slot in <see cref="_sessions"/>.
+    /// The dispose/build/volume/connect order is owned by <see cref="SessionRebuild"/>.
+    /// </summary>
+    private async Task RebuildEntryAsync(
+        SessionEntry entry,
+        CancellationToken cancellationToken)
+    {
+        var retired = entry.Session;
+        retired.StateChanged -= OnSessionStateChanged;
+
+        await SessionRebuild.ReplaceAsync(
+                retired,
+                () =>
+                {
+                    var replacement = CreateConfiguredSession(entry.Receiver, entry.Protocol);
+                    replacement.StateChanged += OnSessionStateChanged;
+                    lock (_sessionsGate)
+                    {
+                        entry.Session = replacement;
+                    }
+
+                    return replacement;
+                },
+                _volumeDb,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static AirPlayProtocolKind ResolveProtocol(DeviceInfo receiver)
@@ -594,6 +709,35 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
 
         return preferred;
+    }
+
+    /// <summary>Builds a session already carrying the current shared latency.</summary>
+    private IAirPlaySession CreateConfiguredSession(
+        DeviceInfo receiver,
+        AirPlayProtocolKind protocol)
+    {
+        IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
+            ? new AirPlay2Session(receiver, _senderDeviceId, CreatePairingOptions(receiver))
+            : new RaopSession(receiver);
+        session.SetEffectiveLatencyFrames(_latency.EffectiveFrames);
+        session.SetAudioFidelity(_fidelity);
+        return session;
+    }
+
+    /// <summary>
+    /// The orchestrator owns pairing persistence; the protocol only consumes the
+    /// credentials and reports back which ones worked.
+    /// </summary>
+    private PairingOptions CreatePairingOptions(DeviceInfo receiver)
+    {
+        var receiverKey = ReceiverKey.For(receiver);
+        return new PairingOptions
+        {
+            StoredCredentials = _pairingStore.TryGet(receiverKey, out var stored) ? stored : null,
+            RequestPinAsync = _requestPairingPinAsync,
+            OnPaired = credentials => _pairingStore.Save(receiverKey, credentials),
+            OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey)
+        };
     }
 
     private void EnsureHomogeneousWithExisting(AirPlayProtocolKind incoming)

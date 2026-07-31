@@ -1,3 +1,4 @@
+using WinStream.Core;
 using WinStream.Core.Persistence;
 
 namespace WinStream.Tests;
@@ -31,6 +32,28 @@ public class SettingsStoreTests
         Assert.True(loaded.PreferVirtualDriver);
         Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
         Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
+        Assert.False(loaded.LinkFeatureEnabled);
+        Assert.Equal(SinkMode.AirPlay, loaded.SinkMode);
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsLinkSettings()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+        store.Save(new AppSettings
+        {
+            LinkFeatureEnabled = true,
+            SinkMode = SinkMode.Link,
+            LastLinkReceiverKey = "192.168.1.8:47200",
+            LastLinkReceiverName = "Desk Pi"
+        });
+
+        var loaded = store.Load();
+        Assert.True(loaded.LinkFeatureEnabled);
+        Assert.Equal(SinkMode.Link, loaded.SinkMode);
+        Assert.Equal("192.168.1.8:47200", loaded.LastLinkReceiverKey);
+        Assert.Equal("Desk Pi", loaded.LastLinkReceiverName);
     }
 
     [Fact]
@@ -67,6 +90,15 @@ public class SettingsStoreTests
 
         store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.LabPacket });
         Assert.Equal(PlaybackResponsiveness.LabPacket, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.Balanced });
+        Assert.Equal(PlaybackResponsiveness.Balanced, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.MostStable });
+        Assert.Equal(PlaybackResponsiveness.MostStable, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { LastReceiverKey = "  " });
+        Assert.Equal("  ", store.Load().LastReceiverKey);
     }
 
     [Fact]
@@ -134,25 +166,4 @@ public class SettingsStoreTests
         Assert.True(SenderIdentity.LooksLikeMac(first));
     }
 
-    private sealed class TempDirectory : IDisposable
-    {
-        public TempDirectory()
-        {
-            Path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(),
-                "WinStreamTests",
-                Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(Path);
-        }
-
-        public string Path { get; }
-
-        public void Dispose()
-        {
-            if (Directory.Exists(Path))
-            {
-                Directory.Delete(Path, recursive: true);
-            }
-        }
-    }
 }

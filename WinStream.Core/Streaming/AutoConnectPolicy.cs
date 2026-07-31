@@ -13,12 +13,14 @@ public static class AutoConnectPolicy
         string? lastReceiverKey,
         SessionState sessionState,
         bool connectionInFlight,
-        bool attemptsAvailable) =>
+        bool attemptsAvailable,
+        PlaybackResponsiveness responsiveness = PlaybackResponsiveness.Auto) =>
         enabled &&
         attemptsAvailable &&
         !connectionInFlight &&
         !string.IsNullOrWhiteSpace(lastReceiverKey) &&
-        sessionState == SessionState.Disconnected;
+        sessionState == SessionState.Disconnected &&
+        responsiveness != PlaybackResponsiveness.LabPacket;
 
     public static DeviceInfo? FindTarget(
         IEnumerable<DeviceInfo> discovered,

@@ -23,7 +23,7 @@ public static class SetupDiagnostics
             try
             {
                 await using var control = new EncryptedRtspClient(target.IPAddress, target.Port);
-                await control.ConnectAndPairAsync(cancellationToken);
+                await control.ConnectAndPairAsync(cancellationToken: cancellationToken);
                 Console.WriteLine("  paired");
 
                 var info = await control.SendAsync(

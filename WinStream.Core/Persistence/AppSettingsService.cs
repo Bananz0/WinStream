@@ -23,7 +23,7 @@ public sealed class AppSettingsService
         {
             lock (_gate)
             {
-                return _settings;
+                return _settings.Clone();
             }
         }
     }

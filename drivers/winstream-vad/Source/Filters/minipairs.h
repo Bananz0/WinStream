@@ -48,6 +48,44 @@ CreateMiniportTopologySimpleAudioSample
 );
 
 //
+// Advertise the owned render endpoint's 3 ms WaveRT processing contract.
+// 144 frames at the endpoint's fixed 48 kHz format is exactly 3 ms.
+//
+// MinPacketPeriodInHns must stay strictly below the per-mode packet size. The
+// audio stack ignores a mode constraint that is not higher than the transport
+// minimum, so declaring both as 3 ms silently discards the 3 ms claim and leaves
+// the endpoint at the 10 ms default. SYSVAD uses the same shape: a 2 ms
+// transport minimum under a 128-sample DEFAULT mode.
+//
+static struct
+{
+    KSAUDIO_PACKETSIZE_CONSTRAINTS2 TransportPacketConstraints;
+} WinStreamWaveRtPacketSizeConstraintsRender =
+{
+    {
+        1 * HNSTIME_PER_MILLISECOND,
+        FILE_BYTE_ALIGNMENT,
+        0,
+        1,
+        {
+            STATIC_AUDIO_SIGNALPROCESSINGMODE_DEFAULT,
+            144,
+            0,
+        },
+    },
+};
+
+const SIMPLEAUDIOSAMPLE_DEVPROPERTY WinStreamWaveFilterInterfacePropertiesRender[] =
+{
+    {
+        &DEVPKEY_KsAudio_PacketSize_Constraints2,
+        DEVPROP_TYPE_BINARY,
+        sizeof(WinStreamWaveRtPacketSizeConstraintsRender),
+        &WinStreamWaveRtPacketSizeConstraintsRender,
+    },
+};
+
+//
 // Render miniports.
 //
 
@@ -84,8 +122,8 @@ ENDPOINT_MINIPAIR SpeakerMiniports =
     NULL,                                                   // optional template name
     CreateMiniportWaveRTSimpleAudioSample,
     &SpeakerWaveMiniportFilterDescriptor,
-    0,                                                      // Interface properties
-    NULL,
+    SIZEOF_ARRAY(WinStreamWaveFilterInterfacePropertiesRender), // Interface properties
+    WinStreamWaveFilterInterfacePropertiesRender,
     SPEAKER_DEVICE_MAX_CHANNELS,
     SpeakerPinDeviceFormatsAndModes,
     SIZEOF_ARRAY(SpeakerPinDeviceFormatsAndModes),

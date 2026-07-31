@@ -1,32 +1,11 @@
+using WinStream.Core;
+
 namespace WinStream.Core.Persistence;
 
 public enum CaptureMode
 {
     Loopback = 0,
     VirtualDriver = 1
-}
-
-/// <summary>How much AirPlay playout buffer to use (delay vs dropout resistance).</summary>
-public enum PlaybackResponsiveness
-{
-    Auto = 0,
-    LowDelay = 1,
-    Balanced = 2,
-    MostStable = 3,
-    /// <summary>~500 ms fixed buffer (Very low).</summary>
-    VeryLow = 4,
-    /// <summary>~250 ms fixed buffer (Experimental).</summary>
-    Experimental = 5,
-    /// <summary>One ALAC packet (~8 ms) Lab probe — gated UI only.</summary>
-    LabPacket = 6
-}
-
-/// <summary>How carefully to convert capture PCM before ALAC (CPU vs conversion quality).</summary>
-public enum AudioFidelity
-{
-    Auto = 0,
-    Standard = 1,
-    HighFidelity = 2
 }
 
 public sealed class AppSettings
@@ -83,4 +62,39 @@ public sealed class AppSettings
 
     /// <summary>PCM conversion preference. Default Auto skips SRC when already 44.1 stereo.</summary>
     public AudioFidelity AudioFidelity { get; set; } = AudioFidelity.Auto;
+
+    /// <summary>
+    /// When false (default), Link UI is hidden and AirPlay behavior is unchanged.
+    /// </summary>
+    public bool LinkFeatureEnabled { get; set; }
+
+    /// <summary>Active sink: AirPlay speakers or WinStream Link companion.</summary>
+    public SinkMode SinkMode { get; set; } = SinkMode.AirPlay;
+
+    /// <summary>Last Link companion key (IP:port).</summary>
+    public string? LastLinkReceiverKey { get; set; }
+
+    /// <summary>Friendly name for last Link companion.</summary>
+    public string? LastLinkReceiverName { get; set; }
+
+    /// <summary>Shallow copy for read-only snapshots from <see cref="AppSettingsService"/>.</summary>
+    public AppSettings Clone() => new()
+    {
+        SelectedRenderDeviceId = SelectedRenderDeviceId,
+        MonitorCapture = MonitorCapture,
+        AutoConnectLastReceiver = AutoConnectLastReceiver,
+        LastReceiverKey = LastReceiverKey,
+        LastReceiverName = LastReceiverName,
+        AirPlayReceiverHintDismissed = AirPlayReceiverHintDismissed,
+        LaunchAtStartup = LaunchAtStartup,
+        CaptureMode = CaptureMode,
+        PreferVirtualDriver = PreferVirtualDriver,
+        SenderDeviceId = SenderDeviceId,
+        PlaybackResponsiveness = PlaybackResponsiveness,
+        AudioFidelity = AudioFidelity,
+        LinkFeatureEnabled = LinkFeatureEnabled,
+        SinkMode = SinkMode,
+        LastLinkReceiverKey = LastLinkReceiverKey,
+        LastLinkReceiverName = LastLinkReceiverName
+    };
 }

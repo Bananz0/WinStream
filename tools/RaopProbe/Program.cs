@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
+using WinStream.Core.Protocol.AirPlay2;
 using WinStream.Core.Streaming;
 using WinStream.Core.Network;
 
@@ -21,6 +22,56 @@ if (args.Contains("--txt"))
 if (args.Contains("--plist-selftest"))
 {
     return WinStream.Tools.RaopProbe.PlistSelfTest.Run();
+}
+
+if (args.Contains("--pair-persistent"))
+{
+    var directHost = ParseString(args, "--host") ?? nameFilter;
+    if (directHost is not null)
+    {
+        // Exercises the shipping Core pairing code rather than a probe-local copy.
+        var pairPort = ParseInt(args, "--port", 7000);
+        var pin = ParseString(args, "--pin");
+        Console.WriteLine($"== Persistent pair-setup {directHost}:{pairPort} ==");
+        try
+        {
+            using (var pinClient = new System.Net.Sockets.TcpClient())
+            {
+                await pinClient.ConnectAsync(directHost, pairPort);
+                await using var pinStream = pinClient.GetStream();
+                await HkpPersistent.RequestPinDisplayAsync(pinStream, directHost, pairPort);
+                Console.WriteLine("PAIR_PIN_START_OK — look at the Mac for a code");
+            }
+
+            using var pairClient = new System.Net.Sockets.TcpClient();
+            await pairClient.ConnectAsync(directHost, pairPort);
+            await using var pairStream = pairClient.GetStream();
+            var credentials = await HkpPersistent.PairSetupAsync(
+                pairStream,
+                directHost,
+                pairPort,
+                _ => Task.FromResult(pin ?? Prompt("AirPlay code: ")));
+            Console.WriteLine($"PAIR_SETUP_OK client={credentials.ClientPairingId} accessory={credentials.AccessoryPairingId}");
+        }
+        catch (PairingPinSkippedException)
+        {
+            Console.WriteLine("PAIR_SETUP_SKIPPED no code entered");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PAIR_SETUP_FAIL {ex.GetType().Name}: {ex.Message}");
+            return 1;
+        }
+
+        return 0;
+    }
+}
+
+static string? Prompt(string label)
+{
+    Console.Write(label);
+    return Console.ReadLine();
 }
 
 Console.WriteLine("== Discovering _raop._tcp receivers ==");
@@ -339,4 +390,10 @@ static int ParseInt(string[] args, string flag, int fallback)
     return index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out var value)
         ? value
         : fallback;
+}
+
+static string? ParseString(string[] args, string flag)
+{
+    var index = Array.IndexOf(args, flag);
+    return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
 }

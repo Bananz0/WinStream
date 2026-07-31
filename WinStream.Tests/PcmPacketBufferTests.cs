@@ -1,5 +1,5 @@
+using WinStream.Core;
 using WinStream.Core.Audio;
-using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.Raop;
 
 namespace WinStream.Tests;

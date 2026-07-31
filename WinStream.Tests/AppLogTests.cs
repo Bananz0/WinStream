@@ -32,6 +32,7 @@ public class AppLogTests
         }
         finally
         {
+            AppLog.DisableFileSink();
             Directory.Delete(directory, recursive: true);
         }
     }

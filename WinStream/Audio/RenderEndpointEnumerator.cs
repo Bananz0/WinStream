@@ -30,10 +30,21 @@ public sealed class RenderEndpointEnumerator : IDisposable
         var results = new List<RenderEndpointInfo>(devices.Count);
         foreach (var device in devices)
         {
+            string? instanceId = null;
+            try
+            {
+                instanceId = device.Properties[PropertyKeys.PKEY_Device_InstanceId]?.Value as string;
+            }
+            catch
+            {
+                // Older or synthetic endpoints may not expose a PnP instance id.
+            }
+
             results.Add(new RenderEndpointInfo(
                 device.ID,
                 device.FriendlyName,
-                string.Equals(device.ID, defaultId, StringComparison.OrdinalIgnoreCase)));
+                string.Equals(device.ID, defaultId, StringComparison.OrdinalIgnoreCase),
+                instanceId));
         }
 
         return results

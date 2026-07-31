@@ -185,6 +185,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
         }
 
         JoinGapFill(gapCts, gapLoop);
+        _enumerator?.Dispose();
+        _enumerator = null;
         return ValueTask.CompletedTask;
     }
 

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Win32;
 using Windows.ApplicationModel;
+using WinStream.Core.Logging;
 
 namespace WinStream;
 
@@ -61,13 +62,47 @@ internal static class StartupRegistration
         if (IsPackaged)
         {
             var task = await StartupTask.GetAsync(TaskId);
+            AppLog.Info("startup", $"Packaged startup task state={task.State}");
             return MapPackaged(task.State);
         }
 
+        var present = IsUnpackagedRunEntryPresent();
+        AppLog.Info("startup", $"Unpackaged Run entry present={present}");
         return new StartupRegistrationSnapshot(
-            IsEnabled: IsUnpackagedRunEntryPresent(),
+            IsEnabled: present,
             CanToggle: true,
             StatusMessage: "Launch WinStream automatically when you sign in to Windows.");
+    }
+
+    /// <summary>
+    /// Aligns Windows with the preference the user last chose in the app.
+    /// The registration lives in Windows, not in settings.json, so it disappears whenever the
+    /// app runs under a different identity (packaged vs unpackaged) or is reinstalled. Without
+    /// this, the toggle silently reverts to Off even though the user never turned it off.
+    /// </summary>
+    public static async Task<StartupRegistrationSnapshot> ReconcileAsync(bool desired)
+    {
+        var snapshot = await GetSnapshotAsync();
+
+        if (!desired || !snapshot.CanToggle)
+        {
+            return snapshot;
+        }
+
+        if (!snapshot.IsEnabled)
+        {
+            AppLog.Info("startup", "Saved preference is on but Windows is not registered; re-applying.");
+            return await SetEnabledAsync(true);
+        }
+
+        if (!IsPackaged)
+        {
+            // A dev/sideload rebuild can move WinStream.exe, leaving a Run entry that
+            // points at a path Windows can no longer launch.
+            RefreshUnpackagedRunEntryPath();
+        }
+
+        return snapshot;
     }
 
     public static async Task<StartupRegistrationSnapshot> SetEnabledAsync(bool enabled)
@@ -89,10 +124,12 @@ internal static class StartupRegistration
             }
 
             task = await StartupTask.GetAsync(TaskId);
+            AppLog.Info("startup", $"Packaged startup set enabled={enabled}; state={task.State}");
             return MapPackaged(task.State);
         }
 
         SetUnpackagedRunEntry(enabled);
+        AppLog.Info("startup", $"Unpackaged startup set enabled={enabled}");
         return await GetSnapshotAsync();
     }
 
@@ -124,7 +161,32 @@ internal static class StartupRegistration
     private static bool IsUnpackagedRunEntryPresent()
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
-        return key?.GetValue(RunValueName) is string;
+        return key?.GetValue(RunValueName) is string value && !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static void RefreshUnpackagedRunEntryPath()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
+        if (key?.GetValue(RunValueName) is not string current)
+        {
+            return;
+        }
+
+        var expected = BuildUnpackagedRunCommand();
+        if (string.Equals(current, expected, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        AppLog.Info("startup", "Run entry pointed at a stale executable path; rewriting.");
+        SetUnpackagedRunEntry(true);
+    }
+
+    private static string BuildUnpackagedRunCommand()
+    {
+        var exe = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Could not resolve WinStream.exe path for startup.");
+        return $"\"{exe}\" {LoginArgument}";
     }
 
     private static void SetUnpackagedRunEntry(bool enabled)
@@ -139,9 +201,7 @@ internal static class StartupRegistration
             return;
         }
 
-        var exe = Environment.ProcessPath
-            ?? throw new InvalidOperationException("Could not resolve WinStream.exe path for startup.");
-        key.SetValue(RunValueName, $"\"{exe}\" {LoginArgument}");
+        key.SetValue(RunValueName, BuildUnpackagedRunCommand());
     }
 }
 

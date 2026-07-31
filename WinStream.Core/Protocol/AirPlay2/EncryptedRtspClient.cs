@@ -2,12 +2,14 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using WinStream.Core.Logging;
+using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.Raop;
 
 namespace WinStream.Core.Protocol.AirPlay2;
 
 /// <summary>
-/// AirPlay 2 control channel: clear pair-setup, then ChaCha20-Poly1305 framed RTSP.
+/// AirPlay 2 control channel: clear pair-setup / pair-verify, then ChaCha20-Poly1305 framed RTSP.
 /// </summary>
 public sealed class EncryptedRtspClient : IAsyncDisposable
 {
@@ -15,15 +17,15 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
 
     private readonly string _host;
     private readonly int _port;
-    private readonly TcpClient _tcp = new();
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private readonly string _dacpId =
         Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
     private readonly string _activeRemote =
         RandomNumberGenerator.GetInt32(1, int.MaxValue).ToString();
+    private TcpClient _tcp = new();
     private NetworkStream? _raw;
     private RtspCryptoStream? _crypto;
-    private HkpTransient? _pairing;
+    private AirPlayControlKeys? _keys;
     private int _cSeq;
     private bool _disposed;
 
@@ -35,8 +37,8 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         _port = port;
     }
 
-    public HkpTransient Pairing =>
-        _pairing ?? throw new InvalidOperationException("Not paired.");
+    public AirPlayControlKeys Keys =>
+        _keys ?? throw new InvalidOperationException("Not paired.");
 
     public int EventPort { get; private set; }
 
@@ -58,22 +60,136 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             ? endpoint.Address.ToString()
             : "0.0.0.0";
 
-    public async Task ConnectAndPairAsync(CancellationToken cancellationToken = default)
+    public async Task ConnectAndPairAsync(
+        PairingOptions? pairingOptions = null,
+        CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_pairing is not null)
+        if (_keys is not null)
         {
             return;
         }
 
-        await _tcp.ConnectAsync(_host, _port, cancellationToken).ConfigureAwait(false);
-        _raw = _tcp.GetStream();
-        _pairing = await HkpPairSetupClient.PairAsync(_raw, _host, _port, cancellationToken)
-            .ConfigureAwait(false);
+        _keys = await EstablishKeysAsync(pairingOptions, cancellationToken).ConfigureAwait(false);
         _crypto = new RtspCryptoStream(
-            _raw,
-            _pairing.ControlWriteKey.ToArray(),
-            _pairing.ControlReadKey.ToArray());
+            _raw ?? throw new InvalidOperationException("Pairing left no control stream."),
+            _keys.ControlWriteKey,
+            _keys.ControlReadKey);
+    }
+
+    private Task<AirPlayControlKeys> EstablishKeysAsync(
+        PairingOptions? pairingOptions,
+        CancellationToken cancellationToken)
+    {
+        var negotiator = new PairingKeyNegotiator(pairingOptions, ResetTcp);
+        return negotiator.NegotiateAsync(
+            VerifyAsync,
+            SetupAsync,
+            TransientAsync,
+            cancellationToken);
+    }
+
+    private async Task<AirPlayControlKeys> VerifyAsync(
+        PairingCredentials credentials,
+        CancellationToken cancellationToken)
+    {
+        await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+        return await HkpPersistent.PairVerifyAsync(_raw!, _host, _port, credentials, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Asks the receiver to show its code on a disposable socket, then runs
+    /// pair-setup on a fresh one (receivers often close after pair-pin-start).
+    /// </summary>
+    private async Task<PairingCredentials> SetupAsync(
+        Func<CancellationToken, Task<string?>> requestPinAsync,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var pinClient = new TcpClient();
+            await pinClient.ConnectAsync(_host, _port, cancellationToken).ConfigureAwait(false);
+            await using var pinStream = pinClient.GetStream();
+            await HkpPersistent.RequestPinDisplayAsync(pinStream, _host, _port, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Still attempt pair-setup — some receivers show a code on M1 alone.
+            AppLog.Warn(
+                "pair",
+                $"pair-pin-start failed; continuing pair-setup: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        using var setupClient = new TcpClient();
+        await setupClient.ConnectAsync(_host, _port, cancellationToken).ConfigureAwait(false);
+        await using var setupStream = setupClient.GetStream();
+        var credentials = await HkpPersistent.PairSetupAsync(
+                setupStream,
+                _host,
+                _port,
+                requestPinAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
+        ResetTcp();
+        return credentials;
+    }
+
+    private async Task<AirPlayControlKeys> TransientAsync(CancellationToken cancellationToken)
+    {
+        await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+        using var transient = await HkpPairSetupClient.PairAsync(
+                _raw!,
+                _host,
+                _port,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new AirPlayControlKeys(
+            transient.ControlWriteKey.ToArray(),
+            transient.ControlReadKey.ToArray(),
+            transient.EventsWriteKey.ToArray(),
+            transient.EventsReadKey.ToArray(),
+            transient.AudioSharedKey());
+    }
+
+    private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
+    {
+        if (_tcp.Connected && _raw is not null)
+        {
+            return;
+        }
+
+        if (!_tcp.Connected)
+        {
+            await _tcp.ConnectAsync(_host, _port, cancellationToken).ConfigureAwait(false);
+        }
+
+        _raw = _tcp.GetStream();
+    }
+
+    private void ResetTcp()
+    {
+        try
+        {
+            _raw?.Dispose();
+        }
+        catch
+        {
+            // Best-effort close before opening a fresh socket.
+        }
+
+        _raw = null;
+        try
+        {
+            _tcp.Dispose();
+        }
+        catch
+        {
+            // Ignore dispose races while recovering from a failed verify.
+        }
+
+        _tcp = new TcpClient();
     }
 
     public async Task GetInfoAsync(CancellationToken cancellationToken = default)
@@ -245,7 +361,8 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             throw new ArgumentException("shk must be 32 bytes.", nameof(audioSharedKey));
         }
 
-        // Never advertise below one ALAC packet (352 frames @ 44.1 kHz).
+        // Last-line defense: callers should pass SetupLatencyMin/Max already floored
+        // at one ALAC packet; clamp here so malformed args cannot advertise below 352.
         if (latencyMinFrames < AlacEncoder.FramesPerPacket)
         {
             latencyMinFrames = AlacEncoder.FramesPerPacket;
@@ -498,7 +615,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
     private void EnsureCrypto()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_crypto is null || _pairing is null)
+        if (_crypto is null || _keys is null)
         {
             throw new InvalidOperationException("Call ConnectAndPairAsync first.");
         }
@@ -512,7 +629,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         }
 
         _crypto?.Dispose();
-        _pairing?.Dispose();
+        _keys?.Dispose();
         if (_raw is not null)
         {
             await _raw.DisposeAsync().ConfigureAwait(false);

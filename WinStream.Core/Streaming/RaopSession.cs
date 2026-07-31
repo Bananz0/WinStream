@@ -9,7 +9,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Audio;
 using WinStream.Core.Network;
-using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.Raop;
 
 namespace WinStream.Core.Streaming;
@@ -24,6 +23,7 @@ public sealed class RaopSession : IAirPlaySession
     private readonly SemaphoreSlim _rtspGate = new(1, 1);
     private readonly SessionStateMachine _stateMachine = new();
     private readonly PcmPacketBuffer _pcmBuffer = new();
+    private readonly List<byte[]> _submitPackets = new();
     private readonly ConcurrentDictionary<ushort, byte[]> _sentPackets = new();
     private readonly object _mediaGate = new();
     private RtspClient? _rtspClient;
@@ -200,7 +200,6 @@ public sealed class RaopSession : IAirPlaySession
             return;
         }
 
-        byte[][] packets;
         lock (_mediaGate)
         {
             SharedMediaClockAlignment.Freeze(
@@ -208,11 +207,11 @@ public sealed class RaopSession : IAirPlaySession
                 ref _rtpBasePending,
                 sharedMediaTimestamp);
 
-            packets = new System.Collections.Generic.List<byte[]>(
-                _pcmBuffer.Push(pcm.Span, format)).ToArray();
+            _submitPackets.Clear();
+            _pcmBuffer.Push(pcm.Span, format, _submitPackets);
         }
 
-        foreach (var packetPcm in packets)
+        foreach (var packetPcm in _submitPackets)
         {
             SendAudioPacket(packetPcm);
         }
@@ -322,11 +321,11 @@ public sealed class RaopSession : IAirPlaySession
 
         try
         {
-            _ = _audioSocket.SendAsync(bytes, _audioEndpoint);
+            _ = _audioSocket.Send(bytes, _audioEndpoint);
         }
-        catch
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
-            // Transient UDP send failures are ignored; reconnect handled in later phases.
+            // Transient UDP send failures ignored; reconnect handled elsewhere.
         }
     }
 

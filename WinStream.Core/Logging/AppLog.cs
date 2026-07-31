@@ -60,6 +60,15 @@ public static class AppLog
         }
     }
 
+    /// <summary>Stops appending to the file sink (tests should call this before deleting the directory).</summary>
+    public static void DisableFileSink()
+    {
+        lock (FileGate)
+        {
+            _filePath = null;
+        }
+    }
+
     private static void PruneOldLogs(string directory)
     {
         var cutoff = _timeProvider.GetUtcNow().AddDays(-RetainDays);

@@ -1,5 +1,5 @@
 using WinStream.Core.Audio;
-using WinStream.Core.Persistence;
+using WinStream.Core.Network;
 
 namespace WinStream.Core.Streaming;
 
@@ -19,8 +19,8 @@ public interface IAirPlaySession : IAsyncDisposable
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Updates the sync/announce latency offset. Mid-session Auto raises are silent;
-    /// SETUP latencyMin/Max stay fixed at 11025/88200.
+    /// Updates the sync/announce latency offset. Mid-session Auto raises update announce
+    /// only; SETUP latencyMin/Max are set at connect from SetupLatencyMin/Max(effective L).
     /// </summary>
     void SetEffectiveLatencyFrames(uint frames);
 

@@ -13,12 +13,14 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
+using WinStream.Core;
 using WinStream.Core.Audio;
 using WinStream.Core.Drivers;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
 using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
+using WinStream.Core.Streaming.Link;
 using WinStream.Network;
 using WinStream.Streaming;
 using WinStream.Tray;
@@ -41,6 +43,8 @@ namespace WinStream
         private readonly CaptureMonitorService _captureMonitor;
         private readonly DriverLifecycleService _driverLifecycle = new();
         private readonly StreamingOrchestrator _streamingOrchestrator;
+        private readonly LinkCredentialStore _linkCredentials = new();
+        private readonly LinkConnectionCoordinator _link;
         private readonly DeviceDiscoveryCoordinator _discovery = new();
         private readonly AutoConnectAttemptTracker _autoConnectAttempts = new();
         private readonly DispatcherTimer _scanTimer;
@@ -54,12 +58,25 @@ namespace WinStream
         private bool _suppressAutoConnectEvents;
         private bool _suppressLaunchAtStartupEvents;
         private bool _suppressStreamingQualityEvents;
+        private bool _suppressSinkModeEvents;
+        private bool _suppressLinkDiscoveryEvents;
+        private readonly QualityApplyGate _qualityApplyGate = new();
+        private readonly SinkModeCoordinator _sinkModes;
 
         public MainWindow()
         {
             InitializeComponent();
             _captureMonitor = new CaptureMonitorService(_settings);
             _streamingOrchestrator = new StreamingOrchestrator(_settings.EnsureSenderDeviceId());
+            _link = LinkCoordinatorFactory.Create(_linkCredentials);
+            _sinkModes = new SinkModeCoordinator(
+                ct => _streamingOrchestrator.DisconnectAsync(cancellationToken: ct),
+                _ => StopLinkAsync());
+            _streamingOrchestrator.SetPairingPinPrompt(async ct =>
+            {
+                var pin = await PromptForAirPlayPinAsync(ct);
+                return string.IsNullOrWhiteSpace(pin) ? null : pin;
+            });
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
@@ -87,6 +104,7 @@ namespace WinStream
             RestoreCaptureSettings();
             RestoreAutoConnectSetting();
             RestoreStreamingQualitySettings();
+            RestoreLinkSinkSettings();
             _ = RestoreLaunchAtStartupSettingAsync();
             RefreshDriverUi();
             UpdateVolumeReadout(streamVolumeSlider.Value);
@@ -111,6 +129,7 @@ namespace WinStream
         internal TrayMenuState BuildTrayMenuState()
         {
             var settings = _settings.Settings;
+            var airPlayMode = settings.SinkMode == SinkMode.AirPlay;
             var lastKey = settings.LastReceiverKey;
             var lastName = settings.LastReceiverName;
             var lastRow = string.IsNullOrWhiteSpace(lastKey)
@@ -123,16 +142,18 @@ namespace WinStream
             var canConnectLast = !string.IsNullOrWhiteSpace(lastKey)
                 && lastRow?.IsConnected != true
                 && !_connectionInFlight
+                && airPlayMode
                 && (lastRow is null || lastRow.IsActionEnabled);
 
             var connectedCount = _streamingOrchestrator.ConnectedReceivers.Count;
+            var linkConnected = _link.State == LinkSessionState.Streaming;
             var devices = _allDevices
                 .Select(device => new TrayDeviceItem
                 {
                     Key = device.Key,
                     DisplayName = device.DisplayName,
                     IsConnected = device.IsConnected,
-                    IsEnabled = device.IsActionEnabled && !_connectionInFlight
+                    IsEnabled = airPlayMode && device.IsActionEnabled && !_connectionInFlight
                 })
                 .ToList();
 
@@ -140,8 +161,8 @@ namespace WinStream
             {
                 LastReceiverName = string.IsNullOrWhiteSpace(lastName) ? null : lastName,
                 CanConnectLast = canConnectLast,
-                CanDisconnect = connectedCount > 0 && !_connectionInFlight,
-                ConnectedCount = connectedCount,
+                CanDisconnect = (connectedCount > 0 || linkConnected) && !_connectionInFlight,
+                ConnectedCount = connectedCount + (linkConnected ? 1 : 0),
                 Devices = devices
             };
         }
@@ -149,6 +170,11 @@ namespace WinStream
         /// <summary>Tray: connect to the remembered receiver (rescans first if needed).</summary>
         internal async Task ConnectLastFromTrayAsync()
         {
+            if (_settings.Settings.SinkMode != SinkMode.AirPlay)
+            {
+                return;
+            }
+
             var key = _settings.Settings.LastReceiverKey;
             var name = _settings.Settings.LastReceiverName;
             if (string.IsNullOrWhiteSpace(key))
@@ -189,7 +215,9 @@ namespace WinStream
         /// <summary>Tray: connect a discovered receiver by stable key.</summary>
         internal async Task ConnectDeviceFromTrayAsync(string deviceKey)
         {
-            if (string.IsNullOrWhiteSpace(deviceKey) || _connectionInFlight)
+            if (_settings.Settings.SinkMode != SinkMode.AirPlay ||
+                string.IsNullOrWhiteSpace(deviceKey) ||
+                _connectionInFlight)
             {
                 return;
             }
@@ -222,7 +250,9 @@ namespace WinStream
         /// <summary>Tray: disconnect every active receiver.</summary>
         internal async Task DisconnectFromTrayAsync()
         {
-            if (_connectionInFlight || _streamingOrchestrator.ConnectedReceivers.Count == 0)
+            var linkConnected = _link.State == LinkSessionState.Streaming;
+            if (_connectionInFlight ||
+                (_streamingOrchestrator.ConnectedReceivers.Count == 0 && !linkConnected))
             {
                 return;
             }
@@ -231,6 +261,7 @@ namespace WinStream
             UpdateUI(false);
             try
             {
+                await StopLinkAsync();
                 await _streamingOrchestrator.DisconnectAsync();
                 foreach (var device in _allDevices)
                 {
@@ -260,6 +291,8 @@ namespace WinStream
                 SyncConnectionState();
                 RefreshSessionStatus();
             }
+
+            await DrainPendingQualityApplyAsync();
         }
 
         public async Task CloseForExitAsync()
@@ -270,6 +303,8 @@ namespace WinStream
 
             // Tear down streaming first: the orchestrator is still subscribed to the
             // capture source and would pump frames into a disposed WASAPI client.
+            await _link.DisposeAsync();
+            linkStatusText.Text = "Link disconnected.";
             await _streamingOrchestrator.DisposeAsync();
             await _captureMonitor.DisposeAsync();
             _driverLifecycle.Dispose();
@@ -574,28 +609,261 @@ namespace WinStream
             RefreshCaptureStatus();
         }
 
+        private void RestoreLinkSinkSettings()
+        {
+            var enabled = _settings.Settings.LinkFeatureEnabled;
+            linkSinkCard.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
+            if (!enabled)
+            {
+                return;
+            }
+
+            _suppressSinkModeEvents = true;
+            try
+            {
+                sinkModeComboBox.Items.Clear();
+                sinkModeComboBox.Items.Add(new ComboBoxItem
+                {
+                    Content = "AirPlay speakers",
+                    Tag = SinkMode.AirPlay
+                });
+                sinkModeComboBox.Items.Add(new ComboBoxItem
+                {
+                    Content = "WinStream Link companion",
+                    Tag = SinkMode.Link
+                });
+                sinkModeComboBox.SelectedIndex =
+                    _settings.Settings.SinkMode == SinkMode.Link ? 1 : 0;
+                ApplySinkModeUi(_settings.Settings.SinkMode);
+            }
+            finally
+            {
+                _suppressSinkModeEvents = false;
+            }
+        }
+
+        private void ApplySinkModeUi(SinkMode mode)
+        {
+            var link = mode == SinkMode.Link;
+            linkConnectPanel.Visibility = link ? Visibility.Visible : Visibility.Collapsed;
+            streamingQualityCard.Visibility = link ? Visibility.Collapsed : Visibility.Visible;
+            if (!string.IsNullOrWhiteSpace(_settings.Settings.LastLinkReceiverKey) &&
+                string.IsNullOrWhiteSpace(linkHostTextBox.Text))
+            {
+                var key = _settings.Settings.LastLinkReceiverKey;
+                var host = key.Contains(':') ? key.Split(':')[0] : key;
+                linkHostTextBox.Text = host;
+                if (_linkCredentials.TryGetPin(key, out var savedPin))
+                {
+                    linkPinBox.Password = savedPin;
+                }
+            }
+        }
+
+        private async Task StopLinkAsync()
+        {
+            await _link.DisconnectAsync();
+            linkStatusText.Text = "Link disconnected.";
+        }
+
+        private async void SinkModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressSinkModeEvents ||
+                sinkModeComboBox.SelectedItem is not ComboBoxItem { Tag: SinkMode next })
+            {
+                return;
+            }
+
+            var previous = _settings.Settings.SinkMode;
+            if (previous == next)
+            {
+                ApplySinkModeUi(next);
+                return;
+            }
+
+            if (SinkModeSwitchPolicy.RequiresTeardown(previous, next))
+            {
+                var confirm = new ContentDialog
+                {
+                    Title = "Switch sink mode?",
+                    Content = SinkModeSwitchPolicy.ConfirmMessage(previous, next),
+                    PrimaryButtonText = "Switch",
+                    CloseButtonText = "Cancel",
+                    XamlRoot = Content.XamlRoot
+                };
+                if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+                {
+                    _suppressSinkModeEvents = true;
+                    try
+                    {
+                        sinkModeComboBox.SelectedIndex = previous == SinkMode.Link ? 1 : 0;
+                    }
+                    finally
+                    {
+                        _suppressSinkModeEvents = false;
+                    }
+
+                    return;
+                }
+
+                await _sinkModes.PrepareSwitchAsync(previous, next);
+            }
+
+            _settings.Update(s => s.SinkMode = next);
+            ApplySinkModeUi(next);
+            RefreshSessionStatus();
+        }
+
+        private async void LinkScanButton_Click(object sender, RoutedEventArgs e)
+        {
+            linkScanButton.IsEnabled = false;
+            linkStatusText.Text = "Scanning for Link companions…";
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+                var found = await LinkDeviceDiscovery.DiscoverAsync(timeout.Token);
+
+                _suppressLinkDiscoveryEvents = true;
+                try
+                {
+                    linkDiscoveryComboBox.Items.Clear();
+                    foreach (var device in found.Where(device =>
+                        !string.IsNullOrWhiteSpace(device.IPAddress)))
+                    {
+                        linkDiscoveryComboBox.Items.Add(new ComboBoxItem
+                        {
+                            Content = $"{device.DisplayName} ({device.Key})",
+                            Tag = device.Key
+                        });
+                    }
+                }
+                finally
+                {
+                    _suppressLinkDiscoveryEvents = false;
+                }
+
+                linkStatusText.Text = linkDiscoveryComboBox.Items.Count == 0
+                    ? "No companions advertised; enter the IP manually."
+                    : $"Found {linkDiscoveryComboBox.Items.Count} companion(s).";
+            }
+            catch (Exception ex)
+            {
+                linkStatusText.Text = $"Link scan failed: {ex.Message}";
+                AppLog.Error("link", $"Link discovery failed: {ex.GetType().Name}");
+            }
+            finally
+            {
+                linkScanButton.IsEnabled = true;
+            }
+        }
+
+        private void LinkDiscoveryComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressLinkDiscoveryEvents ||
+                linkDiscoveryComboBox.SelectedItem is not ComboBoxItem { Tag: string key })
+            {
+                return;
+            }
+
+            linkHostTextBox.Text = key;
+            if (_linkCredentials.TryGetPin(key, out var savedPin))
+            {
+                linkPinBox.Password = savedPin;
+            }
+        }
+
+        private async void LinkConnectButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_settings.Settings.SinkMode != SinkMode.Link)
+            {
+                linkStatusText.Text = "Switch sink mode to WinStream Link first.";
+                return;
+            }
+
+            linkConnectButton.IsEnabled = false;
+            linkStatusText.Text = "Connecting Link…";
+            try
+            {
+                await _sinkModes.EnsureExclusiveAsync(SinkMode.Link);
+                await _captureMonitor.StopAsync();
+
+                var result = await _link.ConnectAsync(linkHostTextBox.Text, linkPinBox.Password);
+                if (!result.IsConnected)
+                {
+                    linkStatusText.Text = DescribeLinkFailure(result);
+                    return;
+                }
+
+                _settings.Update(s =>
+                {
+                    s.LastLinkReceiverKey = result.Target!.Key;
+                    s.LastLinkReceiverName = result.Target.Host;
+                });
+                linkStatusText.Text = DescribeLinkCapture();
+            }
+            catch (Exception ex)
+            {
+                linkStatusText.Text = $"Link failed: {ex.Message}";
+                AppLog.Error("link", $"UI connect failed: {ex}");
+            }
+            finally
+            {
+                linkConnectButton.IsEnabled = true;
+            }
+        }
+
+        private static string DescribeLinkFailure(LinkConnectResult result) => result.Status switch
+        {
+            LinkConnectStatus.MissingPin => "Enter the Link PIN shown by the companion.",
+            LinkConnectStatus.InvalidTarget => "Enter the companion address as IP or IP:port.",
+            LinkConnectStatus.PinRejected => "Link PIN rejected by companion.",
+            LinkConnectStatus.CaptureFailed => $"Link capture failed: {result.Detail}",
+            _ => $"Link failed: {result.Detail}"
+        };
+
+        /// <summary>Never claim the 8–10 ms path without an owned VAD and measured callbacks.</summary>
+        private string DescribeLinkCapture()
+        {
+            var measuredMs = _link.MeasuredCaptureContributionMilliseconds;
+            return _link.CaptureQuality switch
+            {
+                LinkCaptureQuality.LegacyLoopback =>
+                    "Link streaming through default loopback (SLA-ineligible).",
+                LinkCaptureQuality.VadMeasuring =>
+                    "Link streaming through WinStream VAD; measuring capture timing…",
+                LinkCaptureQuality.VadWithinBudget =>
+                    $"Link streaming through VAD (capture p95 {measuredMs} ms; " +
+                    "Ethernet E2E measurement still required).",
+                LinkCaptureQuality.VadOverBudget =>
+                    $"Link streaming through VAD (capture p95 {measuredMs} ms exceeds the " +
+                    $"{LinkSlaEligibility.MaxCaptureContributionMs} ms budget).",
+                _ => "Link not connected."
+            };
+        }
+
         private void RestoreStreamingQualitySettings()
         {
             _suppressStreamingQualityEvents = true;
             try
             {
                 playbackResponsivenessComboBox.Items.Clear();
+                // Auto first, then fixed presets shortest → longest delay.
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.Auto,
-                    "Auto",
+                    "Auto (recommended)",
                     "Starts near ~250 ms and increases toward ~2 s if delivery pressure is detected. Not a guaranteed delay."));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
-                    PlaybackResponsiveness.VeryLow,
-                    "Very low (~500 ms)",
-                    "Fixed ~500 ms buffer. More stutter risk than Low delay on busy Wi‑Fi."));
+                    PlaybackResponsiveness.LabPacket,
+                    StreamingQualityCopy.ExtremeLabel,
+                    StreamingQualityCopy.ExtremeHint));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.Experimental,
                     "Experimental (~250 ms)",
                     "Fixed ~250 ms buffer. Expect stutter or tear-down on some receivers."));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
-                    PlaybackResponsiveness.LabPacket,
-                    "Lab (1 packet, probe)",
-                    "Requests one ALAC packet of lead (~8 ms). Probe only — may fail; not for everyday use."));
+                    PlaybackResponsiveness.VeryLow,
+                    "Very low (~500 ms)",
+                    "Fixed ~500 ms buffer. More stutter risk than Low delay on busy Wi‑Fi."));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.LowDelay,
                     "Low delay (~1 s)",
@@ -609,6 +877,7 @@ namespace WinStream
                     "Most stable (~2 s)",
                     "Apple-standard realtime buffer for the strongest dropout protection."));
 
+                SelectQualityOption(playbackResponsivenessComboBox, _settings.Settings.PlaybackResponsiveness);
                 audioFidelityComboBox.Items.Clear();
                 audioFidelityComboBox.Items.Add(CreateQualityOption(
                     AudioFidelity.Auto,
@@ -617,13 +886,12 @@ namespace WinStream
                 audioFidelityComboBox.Items.Add(CreateQualityOption(
                     AudioFidelity.Standard,
                     "Standard",
-                    "Lighter conversion when the mix rate differs. Uses less CPU."));
+                    StreamingQualityCopy.StandardFidelityHint));
                 audioFidelityComboBox.Items.Add(CreateQualityOption(
                     AudioFidelity.HighFidelity,
                     "High fidelity",
-                    "Lossless ALAC in every mode. Conversion matches Auto until a richer resampler ships."));
+                    StreamingQualityCopy.HighFidelityHint));
 
-                SelectQualityOption(playbackResponsivenessComboBox, _settings.Settings.PlaybackResponsiveness);
                 SelectQualityOption(audioFidelityComboBox, _settings.Settings.AudioFidelity);
                 RefreshStreamingQualityHints();
             }
@@ -677,87 +945,186 @@ namespace WinStream
                     : string.Empty;
         }
 
+        /// <summary>
+        /// Reads the tag of a quality combo, honouring the suppress flag used while the
+        /// combos are rebuilt from settings.
+        /// </summary>
+        private bool TryReadQualitySelection<T>(ComboBox comboBox, out T mode)
+            where T : struct, Enum
+        {
+            mode = default;
+            if (_suppressStreamingQualityEvents ||
+                comboBox.SelectedItem is not ComboBoxItem item ||
+                item.Tag is not T tagged)
+            {
+                return false;
+            }
+
+            mode = tagged;
+            return true;
+        }
+
+        private void SelectQualityOptionSilently<T>(ComboBox comboBox, T value)
+            where T : struct, Enum
+        {
+            _suppressStreamingQualityEvents = true;
+            try
+            {
+                SelectQualityOption(comboBox, value);
+                RefreshStreamingQualityHints();
+            }
+            finally
+            {
+                _suppressStreamingQualityEvents = false;
+            }
+        }
+
         private async void PlaybackResponsivenessComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (_suppressStreamingQualityEvents ||
-                playbackResponsivenessComboBox.SelectedItem is not ComboBoxItem item ||
-                item.Tag is not PlaybackResponsiveness mode)
+            if (!TryReadQualitySelection<PlaybackResponsiveness>(
+                    playbackResponsivenessComboBox,
+                    out var mode))
             {
                 return;
             }
 
             var previous = _settings.Settings.PlaybackResponsiveness;
-            if (mode == PlaybackResponsiveness.LabPacket && previous != PlaybackResponsiveness.LabPacket)
+            if (mode == previous)
             {
-                var confirmed = await ConfirmLabLatencyAsync();
-                if (!confirmed)
-                {
-                    _suppressStreamingQualityEvents = true;
-                    try
-                    {
-                        SelectQualityOption(playbackResponsivenessComboBox, previous);
-                        RefreshStreamingQualityHints();
-                    }
-                    finally
-                    {
-                        _suppressStreamingQualityEvents = false;
-                    }
-
-                    return;
-                }
+                RefreshStreamingQualityHints();
+                return;
             }
 
             _settings.Update(settings => settings.PlaybackResponsiveness = mode);
             RefreshStreamingQualityHints();
-            if (_streamingOrchestrator.State is SessionState.Streaming or SessionState.Degraded)
-            {
-                ShowMessage(
-                    InfoBarSeverity.Informational,
-                    "Playback responsiveness saved",
-                    "The new buffer applies the next time you reconnect.");
-            }
+
+            // Settings are written first so the apply reads one source of truth, but a
+            // refused preset must not stay committed: the Lab single-receiver guard reads
+            // the orchestrator's copy, which only advances on success.
+            await ApplyStreamingQualityNowAsync(
+                "Playback responsiveness",
+                () =>
+                {
+                    _settings.Update(settings => settings.PlaybackResponsiveness = previous);
+                    SelectQualityOptionSilently(playbackResponsivenessComboBox, previous);
+                });
         }
 
-        private async Task<bool> ConfirmLabLatencyAsync()
+        private void AudioFidelityComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            var dialog = new ContentDialog
-            {
-                Title = "Enable Lab latency probe?",
-                Content =
-                    "Lab requests one ALAC packet of AirPlay lead (~8 ms at 44.1 kHz). " +
-                    "Many receivers will stutter, clamp, or disconnect. This is a probe, not everyday playback.\n\n" +
-                    "Only one receiver is allowed in Lab. Auto-connect is skipped while Lab is selected. " +
-                    "If it fails, switch to Experimental (~250 ms).\n\n" +
-                    "WinStream does not guarantee millisecond AirPlay delay.",
-                PrimaryButtonText = "Enable Lab",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Close,
-                XamlRoot = Content.XamlRoot
-            };
-            return await dialog.ShowAsync() == ContentDialogResult.Primary;
-        }
-
-        private async Task OfferLabEscapeToExperimentalAsync()
-        {
-            if (_settings.Settings.PlaybackResponsiveness != PlaybackResponsiveness.LabPacket)
+            if (!TryReadQualitySelection<AudioFidelity>(audioFidelityComboBox, out var mode))
             {
                 return;
             }
 
+            if (mode == _settings.Settings.AudioFidelity)
+            {
+                RefreshStreamingQualityHints();
+                return;
+            }
+
+            _settings.Update(settings => settings.AudioFidelity = mode);
+            RefreshStreamingQualityHints();
+
+            // Fidelity is a converter setting, not a SETUP parameter, so it takes effect
+            // on the live session without the tear-down that responsiveness needs.
+            _streamingOrchestrator.SetAudioFidelity(mode);
+        }
+
+        /// <summary>
+        /// Collects the AirPlay code shown on the Mac during first-time persistent
+        /// pairing. Cancel falls back to transient pairing (Accept prompt every time).
+        /// </summary>
+        private Task<string> PromptForAirPlayPinAsync(CancellationToken cancellationToken)
+        {
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            tcs.TrySetResult(string.Empty);
+                            return;
+                        }
+
+                        // The receiver shows a 4-digit code, but a Mac with an AirPlay
+                        // Receiver password expects that password instead — both are the
+                        // same SRP secret, so the field must not be digits-only.
+                        var pinBox = new TextBox
+                        {
+                            PlaceholderText = "AirPlay code or password"
+                        };
+                        AutomationProperties.SetName(pinBox, "AirPlay pairing code or password");
+
+                        var dialog = new ContentDialog
+                        {
+                            Title = "Enter AirPlay code",
+                            Content = new StackPanel
+                            {
+                                Spacing = 12,
+                                Children =
+                                {
+                                    new TextBlock
+                                    {
+                                        Text = StreamingQualityCopy.PairingPromptBody,
+                                        TextWrapping = TextWrapping.WrapWholeWords
+                                    },
+                                    pinBox
+                                }
+                            },
+                            PrimaryButtonText = "Pair",
+                            CloseButtonText = "Skip",
+                            DefaultButton = ContentDialogButton.Primary,
+                            XamlRoot = Content.XamlRoot
+                        };
+
+                        using var reg = cancellationToken.Register(() =>
+                        {
+                            dialog.Hide();
+                            tcs.TrySetResult(string.Empty);
+                        });
+
+                        var result = await dialog.ShowAsync();
+                        if (result != ContentDialogResult.Primary)
+                        {
+                            tcs.TrySetResult(string.Empty);
+                            return;
+                        }
+
+                        tcs.TrySetResult(pinBox.Text?.Trim() ?? string.Empty);
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                    }
+                }))
+            {
+                tcs.TrySetResult(string.Empty);
+            }
+
+            return tcs.Task;
+        }
+
+        private async Task<bool> OfferLabEscapeToExperimentalAsync()
+        {
+            if (_settings.Settings.PlaybackResponsiveness != PlaybackResponsiveness.LabPacket)
+            {
+                return false;
+            }
+
             var dialog = new ContentDialog
             {
-                Title = "Lab probe failed",
-                Content =
-                    "The receiver did not accept the one-packet Lab lead. " +
-                    "Switch to Experimental (~250 ms) and reconnect?",
+                Title = "Extreme delay failed",
+                Content = StreamingQualityCopy.LabEscapeBody,
                 PrimaryButtonText = "Use Experimental",
-                CloseButtonText = "Keep Lab",
+                CloseButtonText = "Keep Extreme",
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = Content.XamlRoot
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary)
             {
-                return;
+                return false;
             }
 
             _settings.Update(settings =>
@@ -774,26 +1141,76 @@ namespace WinStream
             {
                 _suppressStreamingQualityEvents = false;
             }
+
+            return true;
         }
 
-        private void AudioFidelityComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        /// <summary>
+        /// Settings are already saved. AirPlay negotiates latency at SETUP, so a live
+        /// session is restarted in place — silently, with no confirmation.
+        /// </summary>
+        private async Task ApplyStreamingQualityNowAsync(string settingName, Action onFailed)
         {
-            if (_suppressStreamingQualityEvents ||
-                audioFidelityComboBox.SelectedItem is not ComboBoxItem item ||
-                item.Tag is not AudioFidelity mode)
+            if (!_qualityApplyGate.TryBegin(_connectionInFlight))
             {
+                AppLog.Info("ui", $"Deferred {settingName} until the current session change finishes.");
                 return;
             }
 
-            _settings.Update(settings => settings.AudioFidelity = mode);
-            RefreshStreamingQualityHints();
-            if (_streamingOrchestrator.State is SessionState.Streaming or SessionState.Degraded)
+            // Same gate as connect/disconnect: the tray and device list must not start
+            // a session while the aggregate is being torn down and rebuilt.
+            _connectionInFlight = true;
+            UpdateUI(false);
+            try
             {
-                ShowMessage(
-                    InfoBarSeverity.Informational,
-                    "Audio fidelity saved",
-                    "The new conversion mode applies the next time you reconnect.");
+                do
+                {
+                    await _streamingOrchestrator.ApplyStreamingQualityAsync(
+                        _settings.Settings.PlaybackResponsiveness,
+                        _settings.Settings.AudioFidelity);
+                }
+                while (_qualityApplyGate.ShouldRepeat());
             }
+            catch (Exception ex)
+            {
+                _qualityApplyGate.Clear();
+                onFailed();
+                AppLog.Error("ui", $"Applying {settingName} failed: {ex.GetType().Name}");
+                ShowMessage(
+                    InfoBarSeverity.Error,
+                    $"Couldn't apply {settingName.ToLowerInvariant()}",
+                    FormatConnectionFailure(ex.Message));
+            }
+            finally
+            {
+                _connectionInFlight = false;
+                UpdateUI(true);
+                SyncConnectionState();
+                RefreshSessionStatus();
+            }
+        }
+
+        /// <summary>
+        /// Replays a preset change that arrived while a connect or disconnect held
+        /// <see cref="_connectionInFlight"/>.
+        /// </summary>
+        private Task DrainPendingQualityApplyAsync()
+        {
+            if (!_qualityApplyGate.HasPending || _connectionInFlight)
+            {
+                return Task.CompletedTask;
+            }
+
+            // The replay re-reads settings, so it always targets the newest preset. A
+            // failure here reverts the combo to whatever the orchestrator accepted last.
+            var restore = _streamingOrchestrator.Responsiveness;
+            return ApplyStreamingQualityNowAsync(
+                "Playback responsiveness",
+                () =>
+                {
+                    _settings.Update(settings => settings.PlaybackResponsiveness = restore);
+                    SelectQualityOptionSilently(playbackResponsivenessComboBox, restore);
+                });
         }
 
         private async void PlaybackResponsivenessInfo_Click(object sender, RoutedEventArgs e)
@@ -801,17 +1218,7 @@ namespace WinStream
             var dialog = new ContentDialog
             {
                 Title = "Playback responsiveness",
-                Content =
-                    "This setting changes playback delay, not sound fidelity.\n\n" +
-                    "• Auto — Starts near ~250 ms and may climb toward ~2 s if delivery pressure is detected.\n" +
-                    "• Very low — Fixed ~500 ms. Higher stutter risk.\n" +
-                    "• Experimental — Fixed ~250 ms. Expect stutter on some receivers.\n" +
-                    "• Lab (1 packet, probe) — Requests ~8 ms lead; may fail. One receiver only.\n" +
-                    "• Low delay — About 1 second. More stutter risk on busy Wi‑Fi.\n" +
-                    "• Balanced — About 1.5 seconds.\n" +
-                    "• Most stable — About 2 seconds (Apple’s standard realtime buffer).\n\n" +
-                    "WinStream does not guarantee a specific millisecond AirPlay delay. " +
-                    "HomePod-class speakers often need larger buffers.",
+                Content = StreamingQualityCopy.ResponsivenessInfoBody,
                 CloseButtonText = "Close",
                 XamlRoot = Content.XamlRoot
             };
@@ -825,8 +1232,8 @@ namespace WinStream
                 Title = "Audio fidelity",
                 Content =
                     "AirPlay uses lossless ALAC in every mode. This setting mainly affects sample-rate conversion when Windows audio is not already 44.1 kHz stereo.\n\n" +
-                    "• Auto — High-quality processing only when conversion is needed.\n" +
-                    "• Standard — Lighter conversion to reduce CPU use.\n" +
+                    "• Auto — Skips conversion when already 44.1 kHz stereo; otherwise linear.\n" +
+                    "• Standard — Same conversion as Auto today; reserved for a lighter path later.\n" +
                     "• High fidelity — Reserved for richer conversion; today matches Auto.\n\n" +
                     "It does not change the playback buffer.",
                 CloseButtonText = "Close",
@@ -878,25 +1285,36 @@ namespace WinStream
             }
 
             autoConnectDescriptionText.Text = autoConnectToggle.IsOn
-                ? $"Automatically reconnect to {receiverName} as soon as it appears."
+                ? StreamingQualityCopy.AutoConnectOnDescription(receiverName)
                 : $"Your last device was {receiverName}. Turn this on to reconnect to it automatically.";
         }
 
         private async Task RestoreLaunchAtStartupSettingAsync()
         {
             _suppressLaunchAtStartupEvents = true;
+
+            // A click landing mid-restore would be swallowed by the suppression flag and then
+            // snapped back by the snapshot, so keep the switch inert until Windows answers.
+            launchAtStartupToggle.IsEnabled = false;
             try
             {
-                var snapshot = await StartupRegistration.GetSnapshotAsync();
-                launchAtStartupToggle.IsOn = snapshot.IsEnabled;
-                launchAtStartupToggle.IsEnabled = snapshot.CanToggle;
-                launchAtStartupDescriptionText.Text = snapshot.StatusMessage;
-                _settings.Update(settings => settings.LaunchAtStartup = snapshot.IsEnabled);
+                var snapshot = await StartupRegistration.ReconcileAsync(
+                    _settings.Settings.LaunchAtStartup);
+                ApplyStartupSnapshot(snapshot);
+
+                // Only let Windows overwrite the saved preference when it owns the decision.
+                // Otherwise a registration that vanished (reinstall, packaged vs unpackaged run)
+                // would erase the user's intent and stop it from being re-applied next launch.
+                if (snapshot.IsEnabled || !snapshot.CanToggle)
+                {
+                    _settings.Update(settings => settings.LaunchAtStartup = snapshot.IsEnabled);
+                }
             }
             catch (Exception ex)
             {
                 AppLog.Warn("startup", $"Startup registration unavailable: {ex.Message}");
                 launchAtStartupToggle.IsOn = _settings.Settings.LaunchAtStartup;
+                launchAtStartupToggle.IsEnabled = true;
                 launchAtStartupDescriptionText.Text =
                     "Start WinStream in the tray after Windows login.";
             }
@@ -904,6 +1322,13 @@ namespace WinStream
             {
                 _suppressLaunchAtStartupEvents = false;
             }
+        }
+
+        private void ApplyStartupSnapshot(StartupRegistrationSnapshot snapshot)
+        {
+            launchAtStartupToggle.IsOn = snapshot.IsEnabled;
+            launchAtStartupToggle.IsEnabled = snapshot.CanToggle;
+            launchAtStartupDescriptionText.Text = snapshot.StatusMessage;
         }
 
         private async void LaunchAtStartupToggle_Toggled(object sender, RoutedEventArgs e)
@@ -918,12 +1343,14 @@ namespace WinStream
             try
             {
                 var snapshot = await StartupRegistration.SetEnabledAsync(wantEnabled);
-                launchAtStartupToggle.IsOn = snapshot.IsEnabled;
-                launchAtStartupToggle.IsEnabled = snapshot.CanToggle;
-                launchAtStartupDescriptionText.Text = snapshot.StatusMessage;
-                _settings.Update(settings => settings.LaunchAtStartup = snapshot.IsEnabled);
+                ApplyStartupSnapshot(snapshot);
 
-                if (wantEnabled && !snapshot.IsEnabled && !snapshot.CanToggle)
+                // Remember what the user asked for, not just what Windows granted, so the next
+                // launch can re-apply it if the registration goes missing.
+                _settings.Update(settings => settings.LaunchAtStartup =
+                    snapshot.CanToggle ? wantEnabled : snapshot.IsEnabled);
+
+                if (wantEnabled && !snapshot.IsEnabled)
                 {
                     ShowMessage(
                         InfoBarSeverity.Warning,
@@ -948,6 +1375,12 @@ namespace WinStream
 
         private void UpdateCaptureLevelUi()
         {
+            if (_settings.Settings.SinkMode == SinkMode.Link &&
+                _link.State == LinkSessionState.Streaming)
+            {
+                linkStatusText.Text = DescribeLinkCapture();
+            }
+
             if (!_captureMonitor.IsCapturing)
             {
                 captureLevelBar.Value = 0;
@@ -985,10 +1418,10 @@ namespace WinStream
         {
             UpdateVolumeReadout(e.NewValue);
 
-            if (_streamingOrchestrator.State == SessionState.Streaming)
-            {
-                await _streamingOrchestrator.SetVolumeAsync(PercentToDb(e.NewValue));
-            }
+            // Push unconditionally: the orchestrator keeps the last value and replays it
+            // onto replacement sessions, so skipping non-Streaming states would let a
+            // reconnect restore a stale level.
+            await _streamingOrchestrator.SetVolumeAsync(PercentToDb(e.NewValue));
         }
 
         private void UpdateVolumeReadout(double percent)
@@ -1023,6 +1456,19 @@ namespace WinStream
             bool connect,
             bool isAutomatic = false)
         {
+            if (connect && _settings.Settings.SinkMode != SinkMode.AirPlay)
+            {
+                if (!isAutomatic)
+                {
+                    ShowMessage(
+                        InfoBarSeverity.Warning,
+                        "WinStream Link is active",
+                        "Switch Sink mode to AirPlay speakers before connecting an AirPlay receiver.");
+                }
+
+                return;
+            }
+
             if (_connectionInFlight)
             {
                 return;
@@ -1039,6 +1485,7 @@ namespace WinStream
             device.IsBusy = true;
             UpdateUI(false);
 
+            var reconnectAfterLabEscape = false;
             try
             {
                 if (!connect)
@@ -1098,7 +1545,7 @@ namespace WinStream
 
                     if (_settings.Settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket)
                     {
-                        await OfferLabEscapeToExperimentalAsync();
+                        reconnectAfterLabEscape = await OfferLabEscapeToExperimentalAsync();
                     }
                 }
 
@@ -1112,6 +1559,13 @@ namespace WinStream
                 SyncConnectionState();
                 RefreshSessionStatus();
             }
+
+            if (reconnectAfterLabEscape)
+            {
+                await SetDeviceConnectionAsync(device, connect: true);
+            }
+
+            await DrainPendingQualityApplyAsync();
         }
 
         private void RememberReceiver(DeviceViewModel device)
@@ -1201,8 +1655,7 @@ namespace WinStream
         private async Task TryAutoConnectToLastReceiverAsync()
         {
             var settings = _settings.Settings;
-            // Lab is a manual probe — never auto-connect while it is selected.
-            if (settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket)
+            if (!SinkModeSwitchPolicy.AllowsAirPlayAutoConnect(settings.SinkMode))
             {
                 return;
             }
@@ -1212,7 +1665,8 @@ namespace WinStream
                     settings.LastReceiverKey,
                     _streamingOrchestrator.State,
                     _connectionInFlight,
-                    _autoConnectAttempts.AttemptsAvailable))
+                    _autoConnectAttempts.AttemptsAvailable,
+                    settings.PlaybackResponsiveness))
             {
                 return;
             }
@@ -1365,6 +1819,20 @@ namespace WinStream
 
         private void RefreshSessionStatus()
         {
+            if (_settings.Settings.SinkMode == SinkMode.Link)
+            {
+                var linkState = _link.State;
+                var (linkText, linkBrushKey) = linkState switch
+                {
+                    LinkSessionState.Streaming => ("Link streaming", "SystemFillColorSuccessBrush"),
+                    LinkSessionState.Failed => ("Link failed", "SystemFillColorCriticalBrush"),
+                    _ => ("Link not connected", "TextFillColorSecondaryBrush")
+                };
+                statusPillText.Text = linkText;
+                statusDot.Fill = ThemeBrush(linkBrushKey);
+                return;
+            }
+
             var connectedCount = _streamingOrchestrator.ConnectedReceivers.Count;
             var (text, brushKey) = _streamingOrchestrator.State switch
             {
@@ -1464,6 +1932,10 @@ namespace WinStream
         {
             searchButton.IsEnabled = isEnabled;
             refreshButton.IsEnabled = isEnabled;
+            // The presets drive SETUP, so they must read as busy while a session is
+            // being negotiated — otherwise a change looks ignored until it replays.
+            playbackResponsivenessComboBox.IsEnabled = isEnabled;
+            audioFidelityComboBox.IsEnabled = isEnabled;
         }
 
         private static Brush ThemeBrush(string key) =>

@@ -1,7 +1,5 @@
 namespace WinStream.Core.Audio;
 
-using WinStream.Core.Persistence;
-
 /// <summary>
 /// Converts PCM to 44.1 kHz stereo 16-bit and emits fixed 352-frame RAOP packets.
 /// Non-44.1 sources use linear interpolation (with one-frame hold across pushes).
@@ -23,12 +21,22 @@ public sealed class PcmPacketBuffer
     /// <summary>
     /// Conversion policy. In v1, <see cref="AudioFidelity.HighFidelity"/> matches
     /// <see cref="AudioFidelity.Auto"/> (direct append at 44.1 stereo; linear when converting).
-    /// <see cref="AudioFidelity.Standard"/> also uses linear when converting — no HQ SRC path.
+    /// <see cref="AudioFidelity.Standard"/> also uses linear when converting — no HQ SRC path yet.
     /// </summary>
     public AudioFidelity Fidelity { get; set; } = AudioFidelity.Auto;
 
     public IEnumerable<byte[]> Push(ReadOnlySpan<byte> pcm, AudioFormat format)
     {
+        var packets = new List<byte[]>();
+        Push(pcm, format, packets);
+        return packets;
+    }
+
+    /// <summary>Appends completed packets into <paramref name="packets"/> (caller clears).</summary>
+    public void Push(ReadOnlySpan<byte> pcm, AudioFormat format, List<byte[]> packets)
+    {
+        ArgumentNullException.ThrowIfNull(packets);
+
         if (format.BitsPerSample != 16)
         {
             throw new NotSupportedException("Only 16-bit PCM is supported.");
@@ -39,23 +47,21 @@ public sealed class PcmPacketBuffer
             throw new NotSupportedException("Unsupported channel count.");
         }
 
-        var packets = new List<byte[]>();
         var sourceFrames = pcm.Length / (format.Channels * 2);
         if (sourceFrames <= 0)
         {
-            return packets;
+            return;
         }
 
-        // Already target format: all fidelity modes use the direct path in v1
-        // (HighFidelity ≡ Auto; Standard has no alternate matching-rate path).
         if (format.SampleRate == TargetRate && format.Channels == TargetChannels)
         {
             AppendDirect(pcm, packets);
-            return packets;
+            return;
         }
 
         // Rate/channel conversion: always linear interpolation in v1
         // (Standard "forces linear"; Auto/HighFidelity share the same converter).
+        _ = Fidelity; // reserved for a future HQ SRC path
         var ratio = (double)format.SampleRate / TargetRate;
         while (true)
         {
@@ -93,8 +99,6 @@ public sealed class PcmPacketBuffer
         {
             _resampleCursor = -1;
         }
-
-        return packets;
     }
 
     /// <summary>

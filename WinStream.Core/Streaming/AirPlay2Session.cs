@@ -34,9 +34,11 @@ public sealed class AirPlay2Session : IAirPlaySession
 
     private readonly DeviceInfo _receiver;
     private readonly string _senderDeviceId;
+    private readonly PairingOptions? _pairingOptions;
     private readonly SessionStateMachine _stateMachine = new();
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly PcmPacketBuffer _pcmBuffer = new();
+    private readonly List<byte[]> _submitPackets = new();
     private readonly object _mediaGate = new();
     private EncryptedRtspClient? _control;
     private EventChannel? _events;
@@ -65,12 +67,20 @@ public sealed class AirPlay2Session : IAirPlaySession
     /// Per-install sender MAC, resolved and persisted by the app. Sessions never touch
     /// settings themselves; an unsupplied ID falls back to a throwaway per-session value.
     /// </param>
-    public AirPlay2Session(DeviceInfo receiver, string? senderDeviceId = null)
+    /// <param name="pairingOptions">
+    /// Optional persistent HomeKit pairing. When omitted, connections use transient
+    /// pair-setup (macOS will prompt Accept every time).
+    /// </param>
+    public AirPlay2Session(
+        DeviceInfo receiver,
+        string? senderDeviceId = null,
+        PairingOptions? pairingOptions = null)
     {
         _receiver = receiver ?? throw new ArgumentNullException(nameof(receiver));
         _senderDeviceId = SenderIdentity.LooksLikeMac(senderDeviceId)
             ? senderDeviceId!
             : SenderIdentity.CreateLocallyAdministeredMac();
+        _pairingOptions = pairingOptions;
         ReceiverId = ReceiverKey.For(receiver);
         _stateMachine.StateChanged += (_, change) =>
             StateChanged?.Invoke(this, change);
@@ -89,13 +99,6 @@ public sealed class AirPlay2Session : IAirPlaySession
 
     public void SetAudioFidelity(AudioFidelity fidelity) =>
         _pcmBuffer.Fidelity = fidelity;
-
-    /// <summary>SETUP latency bounds derived from the effective announce offset.</summary>
-    public (uint Min, uint Max) SetupLatencyBounds =>
-    (
-        LatencyAutoController.SetupLatencyMin(EffectiveLatencyFrames),
-        LatencyAutoController.SetupLatencyMax(EffectiveLatencyFrames)
-    );
 
     public SessionState State => _stateMachine.State;
 
@@ -126,8 +129,9 @@ public sealed class AirPlay2Session : IAirPlaySession
                 };
                 _control = client;
 
-                await client.ConnectAndPairAsync(cancellationToken).ConfigureAwait(false);
-                _shk = client.Pairing.AudioSharedKey();
+                await client.ConnectAndPairAsync(_pairingOptions, cancellationToken)
+                    .ConfigureAwait(false);
+                _shk = client.Keys.AudioSharedKey();
                 await client.GetInfoAsync(cancellationToken).ConfigureAwait(false);
 
                 // START_PLAYBACK order for PTP devices:
@@ -142,8 +146,8 @@ public sealed class AirPlay2Session : IAirPlaySession
                 await _events.ConnectAsync(
                     _receiver.IPAddress,
                     client.EventPort,
-                    client.Pairing.EventsWriteKey.ToArray(),
-                    client.Pairing.EventsReadKey.ToArray(),
+                    client.Keys.EventsWriteKey.ToArray(),
+                    client.Keys.EventsReadKey.ToArray(),
                     cancellationToken).ConfigureAwait(false);
 
                 await client.RecordAsync(cancellationToken).ConfigureAwait(false);
@@ -226,7 +230,6 @@ public sealed class AirPlay2Session : IAirPlaySession
             return;
         }
 
-        byte[][] packets;
         bool froze;
         lock (_mediaGate)
         {
@@ -240,8 +243,8 @@ public sealed class AirPlay2Session : IAirPlaySession
                 ref _rtpBasePending,
                 sharedMediaTimestamp);
 
-            packets = new System.Collections.Generic.List<byte[]>(
-                _pcmBuffer.Push(pcm.Span, format)).ToArray();
+            _submitPackets.Clear();
+            _pcmBuffer.Push(pcm.Span, format, _submitPackets);
         }
 
         if (froze)
@@ -249,7 +252,7 @@ public sealed class AirPlay2Session : IAirPlaySession
             _rtpBaseFrozen?.TrySetResult();
         }
 
-        foreach (var packetPcm in packets)
+        foreach (var packetPcm in _submitPackets)
         {
             SendAudioPacket(packetPcm);
         }

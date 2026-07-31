@@ -1,5 +1,5 @@
+using WinStream.Core;
 using WinStream.Core.Network;
-using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 
 namespace WinStream.Tests;
@@ -39,7 +39,7 @@ public class SessionLatencyFramesTests
     }
 
     [Fact]
-    public void LateJoin_shares_current_auto_step()
+    public void Both_protocols_accept_the_shared_auto_step()
     {
         var shared = LatencyAutoController.AutoStartFrames + LatencyAutoController.StepFrames;
         var a = new AirPlay2Session(DummyReceiver());

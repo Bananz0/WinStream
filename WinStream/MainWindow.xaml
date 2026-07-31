@@ -89,7 +89,7 @@
                          IsClosable="True"
                          Severity="Informational"
                          Title="Streaming to a Mac?"
-                         Message="On the Mac, open System Settings &gt; General &gt; AirDrop &amp; Handoff, set AirPlay Receiver to &quot;Everyone&quot; or &quot;Anyone on the same network&quot;, and turn off the required password."
+                         Message="On the Mac, set AirPlay Receiver to Everyone (or anyone on the same network) and turn off the required password. The first connect asks for the AirPlay code once so later sessions can skip Accept."
                          CloseButtonClick="MacHintBar_CloseButtonClick"/>
 
                 <!-- Step 1: what to send -->
@@ -510,12 +510,64 @@
                     </Grid>
                 </Border>
 
+                <!-- WinStream Link (feature-flagged; default hidden) -->
+                <Border x:Name="linkSinkCard"
+                        Style="{StaticResource CardBorderStyle}"
+                        Visibility="Collapsed">
+                    <StackPanel Spacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="WinStream Link"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Ultra-low-latency companion path. Requires LinkRx outside this app. AirPlay and Link cannot run at the same time."
+                                       Style="{StaticResource HintTextStyle}"/>
+                        </StackPanel>
+                        <ComboBox x:Name="sinkModeComboBox"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="SinkModeComboBox_SelectionChanged"
+                                  AutomationProperties.Name="Sink mode"/>
+                        <StackPanel x:Name="linkConnectPanel" Spacing="8" Visibility="Collapsed">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ComboBox x:Name="linkDiscoveryComboBox"
+                                          Grid.Column="0"
+                                          Header="Discovered companions"
+                                          HorizontalAlignment="Stretch"
+                                          PlaceholderText="No companions found yet"
+                                          SelectionChanged="LinkDiscoveryComboBox_SelectionChanged"
+                                          AutomationProperties.Name="Discovered Link companions"/>
+                                <Button x:Name="linkScanButton"
+                                        Grid.Column="1"
+                                        Content="Scan"
+                                        VerticalAlignment="Bottom"
+                                        Click="LinkScanButton_Click"
+                                        AutomationProperties.Name="Scan for Link companions"/>
+                            </Grid>
+                            <TextBox x:Name="linkHostTextBox"
+                                     Header="Companion IP"
+                                     PlaceholderText="192.168.1.50"
+                                     AutomationProperties.Name="Link companion IP"/>
+                            <PasswordBox x:Name="linkPinBox"
+                                         Header="Link PIN"
+                                         AutomationProperties.Name="Link PIN"/>
+                            <Button x:Name="linkConnectButton"
+                                    Content="Connect Link"
+                                    Click="LinkConnectButton_Click"
+                                    HorizontalAlignment="Stretch"/>
+                            <TextBlock x:Name="linkStatusText"
+                                       Style="{StaticResource HintTextStyle}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <!-- Playback responsiveness + audio fidelity -->
-                <Border Style="{StaticResource CardBorderStyle}">
+                <Border x:Name="streamingQualityCard" Style="{StaticResource CardBorderStyle}">
                     <StackPanel Spacing="14">
                         <StackPanel Spacing="2">
                             <TextBlock Text="Streaming quality" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Delay and conversion are separate. Neither setting claims millisecond AirPlay latency."
+                            <TextBlock Text="Delay and conversion are separate. Changing a setting while streaming reconnects automatically."
                                        Style="{StaticResource HintTextStyle}"/>
                         </StackPanel>
 
@@ -593,13 +645,13 @@
                                     Minimum="0"
                                     Maximum="100"
                                     StepFrequency="1"
-                                    Value="70"
+                                    Value="100"
                                     VerticalAlignment="Center"
                                     AutomationProperties.Name="Receiver volume"
                                     ValueChanged="StreamVolumeSlider_ValueChanged"/>
                             <TextBlock x:Name="streamVolumeText"
                                        Grid.Column="2"
-                                       Text="70%"
+                                       Text="100%"
                                        Width="44"
                                        TextAlignment="Right"
                                        VerticalAlignment="Center"/>
