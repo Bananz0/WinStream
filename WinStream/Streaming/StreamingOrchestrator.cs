@@ -438,8 +438,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     private AirPlayProtocolKind ResolveProtocol(DeviceInfo receiver)
     {
-        var classic = AirPlayCapability.SupportsClassicRaop(
-            !string.IsNullOrWhiteSpace(receiver.PublicKey));
+        var classic = AirPlayCapability.SupportsClassicRaop(receiver.EncryptionTypes);
         var ap2 = AirPlayCapability.SupportsAirPlay2(
             !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
             receiver.Features,
@@ -454,16 +453,18 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 "Receiver does not advertise a supported AirPlay audio protocol.");
         }
 
-        if (preferred == AirPlayProtocolKind.AirPlay2 && !EnableAirPlay2Experimental)
+        if (preferred == AirPlayProtocolKind.AirPlay2)
         {
-            if (classic)
+            if (!EnableAirPlay2Experimental)
             {
-                return AirPlayProtocolKind.ClassicRaop;
+                throw new InvalidOperationException(
+                    "This receiver requires AirPlay 2. " +
+                    "Enable the experimental AirPlay 2 gate in settings. " +
+                    "On a Mac, also set AirPlay Receiver to allow Everyone (or anyone on the same network).");
             }
 
-            throw new InvalidOperationException(
-                "This receiver appears to require AirPlay 2. " +
-                "Enable the experimental AirPlay 2 gate in settings (not production-ready).");
+            // Gate on: still surface the stub failure with a clear message upstream.
+            return AirPlayProtocolKind.AirPlay2;
         }
 
         return preferred;

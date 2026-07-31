@@ -7,6 +7,19 @@ public enum AirPlayProtocolKind
     AirPlay2 = 2
 }
 
+/// <summary>RAOP TXT <c>et</c> encryption type selected for a session.</summary>
+public enum RaopEncryptionMode
+{
+    /// <summary>Receiver advertises neither et=0 nor et=1.</summary>
+    Unsupported = -1,
+
+    /// <summary>et=0 — clear ALAC payloads for classic-compatible receivers.</summary>
+    None = 0,
+
+    /// <summary>et=1 — AES-128-CBC with the AirTunes RSA-wrapped key.</summary>
+    Rsa = 1
+}
+
 /// <summary>
 /// Capability helpers for classic RAOP vs AirPlay 2. AP2 streaming remains gated.
 /// </summary>
@@ -15,8 +28,43 @@ public static class AirPlayCapability
     // Community-observed feature bit often set on AP2-capable receivers (bit 30 of low word).
     public const long AirPlay2FeatureBit = 1L << 30;
 
-    public static bool SupportsClassicRaop(bool hasReceiverPublicKey) =>
-        hasReceiverPublicKey;
+    /// <summary>
+    /// Classic RAOP RSA encryption is advertised via TXT <c>et</c> containing
+    /// type <c>1</c>. Device <c>pk</c> on modern receivers is Ed25519 identity,
+    /// not proof of classic RAOP support.
+    /// </summary>
+    public static bool SupportsClassicRaop(string? encryptionTypesTxt) =>
+        ResolveEncryptionMode(encryptionTypesTxt) != RaopEncryptionMode.Unsupported;
+
+    /// <summary>
+    /// Picks the strongest classic RAOP encryption we implement. RSA (et=1) is
+    /// preferred; et=0 is clear ALAC for classic-compatible speakers.
+    /// Modern macOS AirPlay Receiver often still rejects classic RTSP (OPTIONS 403)
+    /// and needs AirPlay 2 HKP — do not treat et=0 alone as "Macs work on classic."
+    /// et=3/5-only receivers are unsupported in the classic path.
+    /// </summary>
+    public static RaopEncryptionMode ResolveEncryptionMode(string? encryptionTypesTxt)
+    {
+        if (string.IsNullOrWhiteSpace(encryptionTypesTxt))
+        {
+            // Do not assume classic support — modern AP2 receivers still publish
+            // pk (Ed25519), which previously caused false positives.
+            return RaopEncryptionMode.Unsupported;
+        }
+
+        var types = encryptionTypesTxt
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .ToHashSet();
+
+        if (types.Contains("1"))
+        {
+            return RaopEncryptionMode.Rsa;
+        }
+
+        return types.Contains("0")
+            ? RaopEncryptionMode.None
+            : RaopEncryptionMode.Unsupported;
+    }
 
     public static bool SupportsAirPlay2(
         bool hasPairingIdentity,
@@ -48,21 +96,48 @@ public static class AirPlayCapability
         bool airPlay2,
         bool airPlay2GateEnabled)
     {
-        // Prefer classic RAOP whenever the receiver advertises a pk — the AP2
-        // adapter is still a gated stub and must not steal dual-capable devices.
+        // Production (through Phase 3): classic-first so dual-capable devices keep
+        // working on RaopSession until AirPlay2Session can Connect. Phase 4 flips
+        // dual-capable + gate on → AirPlay2 (see PreferredProtocolPhase4Target tests).
+        _ = airPlay2GateEnabled;
         if (classic)
         {
             return AirPlayProtocolKind.ClassicRaop;
         }
 
-        if (airPlay2 && airPlay2GateEnabled)
+        if (airPlay2)
         {
             return AirPlayProtocolKind.AirPlay2;
         }
 
+        return AirPlayProtocolKind.Unknown;
+    }
+
+    /// <summary>
+    /// Intended Phase 4 routing. Not wired into production until AP2 Connect is audible.
+    /// </summary>
+    public static AirPlayProtocolKind PreferredProtocolPhase4Target(
+        bool classic,
+        bool airPlay2,
+        bool airPlay2GateEnabled)
+    {
+        if (classic && airPlay2)
+        {
+            return airPlay2GateEnabled
+                ? AirPlayProtocolKind.AirPlay2
+                : AirPlayProtocolKind.ClassicRaop;
+        }
+
+        if (classic)
+        {
+            return AirPlayProtocolKind.ClassicRaop;
+        }
+
         if (airPlay2)
         {
-            return AirPlayProtocolKind.AirPlay2;
+            return airPlay2GateEnabled
+                ? AirPlayProtocolKind.AirPlay2
+                : AirPlayProtocolKind.Unknown;
         }
 
         return AirPlayProtocolKind.Unknown;
