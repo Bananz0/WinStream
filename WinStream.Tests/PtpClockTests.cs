@@ -59,6 +59,28 @@ public class PtpClockTests
     }
 
     [Fact]
+    public void ApplyOffset_rejects_spike_keeps_ema()
+    {
+        var clock = new PtpClock(1);
+        clock.SetOffsetForTests(offsetNs: 1_000_000_000L, masterClockId: 7);
+
+        // Steady sample near the EMA — accepted.
+        clock.ApplyOffsetForTests(masterNs: 1_010_000_000L, localNs: 0);
+        Assert.Equal(0, clock.SpikesRejectedForTests);
+
+        var before = clock.NowNanoseconds;
+
+        // 200 ms jump vs EMA — rejected.
+        clock.ApplyOffsetForTests(masterNs: 1_200_000_000L, localNs: 0);
+        Assert.Equal(1, clock.SpikesRejectedForTests);
+
+        // Offset must not jump by ~200 ms.
+        var after = clock.NowNanoseconds;
+        var driftMs = Math.Abs((long)after - (long)before) / 1_000_000.0;
+        Assert.True(driftMs < 50, $"Unexpected drift {driftMs} ms after rejected spike");
+    }
+
+    [Fact]
     public void ReadTimestamp_decodes_seconds_and_nanos()
     {
         var buffer = new byte[10];

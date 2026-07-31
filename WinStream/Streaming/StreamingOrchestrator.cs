@@ -21,6 +21,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly object _sessionsGate = new();
     private readonly ResilienceMonitor _resilience = new();
     private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
+    private AudioFrameSendPump? _sendPump;
     private IAudioSource? _audioSource;
     private DateTimeOffset? _silentSince;
     private CancellationTokenSource? _reconnectCts;
@@ -167,6 +168,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             _audioSource.DeviceInvalidated += OnDeviceInvalidated;
             _audioSource.CaptureFailed += OnCaptureFailed;
             _fanoutClock.Reset();
+            _sendPump = new AudioFrameSendPump(capacity: 64, DispatchQueuedFrame);
+            _sendPump.Start();
             return;
         }
 
@@ -174,6 +177,64 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             throw new InvalidOperationException(
                 "All multi-room sessions must share the same capture source.");
+        }
+    }
+
+    private async Task DetachAudioSourceAsync()
+    {
+        if (_audioSource is null)
+        {
+            return;
+        }
+
+        _audioSource.FrameAvailable -= OnFrameAvailable;
+        _audioSource.DeviceInvalidated -= OnDeviceInvalidated;
+        _audioSource.CaptureFailed -= OnCaptureFailed;
+        _audioSource = null;
+        _silentSince = null;
+
+        var pump = _sendPump;
+        _sendPump = null;
+        if (pump is not null)
+        {
+            await pump.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private void OnFrameAvailable(object? sender, AudioFrame frame)
+    {
+        // Capture thread: enqueue only. Encode/encrypt runs on the send pump.
+        _sendPump?.Enqueue(frame);
+        UpdateSilenceWatchdog();
+    }
+
+    private void DispatchQueuedFrame(AudioFrame frame)
+    {
+        // Advance by the same 44.1 kHz stereo frame count PcmPacketBuffer will
+        // emit, not the capture buffer length — otherwise shared timestamps drift
+        // from packetized RTP after resample.
+        var frames = PcmPacketBuffer.EstimateOutputFrames(frame.Pcm.Length, frame.Format);
+        var stamp = _fanoutClock.Advance(frames);
+        SessionEntry[] snapshot;
+        lock (_sessionsGate)
+        {
+            snapshot = _sessions.Values.ToArray();
+        }
+
+        foreach (var entry in snapshot)
+        {
+            if (entry.Session.State is SessionState.Streaming or SessionState.Degraded)
+            {
+                entry.Session.SubmitPcm(frame.Pcm, frame.Format, stamp);
+            }
+        }
+
+        var drops = _sendPump?.QueueDropCount ?? 0;
+        if (drops > 0 && drops % 25 == 0)
+        {
+            AppLog.Warn(
+                "stream",
+                $"PCM queue drop_oldest count={drops} depth={_sendPump?.QueueDepth ?? 0}");
         }
     }
 
@@ -187,7 +248,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             await RemoveSessionAsync(key, cancellationToken).ConfigureAwait(false);
         }
 
-        DetachAudioSource();
+        await DetachAudioSourceAsync().ConfigureAwait(false);
         SetAggregate(SessionState.Disconnected);
     }
 
@@ -213,44 +274,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
 
         await entry.Session.DisposeAsync().ConfigureAwait(false);
-    }
-
-    private void DetachAudioSource()
-    {
-        if (_audioSource is null)
-        {
-            return;
-        }
-
-        _audioSource.FrameAvailable -= OnFrameAvailable;
-        _audioSource.DeviceInvalidated -= OnDeviceInvalidated;
-        _audioSource.CaptureFailed -= OnCaptureFailed;
-        _audioSource = null;
-        _silentSince = null;
-    }
-
-    private void OnFrameAvailable(object? sender, AudioFrame frame)
-    {
-        // Advance by the same 44.1 kHz stereo frame count PcmPacketBuffer will
-        // emit, not the capture buffer length — otherwise shared timestamps drift
-        // from packetized RTP after resample.
-        var frames = PcmPacketBuffer.EstimateOutputFrames(frame.Pcm.Length, frame.Format);
-        var stamp = _fanoutClock.Advance(frames);
-        SessionEntry[] snapshot;
-        lock (_sessionsGate)
-        {
-            snapshot = _sessions.Values.ToArray();
-        }
-
-        foreach (var entry in snapshot)
-        {
-            if (entry.Session.State is SessionState.Streaming or SessionState.Degraded)
-            {
-                entry.Session.SubmitPcm(frame.Pcm, frame.Format, stamp);
-            }
-        }
-
-        UpdateSilenceWatchdog();
     }
 
     private void UpdateSilenceWatchdog()
@@ -483,7 +506,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 await RemoveSessionAsync(key, CancellationToken.None).ConfigureAwait(false);
             }
 
-            DetachAudioSource();
+            await DetachAudioSourceAsync().ConfigureAwait(false);
             SetAggregate(SessionState.Disconnected, reason);
         }
         finally

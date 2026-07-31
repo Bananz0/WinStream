@@ -37,6 +37,12 @@ public sealed class PtpClock : IAsyncDisposable
 
     private const ushort FlagTwoStep = 1 << 9;
 
+    /// <summary>EMA weight toward each accepted sample (plan: α = 0.2).</summary>
+    private const double EmaAlpha = 0.2;
+
+    /// <summary>Reject Follow_Up offsets that jump more than this vs the EMA.</summary>
+    private const long SpikeRejectNanoseconds = 50_000_000; // 50 ms
+
     private static readonly TimeSpan ReceiveFaultBackoff = TimeSpan.FromMilliseconds(50);
 
     private readonly ulong _clockId;
@@ -52,8 +58,11 @@ public sealed class PtpClock : IAsyncDisposable
     private ushort _syncSequence;
     private bool _syncPending;
     private long _offsetNs;
+    private long _emaOffsetNs;
     private ulong _masterClockId;
     private int _samples;
+    private int _spikesRejected;
+    private long _lastPtpDeltaLogMs;
     private int _consecutiveReceiveFaults;
     private bool _disposed;
 
@@ -172,12 +181,20 @@ public sealed class PtpClock : IAsyncDisposable
     internal void SetOffsetForTests(long offsetNs, ulong masterClockId)
     {
         Interlocked.Exchange(ref _offsetNs, offsetNs);
+        Interlocked.Exchange(ref _emaOffsetNs, offsetNs);
         Volatile.Write(ref _masterClockId, masterClockId);
         if (Interlocked.CompareExchange(ref _samples, 1, 0) == 0)
         {
             _lock?.TrySetResult();
         }
     }
+
+    /// <summary>Test seam: apply a master/local pair through the production smoother.</summary>
+    internal void ApplyOffsetForTests(long masterNs, long localNs) =>
+        ApplyOffset(masterNs, localNs);
+
+    /// <summary>How many Follow_Up samples were rejected as spikes.</summary>
+    internal int SpikesRejectedForTests => Volatile.Read(ref _spikesRejected);
 
     private static UdpClient BindPort(int port)
     {
@@ -336,14 +353,57 @@ public sealed class PtpClock : IAsyncDisposable
     private void ApplyOffset(long masterNs, long localNs)
     {
         var offset = masterNs - localNs;
-        Interlocked.Exchange(ref _offsetNs, offset);
-        var samples = Interlocked.Increment(ref _samples);
-        if (samples == 1)
+        var samples = Volatile.Read(ref _samples);
+        if (samples == 0)
         {
+            Interlocked.Exchange(ref _offsetNs, offset);
+            Interlocked.Exchange(ref _emaOffsetNs, offset);
+            Interlocked.Exchange(ref _samples, 1);
             AppLog.Info(
                 "ptp",
                 $"Locked to grandmaster 0x{MasterClockId:X16} offset={offset / 1_000_000.0:F3} ms");
             _lock?.TrySetResult();
+            return;
+        }
+
+        var ema = Interlocked.Read(ref _emaOffsetNs);
+        var delta = Math.Abs(offset - ema);
+        if (delta > SpikeRejectNanoseconds)
+        {
+            Interlocked.Increment(ref _spikesRejected);
+            MaybeLogPtpDelta(delta, rejected: true);
+            return;
+        }
+
+        var smoothed = ema + (long)(EmaAlpha * (offset - ema));
+        Interlocked.Exchange(ref _emaOffsetNs, smoothed);
+        Interlocked.Exchange(ref _offsetNs, smoothed);
+        Interlocked.Increment(ref _samples);
+        MaybeLogPtpDelta(delta, rejected: false);
+    }
+
+    private void MaybeLogPtpDelta(long deltaNs, bool rejected)
+    {
+        var nowMs = Environment.TickCount64;
+        var last = Interlocked.Read(ref _lastPtpDeltaLogMs);
+        if (nowMs - last < 1_000 && !rejected)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _lastPtpDeltaLogMs, nowMs, last) != last &&
+            !rejected)
+        {
+            return;
+        }
+
+        if (rejected || deltaNs > 1_000_000)
+        {
+            AppLog.Info(
+                "ptp",
+                rejected
+                    ? $"Offset spike rejected delta={deltaNs / 1_000_000.0:F3} ms"
+                    : $"Offset delta={deltaNs / 1_000_000.0:F3} ms");
         }
     }
 

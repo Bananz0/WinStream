@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NAudio.CoreAudioApi;
@@ -23,6 +24,9 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private string? _activeEndpointId;
     private bool _disposed;
     private double _currentRms;
+    private long _lastCallbackQpc;
+    private long _captureGapCount;
+    private long _lastInterCallbackTicks;
 
     public event EventHandler<AudioFrame>? FrameAvailable;
 
@@ -66,6 +70,12 @@ public sealed class WasapiLoopbackSource : IAudioSource
     }
 
     public bool IsSilent => RmsCalculator.IsSilent(CurrentRms);
+
+    /// <summary>How many capture callbacks arrived after a &gt;50 ms gap (Phase 1 telemetry).</summary>
+    public long CaptureGapCount => Interlocked.Read(ref _captureGapCount);
+
+    /// <summary>Most recent inter-callback interval in Stopwatch ticks.</summary>
+    public long LastInterCallbackTicks => Interlocked.Read(ref _lastInterCallbackTicks);
 
     public string? PreferredEndpointId
     {
@@ -182,6 +192,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _currentRms = 0;
         _format = null;
         _activeEndpointId = null;
+        Interlocked.Exchange(ref _lastCallbackQpc, 0);
         while (_recentRms.TryDequeue(out _))
         {
         }
@@ -192,6 +203,19 @@ public sealed class WasapiLoopbackSource : IAudioSource
         if (e.BytesRecorded <= 0 || _format is null)
         {
             return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var previous = Interlocked.Exchange(ref _lastCallbackQpc, now);
+        if (previous != 0)
+        {
+            var delta = now - previous;
+            Interlocked.Exchange(ref _lastInterCallbackTicks, delta);
+            var gapMs = delta * 1000.0 / Stopwatch.Frequency;
+            if (gapMs > 50)
+            {
+                Interlocked.Increment(ref _captureGapCount);
+            }
         }
 
         var copy = Pcm16Converter.ToPcm16(e.Buffer.AsSpan(0, e.BytesRecorded), _sourceFormat);
