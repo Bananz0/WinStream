@@ -103,6 +103,29 @@ if (args.Contains("--pair"))
     }
 }
 
+if (args.Contains("--setup"))
+{
+    Console.WriteLine(
+        $"\n== AP2 pair + encrypted GET /info + session SETUP {target.DisplayName} " +
+        $"({target.IPAddress}:{target.Port}) ==");
+    try
+    {
+        await using var control = new WinStream.Core.Protocol.AirPlay2.EncryptedRtspClient(
+            target.IPAddress,
+            target.Port);
+        await control.ConnectAndPairAsync();
+        await control.GetInfoAsync();
+        await control.SessionSetupAsync();
+        Console.WriteLine($"SESSION_SETUP_OK eventPort={control.EventPort}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"SESSION_SETUP_FAIL: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+}
+
 if (args.Contains("--raw"))
 {
     await WinStream.Tools.RaopProbe.RawProbe.RunAsync(target.IPAddress, target.Port);

@@ -1,6 +1,5 @@
 using System.Net.Sockets;
 using System.Text;
-using WinStream.Core.Protocol.AirPlay2;
 
 namespace WinStream.Core.Protocol.AirPlay2;
 
@@ -16,6 +15,17 @@ public static class HkpPairSetupClient
         using var client = new TcpClient();
         await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
         await using var stream = client.GetStream();
+        return await PairAsync(stream, host, port, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<HkpTransient> PairAsync(
+        Stream stream,
+        string host,
+        int port,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
 
         var pairing = new HkpTransient();
         try
@@ -37,7 +47,7 @@ public static class HkpPairSetupClient
     }
 
     private static async Task<byte[]> RoundTripAsync(
-        NetworkStream stream,
+        Stream stream,
         string host,
         int port,
         byte[] body,
@@ -85,7 +95,7 @@ public static class HkpPairSetupClient
     }
 
     private static async Task<(int Status, byte[] Body)> ReadHttpResponseAsync(
-        NetworkStream stream,
+        Stream stream,
         CancellationToken cancellationToken)
     {
         var headerBytes = new List<byte>(512);
