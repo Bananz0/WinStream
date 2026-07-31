@@ -14,6 +14,7 @@ public class SettingsStoreTests
             SelectedRenderDeviceId = "endpoint-123",
             MonitorCapture = true,
             AutoConnectLastReceiver = true,
+            LaunchAtStartup = true,
             LastReceiverKey = "AA:BB:CC:DD:EE:FF",
             LastReceiverName = "Living Room",
             PreferVirtualDriver = true
@@ -24,9 +25,28 @@ public class SettingsStoreTests
         Assert.Equal("endpoint-123", loaded.SelectedRenderDeviceId);
         Assert.True(loaded.MonitorCapture);
         Assert.True(loaded.AutoConnectLastReceiver);
+        Assert.True(loaded.LaunchAtStartup);
         Assert.Equal("AA:BB:CC:DD:EE:FF", loaded.LastReceiverKey);
         Assert.Equal("Living Room", loaded.LastReceiverName);
         Assert.True(loaded.PreferVirtualDriver);
+        Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsLatencyAndFidelityEnums()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+        store.Save(new AppSettings
+        {
+            PlaybackResponsiveness = PlaybackResponsiveness.LowDelay,
+            AudioFidelity = AudioFidelity.HighFidelity
+        });
+
+        var loaded = store.Load();
+        Assert.Equal(PlaybackResponsiveness.LowDelay, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.HighFidelity, loaded.AudioFidelity);
     }
 
     [Fact]
@@ -37,11 +57,14 @@ public class SettingsStoreTests
         var loaded = new SettingsStore(directory.Path).Load();
 
         Assert.False(loaded.AutoConnectLastReceiver);
+        Assert.False(loaded.LaunchAtStartup);
         Assert.Null(loaded.LastReceiverKey);
         Assert.Null(loaded.LastReceiverName);
         Assert.False(loaded.MonitorCapture);
         Assert.Equal(CaptureMode.Loopback, loaded.CaptureMode);
         Assert.False(loaded.PreferVirtualDriver);
+        Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using WinStream.Core.Audio;
+using WinStream.Core.Persistence;
 
 namespace WinStream.Core.Streaming;
 
@@ -10,9 +11,21 @@ public interface IAirPlaySession : IAsyncDisposable
 
     SessionState State { get; }
 
+    /// <summary>Effective sync/announce playout offset in 44.1 kHz frames.</summary>
+    uint EffectiveLatencyFrames { get; }
+
     Task ConnectAsync(CancellationToken cancellationToken = default);
 
     Task DisconnectAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Updates the sync/announce latency offset. Mid-session Auto raises are silent;
+    /// SETUP latencyMin/Max stay fixed at 11025/88200.
+    /// </summary>
+    void SetEffectiveLatencyFrames(uint frames);
+
+    /// <summary>PCM conversion policy for packetization (v1: HighFidelity ≡ Auto).</summary>
+    void SetAudioFidelity(AudioFidelity fidelity);
 
     void SubmitPcm(
         ReadOnlyMemory<byte> pcm,

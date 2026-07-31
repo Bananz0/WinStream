@@ -12,6 +12,7 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private long _sendCount;
+    private long _slowSendCount;
     private bool _disposed;
 
     public AudioFrameSendPump(int capacity, Action<AudioFrame> send)
@@ -108,10 +109,14 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
             var elapsed = Environment.TickCount64 - started;
             if (elapsed >= 8)
             {
+                Interlocked.Increment(ref _slowSendCount);
                 Logging.AppLog.Info("stream", $"Encode+send took {elapsed} ms");
             }
         }
     }
+
+    /// <summary>How many encode+send operations took ≥ 8 ms (Auto latency pressure signal).</summary>
+    public long SlowSendCount => Interlocked.Read(ref _slowSendCount);
 
     public async ValueTask DisposeAsync()
     {

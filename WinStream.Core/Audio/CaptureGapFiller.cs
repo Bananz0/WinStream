@@ -5,7 +5,13 @@ namespace WinStream.Core.Audio;
 /// </summary>
 public static class CaptureGapFiller
 {
-    public const double ThresholdMilliseconds = 50;
+    /// <summary>
+    /// Must stay well above the capture poll cadence. NAudio polls the loopback client
+    /// every half buffer and Windows rounds the sleep up to the ~15.6 ms timer tick, so a
+    /// threshold near the callback interval reports a gap on every normal callback and
+    /// injects phantom silence into a stream that is playing fine.
+    /// </summary>
+    public const double ThresholdMilliseconds = 120;
     public const double MaxFillMilliseconds = 2000;
     public const double ChunkMilliseconds = 10;
 

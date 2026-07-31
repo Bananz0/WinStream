@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Audio;
 using WinStream.Core.Network;
+using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.Raop;
 
 namespace WinStream.Core.Streaming;
@@ -46,6 +47,7 @@ public sealed class RaopSession : IAirPlaySession
     private bool _firstSync = true;
     private bool _rtpBasePending = true;
     private float _volumeDb = -20f;
+    private uint _latencyFrames = DefaultLatencyFrames;
     private bool _disposed;
 
     public RaopSession(DeviceInfo receiver)
@@ -61,6 +63,21 @@ public sealed class RaopSession : IAirPlaySession
     public string ReceiverId { get; }
 
     public SessionState State => _stateMachine.State;
+
+    public uint EffectiveLatencyFrames => Volatile.Read(ref _latencyFrames);
+
+    public void SetEffectiveLatencyFrames(uint frames)
+    {
+        if (frames < LatencyAutoController.LatencyMinFrames)
+        {
+            frames = LatencyAutoController.LatencyMinFrames;
+        }
+
+        Volatile.Write(ref _latencyFrames, frames);
+    }
+
+    public void SetAudioFidelity(AudioFidelity fidelity) =>
+        _pcmBuffer.Fidelity = fidelity;
 
     private RaopEncryptionMaterial? _encryptionMaterial;
 
@@ -475,7 +492,7 @@ public sealed class RaopSession : IAirPlaySession
                     _firstSync = false;
                 }
 
-                var nowMinusLatency = now - DefaultLatencyFrames;
+                var nowMinusLatency = now - Volatile.Read(ref _latencyFrames);
                 var packet = new byte[20];
                 var length = RtpPacketizer.WriteSyncPacket(
                     packet,

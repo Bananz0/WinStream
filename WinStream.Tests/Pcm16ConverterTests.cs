@@ -13,10 +13,11 @@ public class Pcm16ConverterTests
         var pcm = Pcm16Converter.ToPcm16(source, CaptureSampleFormat.Float32);
 
         Assert.Equal(8, pcm.Length);
-        Assert.Equal(0, ReadSample(pcm, 0));
-        Assert.Equal(short.MaxValue, ReadSample(pcm, 1));
-        Assert.Equal(-short.MaxValue, ReadSample(pcm, 2));
-        Assert.Equal(16384, ReadSample(pcm, 3));
+        // TPDF dither is ±1 LSB around the quantized value.
+        Assert.InRange(ReadSample(pcm, 0), -1, 1);
+        Assert.InRange(ReadSample(pcm, 1), short.MaxValue - 1, short.MaxValue);
+        Assert.InRange(ReadSample(pcm, 2), -short.MaxValue, -short.MaxValue + 1);
+        Assert.InRange(ReadSample(pcm, 3), 16383, 16385);
     }
 
     [Fact]
@@ -27,7 +28,7 @@ public class Pcm16ConverterTests
         var pcm = Pcm16Converter.ToPcm16(source, CaptureSampleFormat.Float32);
 
         Assert.Equal(short.MaxValue, ReadSample(pcm, 0));
-        Assert.Equal(-short.MaxValue, ReadSample(pcm, 1));
+        Assert.InRange(ReadSample(pcm, 1), -short.MaxValue, -short.MaxValue + 1);
         Assert.Equal(0, ReadSample(pcm, 2));
     }
 

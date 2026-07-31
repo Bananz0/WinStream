@@ -37,11 +37,27 @@ namespace WinStream
 
             _appInstance.Activated += OnAppInstanceActivated;
             WinStream.Core.Logging.AppLog.EnableFileSink(LogDirectory);
+            var startInTray = StartupRegistration.WasStartedFromLogin();
+
             _mainWindow = new MainWindow();
-            _mainWindow.Activate();
+            if (startInTray)
+            {
+                _mainWindow.HideToTray();
+            }
+            else
+            {
+                _mainWindow.Activate();
+            }
 
             _trayIcon = new TrayIconService(_mainWindow.WindowHandle);
+            _trayIcon.MenuStateProvider = () => _mainWindow?.BuildTrayMenuState() ?? TrayMenuState.Empty;
             _trayIcon.OpenRequested += (_, _) => ShowMainWindow();
+            _trayIcon.ConnectLastRequested += (_, _) => EnqueueTrayAction(
+                window => window.ConnectLastFromTrayAsync());
+            _trayIcon.ConnectDeviceRequested += (_, key) => EnqueueTrayAction(
+                window => window.ConnectDeviceFromTrayAsync(key));
+            _trayIcon.DisconnectRequested += (_, _) => EnqueueTrayAction(
+                window => window.DisconnectFromTrayAsync());
             _trayIcon.ExitRequested += (_, _) => _ = QuitAsync();
             _trayIcon.Initialize();
         }
@@ -54,6 +70,29 @@ namespace WinStream
         private void ShowMainWindow()
         {
             _mainWindow?.ShowFromTray();
+        }
+
+        private void EnqueueTrayAction(Func<MainWindow, System.Threading.Tasks.Task> action)
+        {
+            var window = _mainWindow;
+            if (window is null)
+            {
+                return;
+            }
+
+            window.DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await action(window);
+                }
+                catch (Exception ex)
+                {
+                    WinStream.Core.Logging.AppLog.Error(
+                        "ui",
+                        $"Tray action failed: {ex.GetType().Name}");
+                }
+            });
         }
 
         private async System.Threading.Tasks.Task QuitAsync()

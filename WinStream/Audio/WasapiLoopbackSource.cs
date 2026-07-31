@@ -14,11 +14,19 @@ namespace WinStream.Audio;
 
 public sealed class WasapiLoopbackSource : IAudioSource
 {
+    /// <summary>
+    /// NAudio's <see cref="WasapiLoopbackCapture"/> hard-codes a 100 ms client buffer that it
+    /// polls every 50 ms, so audio arrives in ~60 ms bursts. Halving it keeps the poll well
+    /// inside <see cref="CaptureGapFiller.ThresholdMilliseconds"/> while leaving the client
+    /// ring twice as long as the poll interval.
+    /// </summary>
+    private const int CaptureBufferMilliseconds = 50;
+
     private readonly object _gate = new();
     private readonly ConcurrentQueue<double> _recentRms = new();
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
-    private WasapiLoopbackCapture? _capture;
+    private WasapiCapture? _capture;
     private AudioFormat? _format;
     private CaptureSampleFormat _sourceFormat;
     private string? _requestedEndpointId;
@@ -185,7 +193,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _enumerator ??= new MMDeviceEnumerator();
         _device = ResolveDevice(_enumerator, PreferredEndpointId);
         _activeEndpointId = _device.ID;
-        _capture = new WasapiLoopbackCapture(_device);
+        _capture = new ShortBufferLoopbackCapture(_device, CaptureBufferMilliseconds);
         var waveFormat = _capture.WaveFormat;
         _sourceFormat = ResolveSampleFormat(waveFormat);
 
@@ -309,36 +317,35 @@ public sealed class WasapiLoopbackSource : IAudioSource
                 continue;
             }
 
-            var delta = Stopwatch.GetTimestamp() - last;
-            if (!CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
+            var now = Stopwatch.GetTimestamp();
+            var delta = now - last;
+
+            // Only a silence longer than the poll cadence counts as a gap. Once one is
+            // open, keep filling every tick until a real callback closes it.
+            if (Volatile.Read(ref _inGap) == 0)
             {
-                CaptureGapFiller.EndGap(ref _inGap);
-                continue;
+                if (!CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
+                {
+                    continue;
+                }
+
+                if (CaptureGapFiller.TryBeginGap(ref _inGap, ref _captureGapCount))
+                {
+                    AppLog.Info(
+                        "capture",
+                        "Loopback gap — inserting silence to keep RTP continuous");
+                }
             }
 
-            if (CaptureGapFiller.TryBeginGap(ref _inGap, ref _captureGapCount))
-            {
-                AppLog.Info("capture", "Loopback gap — inserting silence to keep RTP continuous");
-            }
-
-            EmitSilence(CaptureGapFiller.ChunkMilliseconds);
-            Interlocked.Exchange(ref _lastCallbackQpc, Stopwatch.GetTimestamp());
+            // Fill the whole elapsed span, not a fixed chunk, so the RTP timeline advances
+            // at exactly wall-clock rate and never runs fast or slow across a gap.
+            EmitSilence(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
+            Interlocked.Exchange(ref _lastCallbackQpc, now);
         }
     }
 
-    private void EmitSilence(double gapMilliseconds)
+    private void EmitSilence(double gapMilliseconds, AudioFormat format)
     {
-        AudioFormat? format;
-        lock (_gate)
-        {
-            format = _format;
-        }
-
-        if (format is null)
-        {
-            return;
-        }
-
         var silence = CaptureGapFiller.CreateSilence(format, gapMilliseconds);
         if (silence.Length == 0)
         {
@@ -413,5 +420,21 @@ public sealed class WasapiLoopbackSource : IAudioSource
         }
 
         return enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+    }
+
+    /// <summary>
+    /// <see cref="WasapiLoopbackCapture"/> with a caller-chosen client buffer. NAudio only
+    /// exposes the buffer length on <see cref="WasapiCapture"/>, so loopback re-adds the
+    /// stream flag itself.
+    /// </summary>
+    private sealed class ShortBufferLoopbackCapture : WasapiCapture
+    {
+        public ShortBufferLoopbackCapture(MMDevice device, int bufferMilliseconds)
+            : base(device, useEventSync: false, audioBufferMillisecondsLength: bufferMilliseconds)
+        {
+        }
+
+        protected override AudioClientStreamFlags GetAudioClientStreamFlags() =>
+            AudioClientStreamFlags.Loopback | base.GetAudioClientStreamFlags();
     }
 }

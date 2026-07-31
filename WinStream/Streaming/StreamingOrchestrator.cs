@@ -8,13 +8,15 @@ using System.Threading.Tasks;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
+using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 
 namespace WinStream.Streaming;
 
 public sealed class StreamingOrchestrator : IAsyncDisposable
 {
-    // ~1.5 s of 10 ms frames at drop-oldest under CPU spikes before late audio is discarded.
+    // ~2 s of WASAPI loopback frames. Deeper than the receiver buffer only delays
+    // recovery, because anything older than that is discarded as late anyway.
     private const int SendQueueCapacity = 64;
 
     private readonly string? _senderDeviceId;
@@ -24,12 +26,19 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly ReconnectBudget _reconnectBudget = new();
     private readonly object _sessionsGate = new();
     private readonly ResilienceMonitor _resilience = new();
+    private readonly LatencyAutoController _latency = new();
     private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
     private AudioFrameSendPump? _sendPump;
     private IAudioSource? _audioSource;
     private DateTimeOffset? _silentSince;
     private CancellationTokenSource? _reconnectCts;
     private SessionState _aggregateState = SessionState.Disconnected;
+    private PlaybackResponsiveness _responsiveness = PlaybackResponsiveness.Auto;
+    private AudioFidelity _fidelity = AudioFidelity.Auto;
+    private long _dropsAtWindowStart;
+    private long _slowAtWindowStart;
+    private DateTimeOffset _signalWindowStart = DateTimeOffset.UtcNow;
+    private bool _audioStartedMarked;
     private bool _disposed;
 
     /// <param name="senderDeviceId">
@@ -45,8 +54,22 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     public SessionState State => _aggregateState;
 
+    public uint EffectiveLatencyFrames => _latency.EffectiveFrames;
+
     public IReadOnlyList<DeviceInfo> ConnectedReceivers =>
         _sessions.Values.Select(entry => entry.Receiver).ToList();
+
+    /// <summary>
+    /// Stores quality prefs for the next connect. Live preset changes apply on reconnect;
+    /// Auto mid-session raises still use the controller independently.
+    /// </summary>
+    public void ConfigureStreamingQuality(
+        PlaybackResponsiveness responsiveness,
+        AudioFidelity fidelity)
+    {
+        _responsiveness = responsiveness;
+        _fidelity = fidelity;
+    }
 
     public async Task ConnectAsync(
         DeviceInfo receiver,
@@ -82,6 +105,22 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
                 ? new AirPlay2Session(receiver, _senderDeviceId)
                 : new RaopSession(receiver);
+
+            var isFirstSession = false;
+            lock (_sessionsGate)
+            {
+                isFirstSession = _sessions.Count == 0;
+            }
+
+            if (isFirstSession)
+            {
+                _latency.ResetForConnect(_responsiveness);
+                _audioStartedMarked = false;
+                ResetSignalWindowCounters();
+            }
+
+            session.SetEffectiveLatencyFrames(_latency.EffectiveFrames);
+            session.SetAudioFidelity(_fidelity);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
             lock (_sessionsGate)
@@ -92,7 +131,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             try
             {
                 await session.ConnectAsync(cancellationToken).ConfigureAwait(false);
-                AppLog.Info("stream", $"Connected receiver count={_sessions.Count}");
+                AppLog.Info(
+                    "stream",
+                    $"Connected receiver count={_sessions.Count} " +
+                    $"latencyFrames={_latency.EffectiveFrames} " +
+                    $"responsiveness={_responsiveness} fidelity={_fidelity}");
             }
             catch
             {
@@ -248,13 +291,77 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             }
         }
 
-        var drops = _sendPump?.QueueDropCount ?? 0;
+        var pump = _sendPump;
+        var drops = pump?.QueueDropCount ?? 0;
         if (drops > 0 && drops % 25 == 0)
         {
             AppLog.Warn(
                 "stream",
-                $"PCM queue drop_oldest count={drops} depth={_sendPump?.QueueDepth ?? 0}");
+                $"PCM queue drop_oldest count={drops} depth={pump?.QueueDepth ?? 0}");
         }
+
+        MaybeRaiseLatency(pump);
+    }
+
+    private void MaybeRaiseLatency(AudioFrameSendPump? pump)
+    {
+        if (pump is null || !_latency.IsAutoEnabled || _sessions.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var isSilent = _audioSource?.IsSilent == true;
+        if (!_audioStartedMarked && !isSilent)
+        {
+            _latency.MarkAudioStarted(now);
+            _audioStartedMarked = true;
+            ResetSignalWindowCounters();
+            return;
+        }
+
+        if (now - _signalWindowStart < LatencyAutoController.SignalWindow)
+        {
+            return;
+        }
+
+        var dropDelta = pump.QueueDropCount - _dropsAtWindowStart;
+        var slowDelta = pump.SlowSendCount - _slowAtWindowStart;
+        var isStreaming =
+            State is SessionState.Streaming or SessionState.Degraded;
+
+        if (_latency.TryRaise(dropDelta, slowDelta, isStreaming, isSilent, now))
+        {
+            ApplyLatencyToAllSessions(_latency.EffectiveFrames);
+            AppLog.Info(
+                "stream",
+                $"Auto latency raised to {_latency.EffectiveFrames} frames " +
+                $"(~{_latency.EffectiveFrames / 44.1:0} ms) " +
+                $"drops={dropDelta} slowSends={slowDelta}");
+        }
+
+        ResetSignalWindowCounters();
+    }
+
+    private void ApplyLatencyToAllSessions(uint frames)
+    {
+        SessionEntry[] snapshot;
+        lock (_sessionsGate)
+        {
+            snapshot = _sessions.Values.ToArray();
+        }
+
+        foreach (var entry in snapshot)
+        {
+            entry.Session.SetEffectiveLatencyFrames(frames);
+        }
+    }
+
+    private void ResetSignalWindowCounters()
+    {
+        _signalWindowStart = DateTimeOffset.UtcNow;
+        _dropsAtWindowStart = _sendPump?.QueueDropCount ?? 0;
+        _slowAtWindowStart = _sendPump?.SlowSendCount ?? 0;
     }
 
     private async Task DisconnectAllAsync(CancellationToken cancellationToken)

@@ -4,13 +4,14 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap uap5 rescap">
 
   <Identity
     Name="ff3e60d4-5cf4-4f54-9fce-7c650da09ac3"
     Publisher="CN=WinStream Dev, O=Local Development, C=US"
-    Version="1.0.0.0" />
+    Version="1.0.1.0" />
 
   <mp:PhoneIdentity PhoneProductId="ff3e60d4-5cf4-4f54-9fce-7c650da09ac3" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
@@ -42,6 +43,19 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
+
+      <Extensions>
+        <!-- Declared disabled; the in-app toggle calls StartupTask.RequestEnableAsync. -->
+        <uap5:Extension
+          Category="windows.startupTask"
+          Executable="WinStream.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask
+            TaskId="WinStreamStartup"
+            Enabled="false"
+            DisplayName="WinStream" />
+        </uap5:Extension>
+      </Extensions>
     </Application>
   </Applications>
 
@@ -52,4 +66,3 @@
     <Capability Name="internetClientServer"/>
   </Capabilities>
 </Package>
-

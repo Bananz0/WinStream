@@ -22,9 +22,9 @@ The friendly name is display-only. Detection must validate the hardware ID and p
 
 ## Architecture and capture behavior
 
-1. Adapt the smallest render endpoint from Microsoft SysVAD.
+1. Adapt Microsoft **SimpleAudioSample** (render WaveRT endpoint; no KS loopback sine generator).
 2. Build an isolated, componentized driver package (`.inf`, `.sys`, `.cat`) outside the app project.
-3. Install through the separate elevated `WinStream.DriverInstaller.exe`.
+3. Install through the separate elevated `WinStream.DriverInstaller.exe` (Phase 5) or a development TESTSIGNING install.
 4. Detect the endpoint through its stable identity.
 5. Reuse `WasapiLoopbackSource` against the virtual render endpoint.
 6. Keep the user’s ordinary loopback endpoint unchanged and fall back to it whenever the virtual endpoint is unavailable.
@@ -33,14 +33,18 @@ See [UPSTREAM.md](UPSTREAM.md) for source and license provenance.
 
 ## Toolchain
 
-The selected production toolchain is:
+- Visual Studio 2026 (18.8+) with **Windows Driver Kit** individual component (`Component.Microsoft.Windows.DriverKit`)
+- Matching Windows SDK/WDK 10.0.28000.x
+- Desktop development with C++ and Spectre-mitigated libraries
 
-- Visual Studio 2026 (18.x)
-- Matching Windows SDK/WDK 28000.2526 or newer 28000 servicing release
-- Desktop development with C++ and driver workloads
-- Spectre-mitigated libraries required by the selected WDK
+Build from a VS Developer PowerShell (NuGet WDK packages under `drivers/winstream-vad/packages/` must be restored first):
 
-This workstation currently has Visual Studio 2026 18.3 and SDK/WDK 10.0.26100.0. Phase 1 must install a matching VS 2026 WDK before accepting a clean driver build; do not mix SDK/WDK build numbers.
+```powershell
+nuget restore drivers\winstream-vad\packages.config -PackagesDirectory drivers\winstream-vad\packages
+msbuild drivers\winstream-vad\WinStreamVad.sln /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off
+```
+
+Package output lands under `drivers\winstream-vad\x64\Release\package\` (`WinStreamVad.sys`, `.inf`, `.cat`). Inf2Cat targets Windows 11+ (`10_CO_X64` and later) to match the INF’s `NTamd64.10.0...22000` decoration.
 
 ## Signing ladder
 
@@ -50,19 +54,21 @@ This workstation currently has Visual Studio 2026 18.3 and SDK/WDK 10.0.26100.0.
 | Attestation-signed | Testing/sideload validation only; not retail Windows Update |
 | HLK/WHCP + Microsoft-signed | Production public download and future Windows Update |
 
-General Partner Center access is not enough. Production enablement requires Hardware program enrollment, EV identity, appropriate Entra Hardware roles, accepted agreements, HLK/WHCP, and a Microsoft-signed package.
-
-Never commit certificates, private keys, `.sys`, `.cat`, packaged installers, CABs, or HLK output. The app and installer never read Partner Center credentials.
+Never commit certificates, private keys, `.sys`, `.cat`, packaged installers, CABs, or HLK output.
 
 ## Development installation
 
-Phase 1 will document exact commands after the first clean build. Development installation is destructive and runs only in a disposable x64 VM:
+Destructive; use a disposable x64 VM with a snapshot:
 
-1. Enable TESTSIGNING and reboot (observe Secure Boot/BitLocker precautions).
-2. Install the test certificate into the VM test stores.
-3. Run the separate elevated installer or approved SetupAPI/PnPUtil development command.
-4. Validate `ROOT\WINSTREAMVAD` and the active `WinStream Virtual Audio` render endpoint.
-5. Run the checklist and remove the device/package before restoring the VM snapshot.
+1. Enable TESTSIGNING and reboot (`bcdedit /set testsigning on`).
+2. From an elevated prompt in the package folder:
+
+```powershell
+pnputil /add-driver WinStreamVad.inf /install
+```
+
+3. Validate Device Manager shows `ROOT\WINSTREAMVAD` and a render endpoint named `WinStream Virtual Audio`.
+4. Run `docs/testing/virtual-driver-checklist.md`, then remove the device/package and restore the VM snapshot.
 
 Do not ship DevCon. The production installer uses SetupAPI and supported PnPUtil operations.
 
@@ -74,9 +80,6 @@ Do not ship DevCon. The production installer uses SetupAPI and supported PnPUtil
 |---|---|
 | `Loopback` (default) | Capture the user-selected Windows render endpoint |
 | `VirtualDriver` | Capture the detected WinStream render endpoint only after explicit user consent |
-
-The app exposes no capture-method selector today: the setting stays `Loopback` until a
-virtual-driver capture source exists, so the UI cannot offer a mode that does nothing.
 
 The public Download action remains disabled until the production-signing follow-on plan is complete.
 

@@ -291,6 +291,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <Grid Grid.Row="0" ColumnSpacing="8">
@@ -369,7 +370,53 @@
                             </Grid>
                         </Border>
 
-                        <ListView Grid.Row="2"
+                        <Border Grid.Row="2"
+                                Padding="14,12"
+                                CornerRadius="8"
+                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Border Grid.Column="0"
+                                        Width="36"
+                                        Height="36"
+                                        CornerRadius="18"
+                                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                        VerticalAlignment="Center">
+                                    <FontIcon Glyph="&#xE7E8;"
+                                              FontSize="16"
+                                              Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                                </Border>
+
+                                <StackPanel Grid.Column="1"
+                                            Spacing="2"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="Launch when I sign in"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                    <TextBlock x:Name="launchAtStartupDescriptionText"
+                                               Text="Start WinStream in the tray after Windows login."
+                                               Style="{StaticResource HintTextStyle}"/>
+                                </StackPanel>
+
+                                <ToggleSwitch x:Name="launchAtStartupToggle"
+                                              Grid.Column="2"
+                                              VerticalAlignment="Center"
+                                              OnContent="On"
+                                              OffContent="Off"
+                                              Toggled="LaunchAtStartupToggle_Toggled"
+                                              AutomationProperties.Name="Launch WinStream when I sign in to Windows"/>
+                            </Grid>
+                        </Border>
+
+                        <ListView Grid.Row="3"
                                   x:Name="devicesList"
                                   ItemsSource="{x:Bind DeviceList}"
                                   SelectionMode="None"
@@ -447,7 +494,7 @@
                             </ListView.ItemTemplate>
                         </ListView>
 
-                        <StackPanel Grid.Row="3"
+                        <StackPanel Grid.Row="4"
                                     x:Name="emptyStatePanel"
                                     Spacing="4"
                                     Padding="0,20,0,24"
@@ -461,6 +508,69 @@
                                        Style="{StaticResource HintTextStyle}"/>
                         </StackPanel>
                     </Grid>
+                </Border>
+
+                <!-- Playback responsiveness + audio fidelity -->
+                <Border Style="{StaticResource CardBorderStyle}">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Streaming quality" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Delay and conversion are separate. Neither setting claims millisecond AirPlay latency."
+                                       Style="{StaticResource HintTextStyle}"/>
+                        </StackPanel>
+
+                        <StackPanel Spacing="8">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="Playback responsiveness"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1"
+                                        Click="PlaybackResponsivenessInfo_Click"
+                                        ToolTipService.ToolTip="About playback responsiveness"
+                                        AutomationProperties.Name="About playback responsiveness"
+                                        Padding="6,4">
+                                    <FontIcon Glyph="&#xE946;" FontSize="14"/>
+                                </Button>
+                            </Grid>
+                            <ComboBox x:Name="playbackResponsivenessComboBox"
+                                      HorizontalAlignment="Stretch"
+                                      SelectionChanged="PlaybackResponsivenessComboBox_SelectionChanged"
+                                      AutomationProperties.Name="Playback responsiveness"/>
+                            <TextBlock x:Name="playbackResponsivenessHintText"
+                                       Style="{StaticResource HintTextStyle}"/>
+                        </StackPanel>
+
+                        <StackPanel Spacing="8">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="Audio fidelity"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1"
+                                        Click="AudioFidelityInfo_Click"
+                                        ToolTipService.ToolTip="About audio fidelity"
+                                        AutomationProperties.Name="About audio fidelity"
+                                        Padding="6,4">
+                                    <FontIcon Glyph="&#xE946;" FontSize="14"/>
+                                </Button>
+                            </Grid>
+                            <ComboBox x:Name="audioFidelityComboBox"
+                                      HorizontalAlignment="Stretch"
+                                      SelectionChanged="AudioFidelityComboBox_SelectionChanged"
+                                      AutomationProperties.Name="Audio fidelity"/>
+                            <TextBlock x:Name="audioFidelityHintText"
+                                       Style="{StaticResource HintTextStyle}"/>
+                        </StackPanel>
+                    </StackPanel>
                 </Border>
 
                 <!-- Step 3: how loud -->

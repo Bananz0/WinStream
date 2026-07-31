@@ -21,6 +21,7 @@ using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 using WinStream.Network;
 using WinStream.Streaming;
+using WinStream.Tray;
 using WinStream.ViewModels;
 
 namespace WinStream
@@ -51,6 +52,8 @@ namespace WinStream
         private bool _driverReadyPromptShown;
         private bool _suppressCaptureSelectionEvents;
         private bool _suppressAutoConnectEvents;
+        private bool _suppressLaunchAtStartupEvents;
+        private bool _suppressStreamingQualityEvents;
 
         public MainWindow()
         {
@@ -83,6 +86,8 @@ namespace WinStream
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
             RestoreAutoConnectSetting();
+            RestoreStreamingQualitySettings();
+            _ = RestoreLaunchAtStartupSettingAsync();
             RefreshDriverUi();
             UpdateVolumeReadout(streamVolumeSlider.Value);
             RefreshSessionStatus();
@@ -102,6 +107,161 @@ namespace WinStream
             _appWindow.Hide();
         }
 
+        /// <summary>Builds the live tray context-menu snapshot (devices + connect/disconnect affordances).</summary>
+        internal TrayMenuState BuildTrayMenuState()
+        {
+            var settings = _settings.Settings;
+            var lastKey = settings.LastReceiverKey;
+            var lastName = settings.LastReceiverName;
+            var lastRow = string.IsNullOrWhiteSpace(lastKey)
+                ? null
+                : _allDevices.FirstOrDefault(device =>
+                    string.Equals(device.Key, lastKey, StringComparison.Ordinal));
+
+            // Enabled whenever we remember a device and aren't already on it — even if it's
+            // offline right now — so the tray action can rescan and report a clear miss.
+            var canConnectLast = !string.IsNullOrWhiteSpace(lastKey)
+                && lastRow?.IsConnected != true
+                && !_connectionInFlight
+                && (lastRow is null || lastRow.IsActionEnabled);
+
+            var connectedCount = _streamingOrchestrator.ConnectedReceivers.Count;
+            var devices = _allDevices
+                .Select(device => new TrayDeviceItem
+                {
+                    Key = device.Key,
+                    DisplayName = device.DisplayName,
+                    IsConnected = device.IsConnected,
+                    IsEnabled = device.IsActionEnabled && !_connectionInFlight
+                })
+                .ToList();
+
+            return new TrayMenuState
+            {
+                LastReceiverName = string.IsNullOrWhiteSpace(lastName) ? null : lastName,
+                CanConnectLast = canConnectLast,
+                CanDisconnect = connectedCount > 0 && !_connectionInFlight,
+                ConnectedCount = connectedCount,
+                Devices = devices
+            };
+        }
+
+        /// <summary>Tray: connect to the remembered receiver (rescans first if needed).</summary>
+        internal async Task ConnectLastFromTrayAsync()
+        {
+            var key = _settings.Settings.LastReceiverKey;
+            var name = _settings.Settings.LastReceiverName;
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            if (_connectionInFlight)
+            {
+                return;
+            }
+
+            var row = FindDeviceRow(key);
+            if (row is null)
+            {
+                await DiscoverAndDisplayDevicesAsync();
+                row = FindDeviceRow(key);
+            }
+
+            if (row is null)
+            {
+                ShowFromTray();
+                ShowMessage(
+                    InfoBarSeverity.Warning,
+                    name is null ? "Last device not found" : $"{name} not found",
+                    "That speaker isn't on the network right now. Discover from settings when it's powered on.");
+                return;
+            }
+
+            if (row.IsConnected)
+            {
+                return;
+            }
+
+            await SetDeviceConnectionAsync(row, connect: true);
+        }
+
+        /// <summary>Tray: connect a discovered receiver by stable key.</summary>
+        internal async Task ConnectDeviceFromTrayAsync(string deviceKey)
+        {
+            if (string.IsNullOrWhiteSpace(deviceKey) || _connectionInFlight)
+            {
+                return;
+            }
+
+            var row = FindDeviceRow(deviceKey);
+            if (row is null)
+            {
+                await DiscoverAndDisplayDevicesAsync();
+                row = FindDeviceRow(deviceKey);
+            }
+
+            if (row is null)
+            {
+                ShowFromTray();
+                ShowMessage(
+                    InfoBarSeverity.Warning,
+                    "Device not found",
+                    "That speaker dropped off the network. Try Discover from settings.");
+                return;
+            }
+
+            if (row.IsConnected)
+            {
+                return;
+            }
+
+            await SetDeviceConnectionAsync(row, connect: true);
+        }
+
+        /// <summary>Tray: disconnect every active receiver.</summary>
+        internal async Task DisconnectFromTrayAsync()
+        {
+            if (_connectionInFlight || _streamingOrchestrator.ConnectedReceivers.Count == 0)
+            {
+                return;
+            }
+
+            _connectionInFlight = true;
+            UpdateUI(false);
+            try
+            {
+                await _streamingOrchestrator.DisconnectAsync();
+                foreach (var device in _allDevices)
+                {
+                    if (device.IsConnected)
+                    {
+                        device.IsConnected = false;
+                        device.SetStatus("Disconnected.", DeviceStatusKind.Neutral);
+                    }
+                }
+
+                await StopCaptureIfIdleAsync();
+                AppLog.Info("ui", "Disconnected all receivers from tray.");
+            }
+            catch (Exception ex)
+            {
+                ShowFromTray();
+                ShowMessage(
+                    InfoBarSeverity.Error,
+                    "Couldn't disconnect",
+                    FormatConnectionFailure(ex.Message));
+                AppLog.Error("ui", $"Tray disconnect error: {ex.GetType().Name}");
+            }
+            finally
+            {
+                _connectionInFlight = false;
+                UpdateUI(true);
+                SyncConnectionState();
+                RefreshSessionStatus();
+            }
+        }
+
         public async Task CloseForExitAsync()
         {
             _allowClose = true;
@@ -115,6 +275,10 @@ namespace WinStream
             _driverLifecycle.Dispose();
             Close();
         }
+
+        private DeviceViewModel FindDeviceRow(string key) =>
+            _allDevices.FirstOrDefault(device =>
+                string.Equals(device.Key, key, StringComparison.Ordinal));
 
         /// <summary>
         /// A WinUI window does not inherit the executable's embedded icon, so the taskbar
@@ -410,6 +574,172 @@ namespace WinStream
             RefreshCaptureStatus();
         }
 
+        private void RestoreStreamingQualitySettings()
+        {
+            _suppressStreamingQualityEvents = true;
+            try
+            {
+                playbackResponsivenessComboBox.Items.Clear();
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.Auto,
+                    "Auto",
+                    "Starts at about 1.5 seconds and increases the buffer if delivery pressure is detected."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.LowDelay,
+                    "Low delay (~1 s)",
+                    "Snappier playback. More likely to stutter on busy Wi‑Fi."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.Balanced,
+                    "Balanced (~1.5 s)",
+                    "Fixed 1.5-second buffer. Similar to other compatible AirPlay senders."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.MostStable,
+                    "Most stable (~2 s)",
+                    "Apple-standard realtime buffer for the strongest dropout protection."));
+
+                audioFidelityComboBox.Items.Clear();
+                audioFidelityComboBox.Items.Add(CreateQualityOption(
+                    AudioFidelity.Auto,
+                    "Auto",
+                    "Skips conversion when Windows already matches AirPlay (44.1 kHz stereo)."));
+                audioFidelityComboBox.Items.Add(CreateQualityOption(
+                    AudioFidelity.Standard,
+                    "Standard",
+                    "Lighter conversion when the mix rate differs. Uses less CPU."));
+                audioFidelityComboBox.Items.Add(CreateQualityOption(
+                    AudioFidelity.HighFidelity,
+                    "High fidelity",
+                    "Lossless ALAC in every mode. Conversion matches Auto until a richer resampler ships."));
+
+                SelectQualityOption(playbackResponsivenessComboBox, _settings.Settings.PlaybackResponsiveness);
+                SelectQualityOption(audioFidelityComboBox, _settings.Settings.AudioFidelity);
+                RefreshStreamingQualityHints();
+            }
+            finally
+            {
+                _suppressStreamingQualityEvents = false;
+            }
+        }
+
+        private static ComboBoxItem CreateQualityOption<T>(T value, string title, string description)
+            where T : struct, Enum
+        {
+            var item = new ComboBoxItem
+            {
+                Content = title,
+                Tag = value
+            };
+            ToolTipService.SetToolTip(item, description);
+            return item;
+        }
+
+        private static void SelectQualityOption<T>(ComboBox comboBox, T value)
+            where T : struct, Enum
+        {
+            foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
+            {
+                if (item.Tag is T tagged && EqualityComparer<T>.Default.Equals(tagged, value))
+                {
+                    comboBox.SelectedItem = item;
+                    return;
+                }
+            }
+
+            if (comboBox.Items.Count > 0)
+            {
+                comboBox.SelectedIndex = 0;
+            }
+        }
+
+        private void RefreshStreamingQualityHints()
+        {
+            playbackResponsivenessHintText.Text =
+                playbackResponsivenessComboBox.SelectedItem is ComboBoxItem responsiveness &&
+                ToolTipService.GetToolTip(responsiveness) is string responsivenessHint
+                    ? responsivenessHint
+                    : string.Empty;
+            audioFidelityHintText.Text =
+                audioFidelityComboBox.SelectedItem is ComboBoxItem fidelity &&
+                ToolTipService.GetToolTip(fidelity) is string fidelityHint
+                    ? fidelityHint
+                    : string.Empty;
+        }
+
+        private void PlaybackResponsivenessComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressStreamingQualityEvents ||
+                playbackResponsivenessComboBox.SelectedItem is not ComboBoxItem item ||
+                item.Tag is not PlaybackResponsiveness mode)
+            {
+                return;
+            }
+
+            _settings.Update(settings => settings.PlaybackResponsiveness = mode);
+            RefreshStreamingQualityHints();
+            if (_streamingOrchestrator.State is SessionState.Streaming or SessionState.Degraded)
+            {
+                ShowMessage(
+                    InfoBarSeverity.Informational,
+                    "Playback responsiveness saved",
+                    "The new buffer applies the next time you reconnect.");
+            }
+        }
+
+        private void AudioFidelityComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressStreamingQualityEvents ||
+                audioFidelityComboBox.SelectedItem is not ComboBoxItem item ||
+                item.Tag is not AudioFidelity mode)
+            {
+                return;
+            }
+
+            _settings.Update(settings => settings.AudioFidelity = mode);
+            RefreshStreamingQualityHints();
+            if (_streamingOrchestrator.State is SessionState.Streaming or SessionState.Degraded)
+            {
+                ShowMessage(
+                    InfoBarSeverity.Informational,
+                    "Audio fidelity saved",
+                    "The new conversion mode applies the next time you reconnect.");
+            }
+        }
+
+        private async void PlaybackResponsivenessInfo_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "Playback responsiveness",
+                Content =
+                    "This setting changes playback delay, not sound fidelity.\n\n" +
+                    "• Auto — Starts responsive (~1.5 s) and increases the buffer if delivery pressure or dropped audio is detected.\n" +
+                    "• Low delay — About 1 second. More stutter risk on busy Wi‑Fi.\n" +
+                    "• Balanced — About 1.5 seconds.\n" +
+                    "• Most stable — About 2 seconds (Apple’s standard realtime buffer).\n\n" +
+                    "AirPlay music to HomePod-class speakers cannot reach millisecond delay.",
+                CloseButtonText = "Close",
+                XamlRoot = Content.XamlRoot
+            };
+            await dialog.ShowAsync();
+        }
+
+        private async void AudioFidelityInfo_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "Audio fidelity",
+                Content =
+                    "AirPlay uses lossless ALAC in every mode. This setting mainly affects sample-rate conversion when Windows audio is not already 44.1 kHz stereo.\n\n" +
+                    "• Auto — High-quality processing only when conversion is needed.\n" +
+                    "• Standard — Lighter conversion to reduce CPU use.\n" +
+                    "• High fidelity — Reserved for richer conversion; today matches Auto.\n\n" +
+                    "It does not change the playback buffer.",
+                CloseButtonText = "Close",
+                XamlRoot = Content.XamlRoot
+            };
+            await dialog.ShowAsync();
+        }
+
         private void RestoreAutoConnectSetting()
         {
             _suppressAutoConnectEvents = true;
@@ -455,6 +785,70 @@ namespace WinStream
             autoConnectDescriptionText.Text = autoConnectToggle.IsOn
                 ? $"Automatically reconnect to {receiverName} as soon as it appears."
                 : $"Your last device was {receiverName}. Turn this on to reconnect to it automatically.";
+        }
+
+        private async Task RestoreLaunchAtStartupSettingAsync()
+        {
+            _suppressLaunchAtStartupEvents = true;
+            try
+            {
+                var snapshot = await StartupRegistration.GetSnapshotAsync();
+                launchAtStartupToggle.IsOn = snapshot.IsEnabled;
+                launchAtStartupToggle.IsEnabled = snapshot.CanToggle;
+                launchAtStartupDescriptionText.Text = snapshot.StatusMessage;
+                _settings.Update(settings => settings.LaunchAtStartup = snapshot.IsEnabled);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn("startup", $"Startup registration unavailable: {ex.Message}");
+                launchAtStartupToggle.IsOn = _settings.Settings.LaunchAtStartup;
+                launchAtStartupDescriptionText.Text =
+                    "Start WinStream in the tray after Windows login.";
+            }
+            finally
+            {
+                _suppressLaunchAtStartupEvents = false;
+            }
+        }
+
+        private async void LaunchAtStartupToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_suppressLaunchAtStartupEvents)
+            {
+                return;
+            }
+
+            var wantEnabled = launchAtStartupToggle.IsOn;
+            _suppressLaunchAtStartupEvents = true;
+            try
+            {
+                var snapshot = await StartupRegistration.SetEnabledAsync(wantEnabled);
+                launchAtStartupToggle.IsOn = snapshot.IsEnabled;
+                launchAtStartupToggle.IsEnabled = snapshot.CanToggle;
+                launchAtStartupDescriptionText.Text = snapshot.StatusMessage;
+                _settings.Update(settings => settings.LaunchAtStartup = snapshot.IsEnabled);
+
+                if (wantEnabled && !snapshot.IsEnabled && !snapshot.CanToggle)
+                {
+                    ShowMessage(
+                        InfoBarSeverity.Warning,
+                        "Startup blocked by Windows",
+                        "Open Settings > Apps > Startup, enable WinStream, then try again.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn("startup", $"Failed to update startup registration: {ex.Message}");
+                launchAtStartupToggle.IsOn = !wantEnabled;
+                ShowMessage(
+                    InfoBarSeverity.Error,
+                    "Could not change startup",
+                    ex.Message);
+            }
+            finally
+            {
+                _suppressLaunchAtStartupEvents = false;
+            }
         }
 
         private void UpdateCaptureLevelUi()
@@ -567,6 +961,9 @@ namespace WinStream
                     ?? throw new InvalidOperationException(
                         "Windows didn't provide an audio source to capture.");
 
+                _streamingOrchestrator.ConfigureStreamingQuality(
+                    _settings.Settings.PlaybackResponsiveness,
+                    _settings.Settings.AudioFidelity);
                 await _streamingOrchestrator.ConnectAsync(device.Device, source);
                 await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
                 RememberReceiver(device);
@@ -593,6 +990,12 @@ namespace WinStream
                     DeviceStatusKind.Error);
                 if (!isAutomatic)
                 {
+                    // Tray-initiated connects can fail while the window is hidden.
+                    if (!_appWindow.IsVisible)
+                    {
+                        ShowFromTray();
+                    }
+
                     ShowMessage(
                         InfoBarSeverity.Error,
                         $"Couldn't connect to {device.DisplayName}",

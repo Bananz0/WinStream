@@ -3,6 +3,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Threading;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
@@ -18,10 +19,10 @@ public sealed class AirPlay2Session : IAirPlaySession
     private const int FramesPerPacket = AlacEncoder.FramesPerPacket;
 
     /// <summary>
-    /// Classic RAOP sync latency (~2 s at 44.1 kHz). Matches OwnTone / pyatv /
-    /// akustikrausch sync packets (latencyMax), not latencyMin.
+    /// Default classic RAOP sync latency (~2 s at 44.1 kHz) until the orchestrator
+    /// applies a responsiveness preset / Auto step.
     /// </summary>
-    private const uint LatencyFrames = 88200;
+    private const uint DefaultLatencyFrames = 88200;
 
     private static readonly TimeSpan SyncInterval = TimeSpan.FromSeconds(1);
 
@@ -57,6 +58,7 @@ public sealed class AirPlay2Session : IAirPlaySession
     private bool _rtpBasePending = true;
     private TaskCompletionSource? _rtpBaseFrozen;
     private float _volumeDb = -20f;
+    private uint _latencyFrames = DefaultLatencyFrames;
     private bool _disposed;
 
     /// <param name="senderDeviceId">
@@ -77,6 +79,21 @@ public sealed class AirPlay2Session : IAirPlaySession
     public event EventHandler<SessionStateChanged>? StateChanged;
 
     public string ReceiverId { get; }
+
+    public uint EffectiveLatencyFrames => Volatile.Read(ref _latencyFrames);
+
+    public void SetEffectiveLatencyFrames(uint frames)
+    {
+        if (frames < LatencyAutoController.LatencyMinFrames)
+        {
+            frames = LatencyAutoController.LatencyMinFrames;
+        }
+
+        Volatile.Write(ref _latencyFrames, frames);
+    }
+
+    public void SetAudioFidelity(AudioFidelity fidelity) =>
+        _pcmBuffer.Fidelity = fidelity;
 
     public SessionState State => _stateMachine.State;
 
@@ -515,7 +532,7 @@ public sealed class AirPlay2Session : IAirPlaySession
                 var packet = new byte[28];
                 var length = RtpPacketizer.WriteTimeAnnouncePacket(
                     packet,
-                    now - LatencyFrames,
+                    now - Volatile.Read(ref _latencyFrames),
                     clock.NowNanoseconds,
                     now,
                     clockId,

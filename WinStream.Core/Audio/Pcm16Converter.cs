@@ -61,6 +61,9 @@ public static class Pcm16Converter
             _ => throw new NotSupportedException($"Unsupported capture format {format}.")
         };
 
+    // Tiny LCG state for TPDF dither (avoids ThreadLocal/Random alloc on the capture path).
+    private static int s_ditherState = unchecked((int)0xA5A5_5A5Au);
+
     private static short FromUnitFloat(double value)
     {
         if (double.IsNaN(value))
@@ -68,8 +71,37 @@ public static class Pcm16Converter
             return 0;
         }
 
-        // Scale by 32767 so full-scale +1.0 maps cleanly and cannot overflow.
+        // Scale by 32767 so full-scale +1.0 maps cleanly, then add ±1 LSB triangular
+        // dither so quiet material does not freeze into quantization grit.
         var scaled = Math.Clamp(value, -1.0, 1.0) * short.MaxValue;
+        scaled += NextTriangularDither();
+        if (scaled >= short.MaxValue)
+        {
+            return short.MaxValue;
+        }
+
+        if (scaled <= short.MinValue)
+        {
+            return short.MinValue;
+        }
+
         return (short)Math.Round(scaled, MidpointRounding.AwayFromZero);
+    }
+
+    private static double NextTriangularDither()
+    {
+        // Two uniform [-0.5, 0.5) samples → triangular pdf over (-1, 1) LSB.
+        return NextUnitNoise() + NextUnitNoise();
+    }
+
+    private static double NextUnitNoise()
+    {
+        unchecked
+        {
+            s_ditherState = (s_ditherState * 1664525) + 1013904223;
+            // High bits → [0, 1)
+            var unit = (s_ditherState >>> 8) * (1.0 / 16777216.0);
+            return unit - 0.5;
+        }
     }
 }

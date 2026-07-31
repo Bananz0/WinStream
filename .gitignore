@@ -257,6 +257,10 @@ drivers/winstream-vad/**/*.cab
 drivers/winstream-vad/**/*.hlkx
 drivers/winstream-vad/**/*-package.zip
 drivers/winstream-vad/package/
+drivers/winstream-vad/packages/
+drivers/winstream-vad/**/x64/
+drivers/winstream-vad/**/ARM64/
+drivers/winstream-vad/**/obj/
 tools/WinStream.DriverInstaller/publish/
 
 # Including strong name files can present a security risk

@@ -6,6 +6,23 @@ public enum CaptureMode
     VirtualDriver = 1
 }
 
+/// <summary>How much AirPlay playout buffer to use (delay vs dropout resistance).</summary>
+public enum PlaybackResponsiveness
+{
+    Auto = 0,
+    LowDelay = 1,
+    Balanced = 2,
+    MostStable = 3
+}
+
+/// <summary>How carefully to convert capture PCM before ALAC (CPU vs conversion quality).</summary>
+public enum AudioFidelity
+{
+    Auto = 0,
+    Standard = 1,
+    HighFidelity = 2
+}
+
 public sealed class AppSettings
 {
     public string? SelectedRenderDeviceId { get; set; }
@@ -33,6 +50,11 @@ public sealed class AppSettings
     public bool AirPlayReceiverHintDismissed { get; set; }
 
     /// <summary>
+    /// Preferred launch-at-sign-in setting. Packaged installs also mirror Windows StartupTask state.
+    /// </summary>
+    public bool LaunchAtStartup { get; set; }
+
+    /// <summary>
     /// Store builds use loopback. VirtualDriver requires the optional sideload driver
     /// and is not user-selectable until a virtual-driver capture source exists.
     /// </summary>
@@ -49,4 +71,10 @@ public sealed class AppSettings
     /// Generated once per install when missing.
     /// </summary>
     public string? SenderDeviceId { get; set; }
+
+    /// <summary>Playback buffer preference. Default Auto starts ~1.5 s and may climb.</summary>
+    public PlaybackResponsiveness PlaybackResponsiveness { get; set; } = PlaybackResponsiveness.Auto;
+
+    /// <summary>PCM conversion preference. Default Auto skips SRC when already 44.1 stereo.</summary>
+    public AudioFidelity AudioFidelity { get; set; } = AudioFidelity.Auto;
 }

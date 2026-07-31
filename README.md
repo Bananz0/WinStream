@@ -13,11 +13,15 @@ Stream system audio from a Windows PC to classic AirPlay / RAOP receivers (HomeP
 - Settings persistence; optional experimental AirPlay 2 **gate** (media path not production-ready)
 - Optional virtual audio driver track **outside** Store (`drivers/winstream-vad/`)
 
+
+
 ## Requirements
 
 - Windows 10 1809+ (x64 recommended)
 - .NET 8 Windows Desktop / Windows App SDK (for building from source)
 - Speakers/receivers that accept classic RAOP audio
+
+
 
 ## Build
 
@@ -26,24 +30,32 @@ dotnet build WinStream.sln -c Release -p:Platform=x64
 dotnet test WinStream.Tests -c Release
 ```
 
+
+
 ### VS Code / Cursor
 
 Use the Run and Debug configs (`.vscode/launch.json`):
 
-| Config | What it does |
-|--------|----------------|
-| **WinStream: Debug (Unpackaged)** | Builds Debug x64 unpackaged and launches under the debugger |
-| **WinStream: Release (Unpackaged)** | Same for Release |
-| **WinStream: Attach** | Attach to a running `WinStream.exe` |
+
+| Config                              | What it does                                                |
+| ----------------------------------- | ----------------------------------------------------------- |
+| **WinStream: Debug (Unpackaged)**   | Builds Debug x64 unpackaged and launches under the debugger |
+| **WinStream: Release (Unpackaged)** | Same for Release                                            |
+| **WinStream: Attach**               | Attach to a running `WinStream.exe`                         |
+
 
 Tasks (Terminal → Run Task):
 
-| Task | What it does |
-|------|----------------|
-| `build-debug` / `build-release` | Unpackaged builds |
-| `build-and-install-release` | Signed Release MSIX → trust cert → install (Start Menu) |
-| `build-release-msix` | Build/sign only (no install) |
-| `ensure-package-certificate` | Create/reuse PFX under secrets |
+
+| Task                            | What it does                                            |
+| ------------------------------- | ------------------------------------------------------- |
+| `build-debug` / `build-release` | Unpackaged builds                                       |
+| `build-and-install-release`     | Signed Release MSIX → trust cert → install (Start Menu) |
+| `build-release-msix`            | Build/sign only (no install)                            |
+| `ensure-package-certificate`    | Create/reuse PFX under secrets                          |
+
+
+
 
 ### Release install (signed, like a normal Windows app)
 
@@ -78,18 +90,22 @@ Full steps: [docs/user-guide.md](docs/user-guide.md)
 
 ## Project layout
 
-| Path | Role |
-|------|------|
-| `WinStream/` | WinUI app, tray, WASAPI, RAOP session |
-| `WinStream.Core/` | Testable protocol/audio/settings |
-| `WinStream.Tests/` | xUnit tests |
-| `docs/` | Plan, research, user guide, Store notes |
-| `drivers/winstream-vad/` | Optional non-Store driver scaffold |
+
+| Path                     | Role                                    |
+| ------------------------ | --------------------------------------- |
+| `WinStream/`             | WinUI app, tray, WASAPI, RAOP session   |
+| `WinStream.Core/`        | Testable protocol/audio/settings        |
+| `WinStream.Tests/`       | xUnit tests                             |
+| `docs/`                  | Plan, research, user guide, Store notes |
+| `drivers/winstream-vad/` | Optional non-Store driver scaffold      |
+
+
+
 
 ## Status
 
 Code for the Store MVP pipeline (loopback + classic RAOP single/multi-room + packaging docs) is on branch `feat/winstream-full-product`. Manual device-matrix validation and Store Partner Center submission are still required before calling a build Store-ready. AirPlay 2 streaming and the virtual driver remain gated / optional stretch work.
 
-## License
+## LicenseD
 
 [LICENSE.txt](LICENSE.txt) (Unlicense).
