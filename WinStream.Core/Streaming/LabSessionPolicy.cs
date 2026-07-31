@@ -30,6 +30,17 @@ public static class LabSessionPolicy
         "Continue anyway, or switch to Experimental (~250 ms)?";
 
     /// <summary>
+    /// Shown while an Extreme session is already streaming and falling behind. The
+    /// selection-time warning is an honesty gate before the fact; this one is offered
+    /// recovery during the fact, so the wording must stay distinct.
+    /// </summary>
+    public const string RuntimePressureTitle = "Extreme is not keeping up";
+
+    public const string RuntimePressureWarning =
+        "This PC cannot sustain Extreme's ~8 ms packet cadence right now, so audio may " +
+        "stutter. Switching to Experimental (~250 ms) restarts the stream.";
+
+    /// <summary>
     /// Returns true when an additional receiver must be refused under Lab.
     /// </summary>
     public static bool BlocksAdditionalReceiver(

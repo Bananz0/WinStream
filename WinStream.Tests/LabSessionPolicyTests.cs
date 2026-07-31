@@ -58,6 +58,29 @@ public class LabSessionPolicyTests
     }
 
     [Fact]
+    public void Runtime_pressure_copy_admits_the_failure_and_names_the_way_out()
+    {
+        Assert.Contains("Extreme", LabSessionPolicy.RuntimePressureTitle, StringComparison.Ordinal);
+        Assert.Contains(
+            "Experimental",
+            LabSessionPolicy.RuntimePressureWarning,
+            StringComparison.Ordinal);
+        // Switching restarts the stream; a warning that hides that is not honest.
+        Assert.Contains(
+            "restarts",
+            LabSessionPolicy.RuntimePressureWarning,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Runtime_pressure_copy_is_distinct_from_the_selection_warning()
+    {
+        Assert.NotEqual(
+            LabSessionPolicy.CaptureTooCoarseWarning,
+            LabSessionPolicy.RuntimePressureWarning);
+    }
+
+    [Fact]
     public void Capture_warning_names_Extreme_and_Experimental()
     {
         Assert.Contains("Extreme", LabSessionPolicy.CaptureTooCoarseWarning, StringComparison.Ordinal);

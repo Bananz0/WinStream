@@ -32,6 +32,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly object _sessionsGate = new();
     private readonly ResilienceMonitor _resilience = new();
     private readonly LatencyAutoController _latency = new();
+    private readonly ExtremePressureHysteresis _extremePressure = new();
     private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
     private AudioFrameSendPump? _sendPump;
     private IAudioSource? _audioSource;
@@ -68,6 +69,12 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         _requestPairingPinAsync = requestPinAsync;
 
     public event EventHandler<SessionStateChanged>? StateChanged;
+
+    /// <summary>
+    /// Raised when the Extreme pressure warning should appear or disappear. Fires only
+    /// on a change, so the handler can bind it straight to the InfoBar.
+    /// </summary>
+    public event EventHandler<bool>? ExtremePressureChanged;
 
     public SessionState State => _aggregateState;
 
@@ -158,6 +165,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             {
                 _latency.ResetForConnect(_responsiveness);
                 _audioStartedMarked = false;
+                ClearExtremePressure();
                 ResetSignalWindowCounters();
             }
 
@@ -237,6 +245,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
             _latency.ResetForConnect(responsiveness);
             _audioStartedMarked = false;
+            ClearExtremePressure();
             ResetSignalWindowCounters();
             SetAggregate(SessionState.Reconnecting, "Applying streaming quality");
 
@@ -421,12 +430,16 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 $"PCM queue drop_oldest count={drops} depth={pump?.QueueDepth ?? 0}");
         }
 
-        MaybeRaiseLatency(pump);
+        EvaluatePressureWindow(pump);
     }
 
-    private void MaybeRaiseLatency(AudioFrameSendPump? pump)
+    /// <summary>
+    /// Closes one signal window and routes its pressure: Auto climbs the ladder,
+    /// Extreme cannot, so it raises a warning instead.
+    /// </summary>
+    private void EvaluatePressureWindow(AudioFrameSendPump? pump)
     {
-        if (pump is null || !_latency.IsAutoEnabled || _sessions.Count == 0)
+        if (pump is null || _sessions.Count == 0)
         {
             return;
         }
@@ -451,17 +464,55 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         var isStreaming =
             State is SessionState.Streaming or SessionState.Degraded;
 
-        if (_latency.TryRaise(dropDelta, slowDelta, isStreaming, isSilent, now))
+        if (_latency.IsAutoEnabled)
         {
-            ApplyLatencyToAllSessions(_latency.EffectiveFrames);
-            AppLog.Info(
-                "stream",
-                $"Auto latency raised to {_latency.EffectiveFrames} frames " +
-                $"(~{_latency.EffectiveFrames / 44.1:0} ms) " +
-                $"drops={dropDelta} slowSends={slowDelta}");
+            if (_latency.TryRaise(dropDelta, slowDelta, isStreaming, isSilent, now))
+            {
+                ApplyLatencyToAllSessions(_latency.EffectiveFrames);
+                AppLog.Info(
+                    "stream",
+                    $"Auto latency raised to {_latency.EffectiveFrames} frames " +
+                    $"(~{_latency.EffectiveFrames / 44.1:0} ms) " +
+                    $"drops={dropDelta} slowSends={slowDelta}");
+            }
+        }
+        else
+        {
+            UpdateExtremePressure(dropDelta, slowDelta, isStreaming, isSilent, now);
         }
 
         ResetSignalWindowCounters();
+    }
+
+    private void UpdateExtremePressure(
+        long dropDelta,
+        long slowDelta,
+        bool isStreaming,
+        bool isSilent,
+        DateTimeOffset now)
+    {
+        var eligible =
+            Responsiveness == PlaybackResponsiveness.LabPacket &&
+            isStreaming &&
+            !isSilent &&
+            _latency.IsPastStartupGrace(now);
+
+        var pressure = eligible && LatencyAutoController.HasPressure(dropDelta, slowDelta);
+        var wasVisible = _extremePressure.IsWarningVisible;
+        var visible = _extremePressure.ObserveWindow(pressure);
+        if (visible == wasVisible)
+        {
+            return;
+        }
+
+        if (visible)
+        {
+            AppLog.Warn(
+                "stream",
+                $"Extreme under sustained pressure drops={dropDelta} slowSends={slowDelta}");
+        }
+
+        ExtremePressureChanged?.Invoke(this, visible);
     }
 
     private void ApplyLatencyToAllSessions(uint frames)
@@ -478,6 +529,18 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
     }
 
+    private void ClearExtremePressure()
+    {
+        if (!_extremePressure.IsWarningVisible)
+        {
+            _extremePressure.Reset();
+            return;
+        }
+
+        _extremePressure.Reset();
+        ExtremePressureChanged?.Invoke(this, false);
+    }
+
     private void ResetSignalWindowCounters()
     {
         _signalWindowStart = DateTimeOffset.UtcNow;
@@ -489,6 +552,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     {
         CancelReconnectLoop();
         _reconnectBudget.Clear();
+        ClearExtremePressure();
         SetAggregate(SessionState.Disconnecting, "Disconnecting all receivers");
         foreach (var key in _sessions.Keys.ToList())
         {

@@ -61,6 +61,19 @@ public sealed class LatencyAutoController
         _audioStartedUtc = utcNow;
 
     /// <summary>
+    /// True once audio has been flowing longer than <see cref="StartupGrace"/>. Shared
+    /// with the Extreme pressure warning so both read one definition of "settled".
+    /// </summary>
+    public bool IsPastStartupGrace(DateTimeOffset utcNow) =>
+        _audioStartedUtc != DateTimeOffset.MinValue &&
+        utcNow - _audioStartedUtc >= StartupGrace;
+
+    /// <summary>Sender-side delivery pressure over one signal window.</summary>
+    public static bool HasPressure(long queueDropsInWindow, long slowSendsInWindow) =>
+        queueDropsInWindow >= QueueDropRaiseThreshold ||
+        slowSendsInWindow >= SlowSendRaiseThreshold;
+
+    /// <summary>
     /// Attempts a raise when Auto is enabled and pressure signals cross thresholds.
     /// </summary>
     public bool TryRaise(
@@ -75,12 +88,7 @@ public sealed class LatencyAutoController
             return false;
         }
 
-        if (_audioStartedUtc == DateTimeOffset.MinValue)
-        {
-            return false;
-        }
-
-        if (utcNow - _audioStartedUtc < StartupGrace)
+        if (!IsPastStartupGrace(utcNow))
         {
             return false;
         }
@@ -96,10 +104,7 @@ public sealed class LatencyAutoController
             return false;
         }
 
-        var pressure =
-            queueDropsInWindow >= QueueDropRaiseThreshold ||
-            slowSendsInWindow >= SlowSendRaiseThreshold;
-        if (!pressure)
+        if (!HasPressure(queueDropsInWindow, slowSendsInWindow))
         {
             return false;
         }

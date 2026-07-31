@@ -84,6 +84,16 @@
                          IsClosable="True"
                          Severity="Error"/>
 
+                <InfoBar x:Name="extremePressureBar"
+                         IsOpen="False"
+                         IsClosable="False"
+                         Severity="Warning">
+                    <InfoBar.ActionButton>
+                        <Button Content="Use Experimental"
+                                Click="ExtremePressureBar_UseExperimentalClick"/>
+                    </InfoBar.ActionButton>
+                </InfoBar>
+
                 <InfoBar x:Name="macHintBar"
                          IsOpen="False"
                          IsClosable="True"

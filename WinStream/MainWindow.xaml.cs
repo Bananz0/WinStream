@@ -100,6 +100,8 @@ namespace WinStream
             _driverLifecycle.StateChanged += OnDriverLifecycleStateChanged;
             _streamingOrchestrator.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(OnStreamingStateChanged);
+            _streamingOrchestrator.ExtremePressureChanged += (_, visible) =>
+                DispatcherQueue.TryEnqueue(() => ShowExtremePressure(visible));
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
@@ -1087,6 +1089,33 @@ namespace WinStream
             // Settings are written first so the apply reads one source of truth, but a
             // refused preset must not stay committed: the Lab single-receiver guard reads
             // the orchestrator's copy, which only advances on success.
+            await ApplyStreamingQualityNowAsync(
+                "Playback responsiveness",
+                () =>
+                {
+                    _settings.Update(settings => settings.PlaybackResponsiveness = previous);
+                    SelectQualityOptionSilently(playbackResponsivenessComboBox, previous);
+                });
+        }
+
+        private void ShowExtremePressure(bool visible)
+        {
+            extremePressureBar.Title = LabSessionPolicy.RuntimePressureTitle;
+            extremePressureBar.Message = LabSessionPolicy.RuntimePressureWarning;
+            extremePressureBar.IsOpen = visible;
+        }
+
+        private async void ExtremePressureBar_UseExperimentalClick(object sender, RoutedEventArgs e)
+        {
+            extremePressureBar.IsOpen = false;
+
+            var previous = _settings.Settings.PlaybackResponsiveness;
+            const PlaybackResponsiveness mode = PlaybackResponsiveness.Experimental;
+            _settings.Update(settings => settings.PlaybackResponsiveness = mode);
+            SelectQualityOptionSilently(playbackResponsivenessComboBox, mode);
+            RefreshStreamingQualityHints();
+
+            // Same apply path as the combo box, so a refused preset reverts identically.
             await ApplyStreamingQualityNowAsync(
                 "Playback responsiveness",
                 () =>
