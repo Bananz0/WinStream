@@ -68,12 +68,7 @@ public sealed class RaopSession : IAirPlaySession
 
     public void SetEffectiveLatencyFrames(uint frames)
     {
-        if (frames < LatencyAutoController.LatencyMinFrames)
-        {
-            frames = LatencyAutoController.LatencyMinFrames;
-        }
-
-        Volatile.Write(ref _latencyFrames, frames);
+        Volatile.Write(ref _latencyFrames, LatencyAutoController.ClampEffectiveFrames(frames));
     }
 
     public void SetAudioFidelity(AudioFidelity fidelity) =>

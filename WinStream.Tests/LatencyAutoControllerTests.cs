@@ -6,10 +6,11 @@ namespace WinStream.Tests;
 public class LatencyAutoControllerTests
 {
     [Fact]
-    public void ResetForConnect_Auto_starts_at_66150()
+    public void ResetForConnect_Auto_starts_at_11025()
     {
         var controller = new LatencyAutoController();
         controller.ResetForConnect(PlaybackResponsiveness.Auto);
+        Assert.Equal(11025u, controller.EffectiveFrames);
         Assert.Equal(LatencyAutoController.AutoStartFrames, controller.EffectiveFrames);
         Assert.True(controller.IsAutoEnabled);
     }
@@ -18,17 +19,27 @@ public class LatencyAutoControllerTests
     public void ResetForConnect_presets_disable_auto_and_set_fixed_frames()
     {
         var controller = new LatencyAutoController();
+        controller.ResetForConnect(PlaybackResponsiveness.VeryLow);
+        Assert.Equal(LatencyAutoController.VeryLowFrames, controller.EffectiveFrames);
+        Assert.False(controller.IsAutoEnabled);
+
+        controller.ResetForConnect(PlaybackResponsiveness.Experimental);
+        Assert.Equal(LatencyAutoController.ExperimentalFrames, controller.EffectiveFrames);
+        Assert.False(controller.IsAutoEnabled);
+
+        controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+        Assert.Equal(LatencyAutoController.LabPacketFrames, controller.EffectiveFrames);
+        Assert.False(controller.IsAutoEnabled);
+
         controller.ResetForConnect(PlaybackResponsiveness.LowDelay);
         Assert.Equal(LatencyAutoController.LowDelayFrames, controller.EffectiveFrames);
-        Assert.False(controller.IsAutoEnabled);
 
         controller.ResetForConnect(PlaybackResponsiveness.MostStable);
         Assert.Equal(LatencyAutoController.MostStableFrames, controller.EffectiveFrames);
-        Assert.False(controller.IsAutoEnabled);
     }
 
     [Fact]
-    public void TryRaise_steps_by_11025_up_to_ceiling()
+    public void TryRaise_steps_by_11025_up_to_ceiling_from_auto_floor()
     {
         var controller = new LatencyAutoController();
         var t0 = DateTimeOffset.Parse("2026-07-31T12:00:00Z");
@@ -41,7 +52,7 @@ public class LatencyAutoControllerTests
             isStreaming: true,
             isSilent: false,
             utcNow: t0.AddSeconds(6)));
-        Assert.Equal(66150u + 11025u, controller.EffectiveFrames);
+        Assert.Equal(11025u + 11025u, controller.EffectiveFrames);
 
         Assert.False(controller.TryRaise(
             queueDropsInWindow: 10,
@@ -56,13 +67,16 @@ public class LatencyAutoControllerTests
             isStreaming: true,
             isSilent: false,
             utcNow: t0.AddSeconds(40)));
-        Assert.Equal(66150u + 22050u, controller.EffectiveFrames);
+        Assert.Equal(11025u + 22050u, controller.EffectiveFrames);
 
         // Climb to ceiling
-        controller.TryRaise(3, 0, true, false, t0.AddSeconds(80));
-        controller.TryRaise(3, 0, true, false, t0.AddSeconds(120));
+        for (var i = 0; i < 10; i++)
+        {
+            controller.TryRaise(3, 0, true, false, t0.AddSeconds(80 + (i * 40)));
+        }
+
         Assert.Equal(LatencyAutoController.CeilingFrames, controller.EffectiveFrames);
-        Assert.False(controller.TryRaise(3, 0, true, false, t0.AddSeconds(160)));
+        Assert.False(controller.TryRaise(3, 0, true, false, t0.AddSeconds(500)));
     }
 
     [Fact]
@@ -84,9 +98,35 @@ public class LatencyAutoControllerTests
     }
 
     [Fact]
-    public void ResolveFixedFrames_never_below_latency_min()
+    public void SetupLatencyMin_lab_uses_352_otherwise_folklore_11025()
     {
-        Assert.True(LatencyAutoController.LowDelayFrames >= LatencyAutoController.LatencyMinFrames);
+        Assert.Equal(352u, LatencyAutoController.SetupLatencyMin(352));
+        Assert.Equal(11025u, LatencyAutoController.SetupLatencyMin(11025));
+        Assert.Equal(11025u, LatencyAutoController.SetupLatencyMin(22050));
+        Assert.Equal(11025u, LatencyAutoController.SetupLatencyMin(88200));
+    }
+
+    [Fact]
+    public void SetupLatencyMax_at_least_88200()
+    {
+        Assert.Equal(88200u, LatencyAutoController.SetupLatencyMax(352));
+        Assert.Equal(88200u, LatencyAutoController.SetupLatencyMax(11025));
+        Assert.Equal(88200u, LatencyAutoController.SetupLatencyMax(88200));
+    }
+
+    [Fact]
+    public void ClampEffectiveFrames_packet_floor()
+    {
+        Assert.Equal(352u, LatencyAutoController.ClampEffectiveFrames(0));
+        Assert.Equal(352u, LatencyAutoController.ClampEffectiveFrames(100));
+        Assert.Equal(11025u, LatencyAutoController.ClampEffectiveFrames(11025));
+    }
+
+    [Fact]
+    public void ResolveFixedFrames_never_below_packet_floor()
+    {
+        Assert.True(LatencyAutoController.LabPacketFrames >= LatencyAutoController.PacketFloorFrames);
+        Assert.True(LatencyAutoController.ExperimentalFrames >= LatencyAutoController.PacketFloorFrames);
         Assert.True(LatencyAutoController.AutoStartFrames <= LatencyAutoController.CeilingFrames);
     }
 }

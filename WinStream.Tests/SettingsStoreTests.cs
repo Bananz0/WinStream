@@ -50,6 +50,26 @@ public class SettingsStoreTests
     }
 
     [Fact]
+    public void RoundTrips_ultralow_responsiveness_presets()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+
+        store.Save(new AppSettings
+        {
+            PlaybackResponsiveness = PlaybackResponsiveness.VeryLow,
+            AudioFidelity = AudioFidelity.Standard
+        });
+        Assert.Equal(PlaybackResponsiveness.VeryLow, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.Experimental });
+        Assert.Equal(PlaybackResponsiveness.Experimental, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.LabPacket });
+        Assert.Equal(PlaybackResponsiveness.LabPacket, store.Load().PlaybackResponsiveness);
+    }
+
+    [Fact]
     public void Load_without_a_settings_file_returns_safe_defaults()
     {
         using var directory = new TempDirectory();

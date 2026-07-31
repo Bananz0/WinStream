@@ -583,7 +583,19 @@ namespace WinStream
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.Auto,
                     "Auto",
-                    "Starts at about 1.5 seconds and increases the buffer if delivery pressure is detected."));
+                    "Starts near ~250 ms and increases toward ~2 s if delivery pressure is detected. Not a guaranteed delay."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.VeryLow,
+                    "Very low (~500 ms)",
+                    "Fixed ~500 ms buffer. More stutter risk than Low delay on busy Wi‑Fi."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.Experimental,
+                    "Experimental (~250 ms)",
+                    "Fixed ~250 ms buffer. Expect stutter or tear-down on some receivers."));
+                playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
+                    PlaybackResponsiveness.LabPacket,
+                    "Lab (1 packet, probe)",
+                    "Requests one ALAC packet of lead (~8 ms). Probe only — may fail; not for everyday use."));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.LowDelay,
                     "Low delay (~1 s)",
@@ -665,13 +677,34 @@ namespace WinStream
                     : string.Empty;
         }
 
-        private void PlaybackResponsivenessComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void PlaybackResponsivenessComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (_suppressStreamingQualityEvents ||
                 playbackResponsivenessComboBox.SelectedItem is not ComboBoxItem item ||
                 item.Tag is not PlaybackResponsiveness mode)
             {
                 return;
+            }
+
+            var previous = _settings.Settings.PlaybackResponsiveness;
+            if (mode == PlaybackResponsiveness.LabPacket && previous != PlaybackResponsiveness.LabPacket)
+            {
+                var confirmed = await ConfirmLabLatencyAsync();
+                if (!confirmed)
+                {
+                    _suppressStreamingQualityEvents = true;
+                    try
+                    {
+                        SelectQualityOption(playbackResponsivenessComboBox, previous);
+                        RefreshStreamingQualityHints();
+                    }
+                    finally
+                    {
+                        _suppressStreamingQualityEvents = false;
+                    }
+
+                    return;
+                }
             }
 
             _settings.Update(settings => settings.PlaybackResponsiveness = mode);
@@ -682,6 +715,64 @@ namespace WinStream
                     InfoBarSeverity.Informational,
                     "Playback responsiveness saved",
                     "The new buffer applies the next time you reconnect.");
+            }
+        }
+
+        private async Task<bool> ConfirmLabLatencyAsync()
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "Enable Lab latency probe?",
+                Content =
+                    "Lab requests one ALAC packet of AirPlay lead (~8 ms at 44.1 kHz). " +
+                    "Many receivers will stutter, clamp, or disconnect. This is a probe, not everyday playback.\n\n" +
+                    "Only one receiver is allowed in Lab. Auto-connect is skipped while Lab is selected. " +
+                    "If it fails, switch to Experimental (~250 ms).\n\n" +
+                    "WinStream does not guarantee millisecond AirPlay delay.",
+                PrimaryButtonText = "Enable Lab",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = Content.XamlRoot
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+
+        private async Task OfferLabEscapeToExperimentalAsync()
+        {
+            if (_settings.Settings.PlaybackResponsiveness != PlaybackResponsiveness.LabPacket)
+            {
+                return;
+            }
+
+            var dialog = new ContentDialog
+            {
+                Title = "Lab probe failed",
+                Content =
+                    "The receiver did not accept the one-packet Lab lead. " +
+                    "Switch to Experimental (~250 ms) and reconnect?",
+                PrimaryButtonText = "Use Experimental",
+                CloseButtonText = "Keep Lab",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = Content.XamlRoot
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            _settings.Update(settings =>
+                settings.PlaybackResponsiveness = PlaybackResponsiveness.Experimental);
+            _suppressStreamingQualityEvents = true;
+            try
+            {
+                SelectQualityOption(
+                    playbackResponsivenessComboBox,
+                    PlaybackResponsiveness.Experimental);
+                RefreshStreamingQualityHints();
+            }
+            finally
+            {
+                _suppressStreamingQualityEvents = false;
             }
         }
 
@@ -712,11 +803,15 @@ namespace WinStream
                 Title = "Playback responsiveness",
                 Content =
                     "This setting changes playback delay, not sound fidelity.\n\n" +
-                    "• Auto — Starts responsive (~1.5 s) and increases the buffer if delivery pressure or dropped audio is detected.\n" +
+                    "• Auto — Starts near ~250 ms and may climb toward ~2 s if delivery pressure is detected.\n" +
+                    "• Very low — Fixed ~500 ms. Higher stutter risk.\n" +
+                    "• Experimental — Fixed ~250 ms. Expect stutter on some receivers.\n" +
+                    "• Lab (1 packet, probe) — Requests ~8 ms lead; may fail. One receiver only.\n" +
                     "• Low delay — About 1 second. More stutter risk on busy Wi‑Fi.\n" +
                     "• Balanced — About 1.5 seconds.\n" +
                     "• Most stable — About 2 seconds (Apple’s standard realtime buffer).\n\n" +
-                    "AirPlay music to HomePod-class speakers cannot reach millisecond delay.",
+                    "WinStream does not guarantee a specific millisecond AirPlay delay. " +
+                    "HomePod-class speakers often need larger buffers.",
                 CloseButtonText = "Close",
                 XamlRoot = Content.XamlRoot
             };
@@ -1000,6 +1095,11 @@ namespace WinStream
                         InfoBarSeverity.Error,
                         $"Couldn't connect to {device.DisplayName}",
                         FormatConnectionFailure(ex.Message));
+
+                    if (_settings.Settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket)
+                    {
+                        await OfferLabEscapeToExperimentalAsync();
+                    }
                 }
 
                 AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
@@ -1101,6 +1201,12 @@ namespace WinStream
         private async Task TryAutoConnectToLastReceiverAsync()
         {
             var settings = _settings.Settings;
+            // Lab is a manual probe — never auto-connect while it is selected.
+            if (settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket)
+            {
+                return;
+            }
+
             if (!AutoConnectPolicy.ShouldAttempt(
                     settings.AutoConnectLastReceiver,
                     settings.LastReceiverKey,

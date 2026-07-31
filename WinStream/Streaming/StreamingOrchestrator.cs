@@ -102,15 +102,29 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             }
 
             SetAggregate(SessionState.Connecting, "Connecting receiver");
-            IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(receiver, _senderDeviceId)
-                : new RaopSession(receiver);
 
             var isFirstSession = false;
             lock (_sessionsGate)
             {
                 isFirstSession = _sessions.Count == 0;
             }
+
+            if (_responsiveness == PlaybackResponsiveness.LabPacket && !isFirstSession)
+            {
+                throw new InvalidOperationException(
+                    "Lab latency mode supports only one receiver. Switch to Experimental or Auto for multi-room.");
+            }
+
+            if (!isFirstSession &&
+                _latency.EffectiveFrames < LatencyAutoController.LatencyMinFrames)
+            {
+                throw new InvalidOperationException(
+                    "Lab latency mode supports only one receiver. Disconnect first or switch presets.");
+            }
+
+            IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
+                ? new AirPlay2Session(receiver, _senderDeviceId)
+                : new RaopSession(receiver);
 
             if (isFirstSession)
             {
@@ -135,6 +149,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                     "stream",
                     $"Connected receiver count={_sessions.Count} " +
                     $"latencyFrames={_latency.EffectiveFrames} " +
+                    $"setupMin={LatencyAutoController.SetupLatencyMin(_latency.EffectiveFrames)} " +
                     $"responsiveness={_responsiveness} fidelity={_fidelity}");
             }
             catch

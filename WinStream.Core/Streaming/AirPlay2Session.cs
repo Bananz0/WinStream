@@ -84,16 +84,18 @@ public sealed class AirPlay2Session : IAirPlaySession
 
     public void SetEffectiveLatencyFrames(uint frames)
     {
-        if (frames < LatencyAutoController.LatencyMinFrames)
-        {
-            frames = LatencyAutoController.LatencyMinFrames;
-        }
-
-        Volatile.Write(ref _latencyFrames, frames);
+        Volatile.Write(ref _latencyFrames, LatencyAutoController.ClampEffectiveFrames(frames));
     }
 
     public void SetAudioFidelity(AudioFidelity fidelity) =>
         _pcmBuffer.Fidelity = fidelity;
+
+    /// <summary>SETUP latency bounds derived from the effective announce offset.</summary>
+    public (uint Min, uint Max) SetupLatencyBounds =>
+    (
+        LatencyAutoController.SetupLatencyMin(EffectiveLatencyFrames),
+        LatencyAutoController.SetupLatencyMax(EffectiveLatencyFrames)
+    );
 
     public SessionState State => _stateMachine.State;
 
@@ -159,9 +161,14 @@ public sealed class AirPlay2Session : IAirPlaySession
                         "receiver's grandmaster clock.");
                 }
 
+                var (setupMin, setupMax) = (
+                    LatencyAutoController.SetupLatencyMin(EffectiveLatencyFrames),
+                    LatencyAutoController.SetupLatencyMax(EffectiveLatencyFrames));
                 await client.StreamSetupAsync(
                     GetLocalPort(_controlSocket),
                     _shk,
+                    setupMin,
+                    setupMax,
                     cancellationToken).ConfigureAwait(false);
 
                 _audioEndpoint = new IPEndPoint(address, client.DataPort);

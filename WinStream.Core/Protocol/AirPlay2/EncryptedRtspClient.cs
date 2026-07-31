@@ -234,6 +234,8 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
     public async Task StreamSetupAsync(
         int senderControlPort,
         byte[] audioSharedKey,
+        uint latencyMinFrames = 11025,
+        uint latencyMaxFrames = 88200,
         CancellationToken cancellationToken = default)
     {
         EnsureCrypto();
@@ -241,6 +243,17 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         if (audioSharedKey.Length != 32)
         {
             throw new ArgumentException("shk must be 32 bytes.", nameof(audioSharedKey));
+        }
+
+        // Never advertise below one ALAC packet (352 frames @ 44.1 kHz).
+        if (latencyMinFrames < AlacEncoder.FramesPerPacket)
+        {
+            latencyMinFrames = AlacEncoder.FramesPerPacket;
+        }
+
+        if (latencyMaxFrames < latencyMinFrames)
+        {
+            latencyMaxFrames = latencyMinFrames;
         }
 
         // Realtime type 0x60 / 96, ALAC — receiver hardcodes ALAC and ignores ct.
@@ -251,8 +264,8 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             ["audioMode"] = "default",
             ["ct"] = 2L,
             ["isMedia"] = true,
-            ["latencyMin"] = 11025L,
-            ["latencyMax"] = 88200L,
+            ["latencyMin"] = (long)latencyMinFrames,
+            ["latencyMax"] = (long)latencyMaxFrames,
             ["spf"] = 352L,
             ["sr"] = 44100L,
             ["controlPort"] = (long)senderControlPort,

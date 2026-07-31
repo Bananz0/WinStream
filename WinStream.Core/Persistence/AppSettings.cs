@@ -12,7 +12,13 @@ public enum PlaybackResponsiveness
     Auto = 0,
     LowDelay = 1,
     Balanced = 2,
-    MostStable = 3
+    MostStable = 3,
+    /// <summary>~500 ms fixed buffer (Very low).</summary>
+    VeryLow = 4,
+    /// <summary>~250 ms fixed buffer (Experimental).</summary>
+    Experimental = 5,
+    /// <summary>One ALAC packet (~8 ms) Lab probe — gated UI only.</summary>
+    LabPacket = 6
 }
 
 /// <summary>How carefully to convert capture PCM before ALAC (CPU vs conversion quality).</summary>
@@ -72,7 +78,7 @@ public sealed class AppSettings
     /// </summary>
     public string? SenderDeviceId { get; set; }
 
-    /// <summary>Playback buffer preference. Default Auto starts ~1.5 s and may climb.</summary>
+    /// <summary>Playback buffer preference. Default Auto starts ~250 ms and may climb.</summary>
     public PlaybackResponsiveness PlaybackResponsiveness { get; set; } = PlaybackResponsiveness.Auto;
 
     /// <summary>PCM conversion preference. Default Auto skips SRC when already 44.1 stereo.</summary>
