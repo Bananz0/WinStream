@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title">
+  <title id="title">WinStream</title>
+  <!-- Curved panes form one energetic Windows-inspired silhouette. -->
+  <path fill="#076F74" d="M8 29 44 47v14L9 56z"/>
+  <path fill="#232B30" d="m92 29-36 18v14l35-5z"/>
+  <path fill="#076F74" d="m9 60 34 5-12 26-23 8z"/>
+  <path fill="#232B30" d="m91 60-34 5 12 26 23 8z"/>
+  <!-- The cast beacon grows directly from the pane split. -->
+  <path fill="#4DC3C2" d="m50 50-19 41h38z"/>
+  <!-- Broadcast rings echo the pane curvature instead of sitting in a box. -->
+  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
+        d="M42 50a9 9 0 0 1 16 0"/>
+  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
+        d="M31 49a20 20 0 0 1 38 0"/>
+  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
+        d="M20 46a32 32 0 0 1 60 0"/>
+</svg>

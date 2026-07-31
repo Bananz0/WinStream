@@ -38,8 +38,6 @@ namespace WinStream
             _trayIcon.OpenRequested += (_, _) => ShowMainWindow();
             _trayIcon.ExitRequested += (_, _) => _ = QuitAsync();
             _trayIcon.Initialize();
-
-            _mainWindow.HideToTray();
         }
 
         private void OnAppInstanceActivated(object? sender, AppActivationArguments args)

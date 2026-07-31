@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title">
+  <title id="title">WinStream monochrome</title>
+  <path fill="currentColor"
+        d="M8 29 44 47v14L9 56zm84 0L56 47v14l35-5zM9 60l34 5-12 26-23 8zm82 0-34 5 12 26 23 8zM50 50 31 91h38z"/>
+  <path fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"
+        d="M42 50a9 9 0 0 1 16 0M31 49a20 20 0 0 1 38 0M20 46a32 32 0 0 1 60 0"/>
+</svg>
