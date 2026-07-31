@@ -82,7 +82,7 @@ Full steps: [docs/user-guide.md](docs/user-guide.md)
 
 ## WinStream Link (experimental companion)
 
-A separate low-latency path to a receiver you run yourself — **not** AirPlay, and it cannot reach a HomePod. Disabled unless `LinkFeatureEnabled` is set; when enabled it is mutually exclusive with AirPlay output. Run `tools/LinkRx` (Windows) or `tools/LinkRx.Pi` (Raspberry Pi + ALSA), then Scan or type the IP in the app.
+A separate companion path to a receiver you run yourself — **not** AirPlay, and it cannot reach a HomePod. Disabled unless `LinkFeatureEnabled` is set; when enabled it is mutually exclusive with AirPlay output. Run `tools/LinkRx` (Windows) or `tools/LinkRx.Pi` (Raspberry Pi + ALSA), then Scan or type the IP in the app. The UI only shows **8–10 ms** after a recorded Ethernet lab measurement; ordinary loopback and Wi‑Fi still stream without that claim.
 
 The 8–10 ms average target is **not** validated: it requires the test-signed virtual audio driver and a wired-lab measurement per [docs/testing/link-e2e-measurement.md](docs/testing/link-e2e-measurement.md).
 

@@ -60,6 +60,7 @@ namespace WinStream
         private bool _suppressStreamingQualityEvents;
         private bool _suppressSinkModeEvents;
         private bool _suppressLinkDiscoveryEvents;
+        private long _linkUnderruns;
         private readonly QualityApplyGate _qualityApplyGate = new();
         private readonly SinkModeCoordinator _sinkModes;
 
@@ -304,7 +305,7 @@ namespace WinStream
             // Tear down streaming first: the orchestrator is still subscribed to the
             // capture source and would pump frames into a disposed WASAPI client.
             await _link.DisposeAsync();
-            linkStatusText.Text = "Link disconnected.";
+            ApplyLinkUiMessage(LinkStatusCopy.Disconnected());
             await _streamingOrchestrator.DisposeAsync();
             await _captureMonitor.DisposeAsync();
             _driverLifecycle.Dispose();
@@ -618,6 +619,9 @@ namespace WinStream
                 return;
             }
 
+            linkCardTitle.Text = LinkStatusCopy.CardTitle;
+            linkCardHint.Text = LinkStatusCopy.CardHint;
+
             _suppressSinkModeEvents = true;
             try
             {
@@ -658,12 +662,18 @@ namespace WinStream
                     linkPinBox.Password = savedPin;
                 }
             }
+
+            if (link)
+            {
+                RefreshLinkStatusUi();
+            }
         }
 
         private async Task StopLinkAsync()
         {
             await _link.DisconnectAsync();
-            linkStatusText.Text = "Link disconnected.";
+            _linkUnderruns = 0;
+            ApplyLinkUiMessage(LinkStatusCopy.Disconnected());
         }
 
         private async void SinkModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -717,7 +727,7 @@ namespace WinStream
         private async void LinkScanButton_Click(object sender, RoutedEventArgs e)
         {
             linkScanButton.IsEnabled = false;
-            linkStatusText.Text = "Scanning for Link companions…";
+            ApplyLinkUiMessage(LinkStatusCopy.For(BuildLinkUiContext(isScanning: true)));
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
@@ -742,13 +752,11 @@ namespace WinStream
                     _suppressLinkDiscoveryEvents = false;
                 }
 
-                linkStatusText.Text = linkDiscoveryComboBox.Items.Count == 0
-                    ? "No companions advertised; enter the IP manually."
-                    : $"Found {linkDiscoveryComboBox.Items.Count} companion(s).";
+                ApplyLinkUiMessage(LinkStatusCopy.ScanResult(linkDiscoveryComboBox.Items.Count));
             }
             catch (Exception ex)
             {
-                linkStatusText.Text = $"Link scan failed: {ex.Message}";
+                ApplyLinkUiMessage(LinkStatusCopy.ScanFailed(ex.Message));
                 AppLog.Error("link", $"Link discovery failed: {ex.GetType().Name}");
             }
             finally
@@ -776,12 +784,34 @@ namespace WinStream
         {
             if (_settings.Settings.SinkMode != SinkMode.Link)
             {
-                linkStatusText.Text = "Switch sink mode to WinStream Link first.";
+                ApplyLinkUiMessage(new LinkUiMessage(
+                    "Switch sink mode to WinStream Link first.",
+                    null,
+                    "Link idle",
+                    LinkUiTone.Caution,
+                    ClaimsSla: false));
+                return;
+            }
+
+            if (_link.State == LinkSessionState.Streaming)
+            {
+                linkConnectButton.IsEnabled = false;
+                try
+                {
+                    await StopLinkAsync();
+                    RefreshSessionStatus();
+                }
+                finally
+                {
+                    linkConnectButton.IsEnabled = true;
+                    RefreshLinkConnectButton();
+                }
+
                 return;
             }
 
             linkConnectButton.IsEnabled = false;
-            linkStatusText.Text = "Connecting Link…";
+            ApplyLinkUiMessage(LinkStatusCopy.For(BuildLinkUiContext(isConnecting: true)));
             try
             {
                 await _sinkModes.EnsureExclusiveAsync(SinkMode.Link);
@@ -790,7 +820,7 @@ namespace WinStream
                 var result = await _link.ConnectAsync(linkHostTextBox.Text, linkPinBox.Password);
                 if (!result.IsConnected)
                 {
-                    linkStatusText.Text = DescribeLinkFailure(result);
+                    ApplyLinkUiMessage(LinkStatusCopy.ForFailure(result.Status, result.Detail));
                     return;
                 }
 
@@ -799,47 +829,75 @@ namespace WinStream
                     s.LastLinkReceiverKey = result.Target!.Key;
                     s.LastLinkReceiverName = result.Target.Host;
                 });
-                linkStatusText.Text = DescribeLinkCapture();
+                _linkUnderruns = 0;
+                RefreshLinkStatusUi();
             }
             catch (Exception ex)
             {
-                linkStatusText.Text = $"Link failed: {ex.Message}";
+                ApplyLinkUiMessage(LinkStatusCopy.ForFailure(
+                    LinkConnectStatus.TransportFailed,
+                    ex.Message));
                 AppLog.Error("link", $"UI connect failed: {ex}");
             }
             finally
             {
                 linkConnectButton.IsEnabled = true;
+                RefreshLinkConnectButton();
+                RefreshSessionStatus();
             }
         }
 
-        private static string DescribeLinkFailure(LinkConnectResult result) => result.Status switch
+        /// <summary>
+        /// Renders Link status from Core copy policy. The only path that may show
+        /// "8–10 ms" is <see cref="LinkUiMessage.ClaimsSla"/>.
+        /// </summary>
+        private void ApplyLinkUiMessage(LinkUiMessage message)
         {
-            LinkConnectStatus.MissingPin => "Enter the Link PIN shown by the companion.",
-            LinkConnectStatus.InvalidTarget => "Enter the companion address as IP or IP:port.",
-            LinkConnectStatus.PinRejected => "Link PIN rejected by companion.",
-            LinkConnectStatus.CaptureFailed => $"Link capture failed: {result.Detail}",
-            _ => $"Link failed: {result.Detail}"
-        };
-
-        /// <summary>Never claim the 8–10 ms path without an owned VAD and measured callbacks.</summary>
-        private string DescribeLinkCapture()
-        {
-            var measuredMs = _link.MeasuredCaptureContributionMilliseconds;
-            return _link.CaptureQuality switch
-            {
-                LinkCaptureQuality.LegacyLoopback =>
-                    "Link streaming through default loopback (SLA-ineligible).",
-                LinkCaptureQuality.VadMeasuring =>
-                    "Link streaming through WinStream VAD; measuring capture timing…",
-                LinkCaptureQuality.VadWithinBudget =>
-                    $"Link streaming through VAD (capture p95 {measuredMs} ms; " +
-                    "Ethernet E2E measurement still required).",
-                LinkCaptureQuality.VadOverBudget =>
-                    $"Link streaming through VAD (capture p95 {measuredMs} ms exceeds the " +
-                    $"{LinkSlaEligibility.MaxCaptureContributionMs} ms budget).",
-                _ => "Link not connected."
-            };
+            linkStatusText.Text = message.Headline;
+            linkStatusText.Foreground = ThemeBrush(ToneBrushKey(message.Tone));
+            linkStatusDetailText.Text = message.Detail ?? string.Empty;
+            linkStatusDetailText.Visibility = string.IsNullOrEmpty(message.Detail)
+                ? Visibility.Collapsed
+                : Visibility.Visible;
         }
+
+        private void RefreshLinkStatusUi()
+        {
+            ApplyLinkUiMessage(LinkStatusCopy.For(BuildLinkUiContext()));
+            RefreshLinkConnectButton();
+        }
+
+        private void RefreshLinkConnectButton()
+        {
+            var streaming = _link.State == LinkSessionState.Streaming;
+            linkConnectButton.Content = streaming
+                ? LinkStatusCopy.DisconnectButton
+                : LinkStatusCopy.ConnectButton;
+        }
+
+        private LinkUiContext BuildLinkUiContext(
+            bool isScanning = false,
+            bool isConnecting = false) =>
+            new(
+                Session: _link.State,
+                CaptureQuality: _link.CaptureQuality,
+                MeasuredCaptureMilliseconds: _link.MeasuredCaptureContributionMilliseconds,
+                // Until a lab evidence artifact is loaded, never assert Ethernet. A false
+                // here keeps the Wi-Fi / unproven copy on screen, which is the honest default.
+                PathIsEthernet: false,
+                UnderrunCount: _linkUnderruns,
+                MeasurementEvidencePasses: false,
+                IsScanning: isScanning,
+                IsConnecting: isConnecting);
+
+        private static string ToneBrushKey(LinkUiTone tone) => tone switch
+        {
+            LinkUiTone.Progress => "SystemFillColorCautionBrush",
+            LinkUiTone.Caution => "SystemFillColorCautionBrush",
+            LinkUiTone.Success => "SystemFillColorSuccessBrush",
+            LinkUiTone.Critical => "SystemFillColorCriticalBrush",
+            _ => "TextFillColorSecondaryBrush"
+        };
 
         private void RestoreStreamingQualitySettings()
         {
@@ -1378,7 +1436,7 @@ namespace WinStream
             if (_settings.Settings.SinkMode == SinkMode.Link &&
                 _link.State == LinkSessionState.Streaming)
             {
-                linkStatusText.Text = DescribeLinkCapture();
+                RefreshLinkStatusUi();
             }
 
             if (!_captureMonitor.IsCapturing)
@@ -1821,15 +1879,9 @@ namespace WinStream
         {
             if (_settings.Settings.SinkMode == SinkMode.Link)
             {
-                var linkState = _link.State;
-                var (linkText, linkBrushKey) = linkState switch
-                {
-                    LinkSessionState.Streaming => ("Link streaming", "SystemFillColorSuccessBrush"),
-                    LinkSessionState.Failed => ("Link failed", "SystemFillColorCriticalBrush"),
-                    _ => ("Link not connected", "TextFillColorSecondaryBrush")
-                };
-                statusPillText.Text = linkText;
-                statusDot.Fill = ThemeBrush(linkBrushKey);
+                var message = LinkStatusCopy.For(BuildLinkUiContext());
+                statusPillText.Text = message.Pill;
+                statusDot.Fill = ThemeBrush(ToneBrushKey(message.Tone));
                 return;
             }
 

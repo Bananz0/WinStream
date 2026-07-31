@@ -516,10 +516,13 @@
                         Visibility="Collapsed">
                     <StackPanel Spacing="12">
                         <StackPanel Spacing="2">
-                            <TextBlock Text="WinStream Link"
+                            <TextBlock x:Name="linkCardTitle"
+                                       Text="WinStream Link"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Ultra-low-latency companion path. Requires LinkRx outside this app. AirPlay and Link cannot run at the same time."
-                                       Style="{StaticResource HintTextStyle}"/>
+                            <TextBlock x:Name="linkCardHint"
+                                       Text="Companion path for the lowest latency WinStream can measure. Requires a LinkRx companion outside this app. AirPlay and Link cannot run at the same time."
+                                       Style="{StaticResource HintTextStyle}"
+                                       TextWrapping="Wrap"/>
                         </StackPanel>
                         <ComboBox x:Name="sinkModeComboBox"
                                   HorizontalAlignment="Stretch"
@@ -555,9 +558,14 @@
                             <Button x:Name="linkConnectButton"
                                     Content="Connect Link"
                                     Click="LinkConnectButton_Click"
-                                    HorizontalAlignment="Stretch"/>
+                                    HorizontalAlignment="Stretch"
+                                    AutomationProperties.Name="Connect or disconnect Link"/>
                             <TextBlock x:Name="linkStatusText"
-                                       Style="{StaticResource HintTextStyle}"/>
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock x:Name="linkStatusDetailText"
+                                       Style="{StaticResource HintTextStyle}"
+                                       TextWrapping="Wrap"/>
                         </StackPanel>
                     </StackPanel>
                 </Border>
