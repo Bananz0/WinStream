@@ -463,7 +463,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                     "On a Mac, also set AirPlay Receiver to allow Everyone (or anyone on the same network).");
             }
 
-            // Gate on: still surface the stub failure with a clear message upstream.
             return AirPlayProtocolKind.AirPlay2;
         }
 

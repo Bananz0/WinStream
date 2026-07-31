@@ -315,7 +315,8 @@ namespace WinStream
                     }
                     catch (Exception ex)
                     {
-                        statusTextBlock.Text = $"Connection failed: {ex.Message}";
+                        statusTextBlock.Text =
+                            $"Connection failed: {FormatConnectionFailure(ex.Message)}";
                         statusTextBlock.Foreground = new SolidColorBrush(Colors.Red);
                         AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
                     }
@@ -401,8 +402,7 @@ namespace WinStream
 
         private string CreateTooltipSummary(DeviceInfo device)
         {
-            var classic = AirPlayCapability.SupportsClassicRaop(
-                !string.IsNullOrWhiteSpace(device.PublicKey));
+            var classic = AirPlayCapability.SupportsClassicRaop(device.EncryptionTypes);
             var ap2 = AirPlayCapability.SupportsAirPlay2(
                 !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
                 device.Features,
@@ -412,10 +412,14 @@ namespace WinStream
                 : ap2
                     ? "AirPlay 2 (gated)"
                     : "Unknown";
+            var et = string.IsNullOrWhiteSpace(device.EncryptionTypes)
+                ? "n/a"
+                : device.EncryptionTypes;
             return $"Name: {device.DisplayName}\n" +
                    $"Model: {device.Model}\n" +
                    $"IP: {device.IPAddress}\n" +
                    $"Port: {device.Port}\n" +
+                   $"Encryption: {et}\n" +
                    $"Protocol: {protocol}";
         }
 
@@ -454,6 +458,32 @@ namespace WinStream
 
             return string.Equals(left.IPAddress, right.IPAddress, StringComparison.Ordinal) &&
                    left.Port == right.Port;
+        }
+
+        private static string FormatConnectionFailure(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return "Unknown error.";
+            }
+
+            if (message.Contains("Everyone", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("same network", StringComparison.OrdinalIgnoreCase))
+            {
+                return message;
+            }
+
+            if (message.Contains("470", StringComparison.Ordinal) ||
+                message.Contains("403", StringComparison.Ordinal) ||
+                message.Contains("Pairing", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("pair-setup", StringComparison.OrdinalIgnoreCase))
+            {
+                return message +
+                    " On a Mac, set AirPlay Receiver to allow Everyone " +
+                    "(or anyone on the same network) and disable a required password.";
+            }
+
+            return message;
         }
 
         private void UpdateUI(bool isEnabled)
