@@ -1,17 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title">
   <title id="title">WinStream</title>
-  <!-- Curved panes form one energetic Windows-inspired silhouette. -->
-  <path fill="#076F74" d="M8 29 44 47v14L9 56z"/>
-  <path fill="#232B30" d="m92 29-36 18v14l35-5z"/>
-  <path fill="#076F74" d="m9 60 34 5-12 26-23 8z"/>
-  <path fill="#232B30" d="m91 60-34 5 12 26 23 8z"/>
-  <!-- The cast beacon grows directly from the pane split. -->
-  <path fill="#4DC3C2" d="m50 50-19 41h38z"/>
-  <!-- Broadcast rings echo the pane curvature instead of sitting in a box. -->
-  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
-        d="M42 50a9 9 0 0 1 16 0"/>
-  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
-        d="M31 49a20 20 0 0 1 38 0"/>
-  <path fill="none" stroke="#4DC3C2" stroke-width="7" stroke-linecap="round"
-        d="M20 46a32 32 0 0 1 60 0"/>
+  <defs>
+    <linearGradient id="spaceGray" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#BEC2C7"/>
+      <stop offset="1" stop-color="#45484D"/>
+    </linearGradient>
+  </defs>
+  <path fill="#F25022" d="M7 18 45 12v34H7z"/>
+  <path fill="#7FBA00" d="m48 12 47-7v41H48z"/>
+  <path fill="#00A4EF" d="M7 49h38v35L7 77z"/>
+  <path fill="#FFB900" d="M48 49h47v45l-47-9z"/>
+  <g fill="none" stroke="url(#spaceGray)" stroke-linecap="butt">
+    <path stroke-width="6" d="M17 84A45 45 0 1 1 83 84"/>
+    <path stroke-width="6" d="M28 73A31 31 0 1 1 72 73"/>
+    <path stroke-width="6" d="M39 63A17 17 0 1 1 61 63"/>
+  </g>
+  <path fill="url(#spaceGray)" d="m50 55-19 37c-1 2 0 4 3 4h32c3 0 4-2 3-4z"/>
 </svg>

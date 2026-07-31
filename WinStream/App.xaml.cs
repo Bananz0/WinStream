@@ -14,6 +14,11 @@ namespace WinStream
         private TrayIconService? _trayIcon;
         private AppInstance? _appInstance;
 
+        private static string LogDirectory => System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "WinStream",
+            "logs");
+
         public App()
         {
             InitializeComponent();
@@ -31,6 +36,7 @@ namespace WinStream
             }
 
             _appInstance.Activated += OnAppInstanceActivated;
+            WinStream.Core.Logging.AppLog.EnableFileSink(LogDirectory);
             _mainWindow = new MainWindow();
             _mainWindow.Activate();
 

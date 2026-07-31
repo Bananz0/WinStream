@@ -337,16 +337,6 @@
                           Header="Advanced">
                     <StackPanel Spacing="16" Padding="0,8,0,4">
                         <StackPanel Spacing="4">
-                            <ToggleSwitch x:Name="airPlay2GateToggle"
-                                          Header="AirPlay 2 support (experimental)"
-                                          OnContent="On"
-                                          OffContent="Off"
-                                          Toggled="AirPlay2GateToggle_Toggled"/>
-                            <TextBlock Style="{StaticResource HintTextStyle}"
-                                       Text="Required for Macs and newer receivers. You can stream to AirPlay 2 devices or older AirPlay devices, but not both at once."/>
-                        </StackPanel>
-
-                        <StackPanel Spacing="4">
                             <ComboBox x:Name="captureModeComboBox"
                                       Header="Capture method"
                                       MinWidth="220"

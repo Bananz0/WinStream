@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title">
   <title id="title">WinStream monochrome</title>
-  <path fill="currentColor"
-        d="M8 29 44 47v14L9 56zm84 0L56 47v14l35-5zM9 60l34 5-12 26-23 8zm82 0-34 5 12 26 23 8zM50 50 31 91h38z"/>
-  <path fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round"
-        d="M42 50a9 9 0 0 1 16 0M31 49a20 20 0 0 1 38 0M20 46a32 32 0 0 1 60 0"/>
+  <path fill="currentColor" opacity=".34" d="M7 18 45 12v34H7zm41-6 47-7v41H48zM7 49h38v35L7 77zm41 0h47v45l-47-9z"/>
+  <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="butt">
+    <path d="M17 84A45 45 0 1 1 83 84"/>
+    <path d="M28 73A31 31 0 1 1 72 73"/>
+    <path d="M39 63A17 17 0 1 1 61 63"/>
+  </g>
+  <path fill="currentColor" d="m50 55-19 37c-1 2 0 4 3 4h32c3 0 4-2 3-4z"/>
 </svg>

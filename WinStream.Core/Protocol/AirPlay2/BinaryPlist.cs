@@ -12,10 +12,14 @@ public static class BinaryPlist
         var children = new Dictionary<int, int[]>();
         Collect(Normalize(root), objects, children);
 
+        // Object references are fixed width, so a payload with more than 255
+        // objects needs wider refs or every reference past 255 silently wraps.
+        var refSize = objects.Count > 0xFFFF ? 4 : objects.Count > 0xFF ? 2 : 1;
+
         var encoded = new byte[objects.Count][];
         for (var i = 0; i < objects.Count; i++)
         {
-            encoded[i] = EncodeObject(objects[i], children.GetValueOrDefault(i));
+            encoded[i] = EncodeObject(objects[i], children.GetValueOrDefault(i), refSize);
         }
 
         using var stream = new MemoryStream();
@@ -36,7 +40,7 @@ public static class BinaryPlist
 
         stream.Write(new byte[6]);
         stream.WriteByte((byte)offsetSize);
-        stream.WriteByte(1);
+        stream.WriteByte((byte)refSize);
         WriteUInt64Be(stream, (ulong)objects.Count);
         WriteUInt64Be(stream, 0);
         WriteUInt64Be(stream, (ulong)offsetTableOffset);
@@ -169,7 +173,8 @@ public static class BinaryPlist
         {
             int i => (long)i,
             uint u => (long)u,
-            string or bool or byte[] or long => value,
+            float f => (double)f,
+            string or bool or byte[] or long or ulong or double => value,
             Dictionary<string, object> dict => dict,
             List<object> list => list,
             object[] arr => arr,
@@ -178,26 +183,28 @@ public static class BinaryPlist
             _ => throw new NotSupportedException($"Unsupported plist type {value.GetType().Name}")
         };
 
-    private static byte[] EncodeObject(object value, int[]? childRefs) =>
+    private static byte[] EncodeObject(object value, int[]? childRefs, int refSize) =>
         value switch
         {
             string s => EncodeString(s),
             bool b => [(byte)(b ? 0x09 : 0x08)],
             byte[] data => EncodeData(data),
             long l => EncodeInteger(l),
-            IReadOnlyDictionary<string, object> => EncodeRefs(0xD0, childRefs ?? []),
-            IReadOnlyList<object> => EncodeRefs(0xA0, childRefs ?? []),
+            ulong u => EncodeUnsigned(u),
+            double d => EncodeReal(d),
+            IReadOnlyDictionary<string, object> => EncodeRefs(0xD0, childRefs ?? [], refSize),
+            IReadOnlyList<object> => EncodeRefs(0xA0, childRefs ?? [], refSize),
             _ => throw new NotSupportedException($"Unsupported plist type {value.GetType().Name}")
         };
 
-    private static byte[] EncodeRefs(byte baseMarker, int[] refs)
+    private static byte[] EncodeRefs(byte baseMarker, int[] refs, int refSize)
     {
         using var stream = new MemoryStream();
         var count = baseMarker == 0xD0 ? refs.Length / 2 : refs.Length;
         WriteCountMarker(stream, baseMarker, count);
         foreach (var r in refs)
         {
-            stream.WriteByte((byte)r);
+            WriteSizedInt(stream, r, refSize);
         }
 
         return stream.ToArray();
@@ -247,6 +254,31 @@ public static class BinaryPlist
         wide[0] = 0x13;
         BinaryPrimitives.WriteInt64BigEndian(wide.AsSpan(1), value);
         return wide;
+    }
+
+    /// <summary>
+    /// Values above <see cref="long.MaxValue"/> (networkTimeFrac, clock IDs) only survive
+    /// as bplist 16-byte integers; the 8-byte form is read back signed.
+    /// </summary>
+    private static byte[] EncodeUnsigned(ulong value)
+    {
+        if (value <= long.MaxValue)
+        {
+            return EncodeInteger((long)value);
+        }
+
+        var wide = new byte[17];
+        wide[0] = 0x14;
+        BinaryPrimitives.WriteUInt64BigEndian(wide.AsSpan(9), value);
+        return wide;
+    }
+
+    private static byte[] EncodeReal(double value)
+    {
+        var bytes = new byte[9];
+        bytes[0] = 0x23;
+        BinaryPrimitives.WriteDoubleBigEndian(bytes.AsSpan(1), value);
+        return bytes;
     }
 
     private static void WriteCountMarker(Stream stream, byte baseMarker, int count)
@@ -305,6 +337,8 @@ public static class BinaryPlist
             2 => BinaryPrimitives.ReadUInt16BigEndian(data),
             4 => BinaryPrimitives.ReadUInt32BigEndian(data),
             8 => BinaryPrimitives.ReadUInt64BigEndian(data),
+            // 16-byte integers carry unsigned 64-bit values in the low half.
+            16 => BinaryPrimitives.ReadUInt64BigEndian(data[8..]),
             _ => throw new FormatException($"Unsupported int size {size}.")
         };
 
@@ -334,6 +368,7 @@ public static class BinaryPlist
                 _ => throw new FormatException($"Unsupported null/bool marker 0x{marker:X2}.")
             },
             0x10 => ReadInteger(data, offset, info),
+            0x20 => ReadReal(data, offset, info),
             0x40 => ReadData(data, offset, info),
             0x50 => Encoding.UTF8.GetString(ReadData(data, offset, info)),
             0x60 => Encoding.BigEndianUnicode.GetString(ReadData(data, offset, info)),
@@ -346,11 +381,26 @@ public static class BinaryPlist
         return result;
     }
 
-    private static long ReadInteger(ReadOnlySpan<byte> data, int offset, int info)
+    private static object ReadInteger(ReadOnlySpan<byte> data, int offset, int info)
     {
         var size = 1 << info;
         var value = ReadSizedInt(data.Slice(offset + 1, size), size);
-        return unchecked((long)value);
+
+        // Only the 16-byte form is genuinely unsigned; narrower ones are signed.
+        return size == 16 && value > long.MaxValue
+            ? value
+            : unchecked((long)value);
+    }
+
+    private static double ReadReal(ReadOnlySpan<byte> data, int offset, int info)
+    {
+        var size = 1 << info;
+        return size switch
+        {
+            4 => BinaryPrimitives.ReadSingleBigEndian(data.Slice(offset + 1, 4)),
+            8 => BinaryPrimitives.ReadDoubleBigEndian(data.Slice(offset + 1, 8)),
+            _ => throw new FormatException($"Unsupported real size {size}.")
+        };
     }
 
     private static byte[] ReadData(ReadOnlySpan<byte> data, int offset, int info)

@@ -3,7 +3,6 @@ using WinStream.Core.Audio;
 using WinStream.Core.Logging;
 using WinStream.Core.Streaming;
 using WinStream.Network;
-using WinStream.Streaming;
 
 // Headless RAOP diagnostic harness. Drives the same RaopSession the app uses so
 // protocol fixes can be validated without the WinUI shell.
@@ -13,6 +12,16 @@ var listOnly = args.Contains("--list");
 var seconds = ParseInt(args, "--seconds", 15);
 
 AppLog.LineWritten += (_, line) => Console.WriteLine($"  log| {line}");
+
+if (args.Contains("--txt"))
+{
+    return await WinStream.Tools.RaopProbe.TxtDump.RunAsync();
+}
+
+if (args.Contains("--plist-selftest"))
+{
+    return WinStream.Tools.RaopProbe.PlistSelfTest.Run();
+}
 
 Console.WriteLine("== Discovering _raop._tcp receivers ==");
 using var discoveryCts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
@@ -46,7 +55,8 @@ if (listOnly)
 var target = nameFilter is null
     ? devices[0]
     : devices.FirstOrDefault(d =>
-        (d.DisplayName ?? string.Empty).Contains(nameFilter, StringComparison.OrdinalIgnoreCase));
+        (d.DisplayName ?? string.Empty).Contains(nameFilter, StringComparison.OrdinalIgnoreCase) ||
+        (d.IPAddress ?? string.Empty).Equals(nameFilter, StringComparison.OrdinalIgnoreCase));
 
 if (target is null)
 {
@@ -103,6 +113,11 @@ if (args.Contains("--pair"))
     }
 }
 
+if (args.Contains("--setup-diag"))
+{
+    return await WinStream.Tools.RaopProbe.SetupDiagnostics.RunAsync(target);
+}
+
 if (args.Contains("--setup"))
 {
     Console.WriteLine(
@@ -128,7 +143,17 @@ if (args.Contains("--setup"))
 
 if (args.Contains("--stream"))
 {
-    return await RunAp2StreamAsync(target, seconds);
+    // --shared-clock mimics StreamingOrchestrator, which overrides the session's
+    // RTP timestamp with a fan-out clock stamp on every submit.
+    var stream = () => RunAp2StreamAsync(target, seconds, args.Contains("--shared-clock"));
+    return args.Contains("--ptp-listen")
+        ? await WinStream.Tools.RaopProbe.PtpListen.RunAsync(stream)
+        : await stream();
+}
+
+if (args.Contains("--idle"))
+{
+    return await RunAp2IdleAsync(target, seconds);
 }
 
 if (args.Contains("--raw"))
@@ -193,13 +218,58 @@ await session.DisconnectAsync();
 Console.WriteLine("Disconnected cleanly.");
 return session.State == SessionState.Disconnected ? 0 : 1;
 
-static async Task<int> RunAp2StreamAsync(DeviceInfo target, int seconds)
+// Holds a session open without sending any RTP, to see whether the receiver
+// tears down a silent sender.
+static async Task<int> RunAp2IdleAsync(DeviceInfo target, int seconds)
 {
     Console.WriteLine(
-        $"\n== AP2 stream {seconds}s to {target.DisplayName} ({target.IPAddress}:{target.Port}) ==");
-    await using var ap2 = new AirPlay2Session(target, gateEnabled: true);
-    ap2.StateChanged += (_, change) =>
-        Console.WriteLine($"  state| {change.Current}{(change.Reason is null ? "" : $" — {change.Reason}")}");
+        $"\n== AP2 idle {seconds}s (no RTP) to {target.DisplayName} " +
+        $"({target.IPAddress}:{target.Port}) ==");
+    await using var ap2 = new AirPlay2Session(target);
+    var stopwatch = Stopwatch.StartNew();
+    ap2.StateChanged += (_, change) => Console.WriteLine(
+        $"  {stopwatch.Elapsed.TotalSeconds,6:F2}s state| {change.Current}" +
+        $"{(change.Reason is null ? "" : $" — {change.Reason}")}");
+
+    try
+    {
+        using var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await ap2.ConnectAsync(connectCts.Token);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"IDLE_CONNECT_FAIL: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine($"  {stopwatch.Elapsed.TotalSeconds,6:F2}s connected; sending nothing");
+    while (stopwatch.Elapsed < TimeSpan.FromSeconds(seconds))
+    {
+        await Task.Delay(250);
+        if (ap2.State is SessionState.Failed or SessionState.Disconnected)
+        {
+            Console.WriteLine(
+                $"IDLE_DROPPED after {stopwatch.Elapsed.TotalSeconds:F2}s state={ap2.State}");
+            return 1;
+        }
+    }
+
+    Console.WriteLine($"IDLE_SURVIVED {seconds}s state={ap2.State}");
+    await ap2.DisconnectAsync();
+    return 0;
+}
+
+static async Task<int> RunAp2StreamAsync(DeviceInfo target, int seconds, bool useSharedClock = false)
+{
+    Console.WriteLine(
+        $"\n== AP2 stream {seconds}s to {target.DisplayName} ({target.IPAddress}:{target.Port}) " +
+        $"sharedClock={useSharedClock} ==");
+    await using var ap2 = new AirPlay2Session(target);
+    var clock = new WinStream.Core.Streaming.PcmFanoutClock();
+    var elapsed = Stopwatch.StartNew();
+    ap2.StateChanged += (_, change) => Console.WriteLine(
+        $"  {elapsed.Elapsed.TotalSeconds,6:F2}s state| {change.Current}" +
+        $"{(change.Reason is null ? "" : $" — {change.Reason}")}");
     try
     {
         using var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -216,6 +286,11 @@ static async Task<int> RunAp2StreamAsync(DeviceInfo target, int seconds)
     var phase = 0.0;
     const double toneHz = 440.0;
     const int chunkFrames = 441;
+
+    // Pace against an absolute frame schedule. Sleeping a fixed 10 ms per 10 ms
+    // chunk underruns badly, because Windows rounds the sleep up to ~15.6 ms and
+    // the receiver then sees every packet arrive late.
+    var framesProduced = 0L;
     while (stopwatch.Elapsed < TimeSpan.FromSeconds(seconds))
     {
         var pcm = new byte[chunkFrames * format.BlockAlign];
@@ -228,11 +303,27 @@ static async Task<int> RunAp2StreamAsync(DeviceInfo target, int seconds)
             BitConverter.TryWriteBytes(pcm.AsSpan(offset + 2), sample);
         }
 
-        ap2.SubmitPcm(pcm, format);
-        await Task.Delay(10);
+        if (useSharedClock)
+        {
+            ap2.SubmitPcm(pcm, format, clock.Advance((uint)chunkFrames));
+        }
+        else
+        {
+            ap2.SubmitPcm(pcm, format);
+        }
+
+        framesProduced += chunkFrames;
+        var due = TimeSpan.FromSeconds((double)framesProduced / format.SampleRate);
+        var ahead = due - stopwatch.Elapsed;
+        if (ahead > TimeSpan.Zero)
+        {
+            await Task.Delay(ahead);
+        }
+
         if (ap2.State is SessionState.Failed or SessionState.Disconnected)
         {
-            Console.WriteLine($"STREAM_DROPPED state={ap2.State}");
+            Console.WriteLine(
+                $"STREAM_DROPPED after {elapsed.Elapsed.TotalSeconds:F2}s state={ap2.State}");
             return 1;
         }
     }

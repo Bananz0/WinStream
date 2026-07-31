@@ -42,10 +42,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     public IReadOnlyList<DeviceInfo> ConnectedReceivers =>
         _sessions.Values.Select(entry => entry.Receiver).ToList();
 
-    public PcmFanoutClock FanoutClock => _fanoutClock;
-
-    public bool EnableAirPlay2Experimental { get; set; }
-
     public async Task ConnectAsync(
         DeviceInfo receiver,
         IAudioSource audioSource,
@@ -68,6 +64,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
             var protocol = ResolveProtocol(receiver);
             EnsureHomogeneousWithExisting(protocol);
+            EnsureSingleAirPlay2Session(protocol);
 
             EnsureAudioSource(audioSource);
             if (!_audioSource!.IsCapturing)
@@ -77,7 +74,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
             SetAggregate(SessionState.Connecting, $"Connecting {SafeName(receiver)}");
             IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(receiver, EnableAirPlay2Experimental)
+                ? new AirPlay2Session(receiver)
                 : new RaopSession(receiver);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
@@ -234,8 +231,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     private void OnFrameAvailable(object? sender, AudioFrame frame)
     {
-        var frames = EstimateOutputFrames(frame);
-        var tick = _fanoutClock.Advance(frames);
+        // Advance by the same 44.1 kHz stereo frame count PcmPacketBuffer will
+        // emit, not the capture buffer length — otherwise shared timestamps drift
+        // from packetized RTP after resample.
+        var frames = PcmPacketBuffer.EstimateOutputFrames(frame.Pcm.Length, frame.Format);
+        var stamp = _fanoutClock.Advance(frames);
         SessionEntry[] snapshot;
         lock (_sessionsGate)
         {
@@ -246,35 +246,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             if (entry.Session.State is SessionState.Streaming or SessionState.Degraded)
             {
-                entry.Session.SubmitPcm(frame.Pcm, frame.Format, tick.Timestamp);
+                entry.Session.SubmitPcm(frame.Pcm, frame.Format, stamp);
             }
         }
 
         UpdateSilenceWatchdog();
-    }
-
-    private static uint EstimateOutputFrames(AudioFrame frame)
-    {
-        if (frame.Format.Channels <= 0 || frame.Format.BitsPerSample <= 0)
-        {
-            return 0;
-        }
-
-        var bytesPerFrame = frame.Format.Channels * (frame.Format.BitsPerSample / 8);
-        if (bytesPerFrame <= 0)
-        {
-            return 0;
-        }
-
-        var sourceFrames = (uint)(frame.Pcm.Length / bytesPerFrame);
-        if (frame.Format.SampleRate == 44100)
-        {
-            return sourceFrames;
-        }
-
-        return (uint)Math.Max(
-            1,
-            sourceFrames * 44100L / Math.Max(1, frame.Format.SampleRate));
     }
 
     private void UpdateSilenceWatchdog()
@@ -428,7 +404,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             await entry.Session.DisposeAsync().ConfigureAwait(false);
 
             IAirPlaySession replacement = entry.Protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(entry.Receiver, EnableAirPlay2Experimental)
+                ? new AirPlay2Session(entry.Receiver)
                 : new RaopSession(entry.Receiver);
             replacement.StateChanged += OnSessionStateChanged;
             entry.Session = replacement;
@@ -443,27 +419,11 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
             receiver.Features,
             receiver.AirPlayVersion);
-        var preferred = AirPlayCapability.PreferredProtocol(
-            classic,
-            ap2,
-            EnableAirPlay2Experimental);
+        var preferred = AirPlayCapability.PreferredProtocol(classic, ap2);
         if (preferred == AirPlayProtocolKind.Unknown)
         {
             throw new InvalidOperationException(
                 "Receiver does not advertise a supported AirPlay audio protocol.");
-        }
-
-        if (preferred == AirPlayProtocolKind.AirPlay2)
-        {
-            if (!EnableAirPlay2Experimental)
-            {
-                throw new InvalidOperationException(
-                    "This receiver requires AirPlay 2. " +
-                    "Enable the experimental AirPlay 2 gate in settings. " +
-                    "On a Mac, also set AirPlay Receiver to allow Everyone (or anyone on the same network).");
-            }
-
-            return AirPlayProtocolKind.AirPlay2;
         }
 
         return preferred;
@@ -475,6 +435,40 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             .Select(entry => entry.Protocol)
             .Append(incoming);
         AirPlayCapability.EnsureHomogeneousSelection(protocols);
+    }
+
+    /// <summary>
+    /// PTP ports 319/320 are process-exclusive — only one AP2 session can own them.
+    /// </summary>
+    private void EnsureSingleAirPlay2Session(AirPlayProtocolKind incoming)
+    {
+        if (incoming != AirPlayProtocolKind.AirPlay2)
+        {
+            return;
+        }
+
+        if (_sessions.Values.Any(entry => entry.Protocol == AirPlayProtocolKind.AirPlay2))
+        {
+            throw new InvalidOperationException(
+                "Only one AirPlay 2 receiver can be connected at a time " +
+                "(PTP clock ports 319/320 are exclusive).");
+        }
+    }
+
+    /// <summary>UI-facing protocol label from the same decision as ConnectAsync.</summary>
+    public static string DescribePreferredProtocol(DeviceInfo receiver)
+    {
+        var classic = AirPlayCapability.SupportsClassicRaop(receiver.EncryptionTypes);
+        var ap2 = AirPlayCapability.SupportsAirPlay2(
+            !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
+            receiver.Features,
+            receiver.AirPlayVersion);
+        return AirPlayCapability.PreferredProtocol(classic, ap2) switch
+        {
+            AirPlayProtocolKind.AirPlay2 => "AirPlay 2",
+            AirPlayProtocolKind.ClassicRaop => "AirPlay (classic)",
+            _ => "Not supported"
+        };
     }
 
     private async Task FailAllAsync(string reason)

@@ -50,6 +50,7 @@ namespace WinStream
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
             _appWindow.Closing += OnAppWindowClosing;
+            ApplyWindowIcon();
 
             // The window only reports its real DPI once it is shown on a monitor.
             Activated += OnFirstActivated;
@@ -69,9 +70,6 @@ namespace WinStream
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
-            airPlay2GateToggle.IsOn = _captureMonitor.Settings.EnableAirPlay2Experimental;
-            _streamingOrchestrator.EnableAirPlay2Experimental =
-                _captureMonitor.Settings.EnableAirPlay2Experimental;
             captureModeComboBox.SelectedIndex =
                 _captureMonitor.Settings.CaptureMode == CaptureMode.VirtualDriver ? 1 : 0;
             UpdateVolumeReadout(streamVolumeSlider.Value);
@@ -100,6 +98,22 @@ namespace WinStream
             await _captureMonitor.DisposeAsync();
             await _streamingOrchestrator.DisposeAsync();
             Close();
+        }
+
+        /// <summary>
+        /// A WinUI window does not inherit the executable's embedded icon, so the taskbar
+        /// button and Alt+Tab entry stay blank unless the icon is assigned explicitly.
+        /// </summary>
+        private void ApplyWindowIcon()
+        {
+            var iconPath = System.IO.Path.Combine(
+                AppContext.BaseDirectory,
+                "Assets",
+                "WinStreamTray.ico");
+            if (System.IO.File.Exists(iconPath))
+            {
+                _appWindow.SetIcon(iconPath);
+            }
         }
 
         private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
@@ -264,13 +278,6 @@ namespace WinStream
             var format = _captureMonitor.Format;
             captureStatusText.Text = format is null ? "Capturing" : format.ToString();
             captureStatusText.Foreground = ThemeBrush("SystemFillColorSuccessBrush");
-        }
-
-        private void AirPlay2GateToggle_Toggled(object sender, RoutedEventArgs e)
-        {
-            var enabled = airPlay2GateToggle.IsOn;
-            _streamingOrchestrator.EnableAirPlay2Experimental = enabled;
-            _captureMonitor.SetAirPlay2Experimental(enabled);
         }
 
         private void CaptureModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -598,20 +605,7 @@ namespace WinStream
 
         private string CreateDeviceSummary(DeviceInfo device)
         {
-            var classic = AirPlayCapability.SupportsClassicRaop(device.EncryptionTypes);
-            var airPlay2 = AirPlayCapability.SupportsAirPlay2(
-                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
-                device.Features,
-                device.AirPlayVersion);
-            var protocol = AirPlayCapability.PreferredProtocol(
-                classic,
-                airPlay2,
-                airPlay2GateToggle.IsOn) switch
-            {
-                AirPlayProtocolKind.AirPlay2 => "AirPlay 2",
-                AirPlayProtocolKind.ClassicRaop => "AirPlay (classic)",
-                _ => "Not supported"
-            };
+            var protocol = StreamingOrchestrator.DescribePreferredProtocol(device);
 
             return $"Model: {Fallback(device.Model)}\n" +
                    $"Manufacturer: {Fallback(device.Manufacturer)}\n" +

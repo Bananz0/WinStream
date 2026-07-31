@@ -69,6 +69,39 @@ public sealed class PcmPacketBuffer
         return packets;
     }
 
+    /// <summary>
+    /// Approximate 44.1 kHz stereo frames that <see cref="Push"/> will emit for
+    /// this buffer. Used by the fan-out clock so shared timestamps track RTP.
+    /// </summary>
+    public static uint EstimateOutputFrames(int pcmByteLength, AudioFormat format)
+    {
+        if (format.Channels <= 0 || format.BitsPerSample <= 0)
+        {
+            return 0;
+        }
+
+        var bytesPerFrame = format.Channels * (format.BitsPerSample / 8);
+        if (bytesPerFrame <= 0)
+        {
+            return 0;
+        }
+
+        var sourceFrames = (uint)(pcmByteLength / bytesPerFrame);
+        if (sourceFrames == 0)
+        {
+            return 0;
+        }
+
+        if (format.SampleRate == TargetRate)
+        {
+            return sourceFrames;
+        }
+
+        return (uint)Math.Max(
+            1,
+            sourceFrames * (long)TargetRate / Math.Max(1, format.SampleRate));
+    }
+
     public void Reset()
     {
         _filled = 0;

@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using WinStream.Core.Protocol.AirPlay2;
 
@@ -86,6 +88,59 @@ public class EncryptedRtspTests
     }
 
     [Fact]
+    public void BinaryPlist_reads_real_values()
+    {
+        // Receivers report initialVolume as a real; hand-built because the writer
+        // only emits the types the sender needs.
+        var document = new List<byte>();
+        document.AddRange("bplist00"u8.ToArray());
+        document.AddRange([0xD1, 0x01, 0x02]);   // dict, 1 entry: key ref 1, value ref 2
+        document.AddRange([0x51, (byte)'v']);    // ascii string "v"
+        document.Add(0x23);                      // real, 8 bytes
+        var real = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteDoubleBigEndian(real, -20.0);
+        document.AddRange(real);
+
+        var tableOffset = document.Count;
+        document.AddRange([8, 11, 13]);          // offset table, 1 byte per offset
+        document.AddRange(new byte[6]);
+        document.Add(1);                         // offsetSize
+        document.Add(1);                         // refSize
+        AppendUInt64(document, 3);               // object count
+        AppendUInt64(document, 0);               // top object
+        AppendUInt64(document, (ulong)tableOffset);
+
+        var root = Assert.IsType<Dictionary<string, object?>>(
+            BinaryPlist.Read(document.ToArray()));
+        Assert.Equal(-20.0, Assert.IsType<double>(root["v"]));
+
+        static void AppendUInt64(List<byte> target, ulong value)
+        {
+            var buffer = new byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(buffer, value);
+            target.AddRange(buffer);
+        }
+    }
+
+    [Fact]
+    public void BinaryPlist_widens_refs_past_255_objects()
+    {
+        // 200 entries => 401 objects, so single-byte refs would wrap silently.
+        var original = new Dictionary<string, object>();
+        for (var i = 0; i < 200; i++)
+        {
+            original[$"key{i:D3}"] = $"value{i:D3}";
+        }
+
+        var root = Assert.IsType<Dictionary<string, object?>>(
+            BinaryPlist.Read(BinaryPlist.Write(original)));
+
+        Assert.Equal(200, root.Count);
+        Assert.Equal("value000", root["key000"]);
+        Assert.Equal("value199", root["key199"]);
+    }
+
+    [Fact]
     public void BinaryPlist_reads_stream_ports()
     {
         var response = BinaryPlist.Write(new Dictionary<string, object>
@@ -105,5 +160,105 @@ public class EncryptedRtspTests
         Assert.True(BinaryPlist.TryGetStreamPorts(root, out var data, out var control));
         Assert.Equal(58169, data);
         Assert.Equal(58170, control);
+    }
+
+    [Fact]
+    public void EventChannel_TryConsumeRequest_echoes_cseq_and_skips_body()
+    {
+        var pending = new System.Text.StringBuilder(
+            "POST /command RTSP/1.0\r\nCSeq: 7\r\nContent-Length: 4\r\n\r\nabcd" +
+            "POST /feedback RTSP/1.0\r\nCSeq: 8\r\n\r\n");
+
+        Assert.True(EventChannel.TryConsumeRequest(pending, out var first));
+        Assert.Equal("7", first);
+        Assert.True(EventChannel.TryConsumeRequest(pending, out var second));
+        Assert.Equal("8", second);
+        Assert.False(EventChannel.TryConsumeRequest(pending, out _));
+        Assert.Equal(0, pending.Length);
+    }
+
+    [Fact]
+    public void SessionSetup_payload_advertises_ptp_and_clock_ports()
+    {
+        var payload = EncryptedRtspClient.BuildSessionSetupPayload(
+            localAddress: "192.168.1.100",
+            host: "192.168.1.10",
+            deviceId: "AA:BB:CC:DD:EE:FF",
+            sessionUuid: "SESSION");
+
+        Assert.Equal("PTP", payload["timingProtocol"]);
+        var peer = Assert.IsType<Dictionary<string, object>>(payload["timingPeerInfo"]);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", peer["ID"]);
+        var ports = Assert.IsType<Dictionary<string, object>>(peer["ClockPorts"]);
+        Assert.Equal((long)PtpClock.PortNumber, ports["192.168.1.100"]);
+        Assert.Equal((long)PtpClock.PortNumber, ports["192.168.1.10"]);
+        Assert.Equal(
+            unchecked((long)PtpClock.ClockIdFromDeviceId("AA:BB:CC:DD:EE:FF")),
+            peer["ClockID"]);
+    }
+
+    [Fact]
+    public async Task EventChannel_DisposeAsync_is_idempotent_before_connect()
+    {
+        var channel = new EventChannel();
+        await channel.DisposeAsync();
+        await channel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task EventChannel_connect_token_does_not_own_loop_and_dispose_stops_it()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var connectCancellation = new CancellationTokenSource();
+        var accept = listener.AcceptTcpClientAsync();
+        await using var channel = new EventChannel();
+        var faulted = false;
+        channel.Faulted += (_, _) => faulted = true;
+
+        await channel.ConnectAsync(
+            IPAddress.Loopback.ToString(),
+            port,
+            new byte[32],
+            new byte[32],
+            connectCancellation.Token);
+        using var accepted = await accept;
+
+        await connectCancellation.CancelAsync();
+        await Task.Delay(25);
+        Assert.False(faulted);
+
+        await channel.DisposeAsync().AsTask().WaitAsync(
+            TimeSpan.FromSeconds(1));
+        Assert.False(faulted);
+    }
+
+    [Fact]
+    public async Task EventChannel_remote_close_raises_faulted()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var accept = listener.AcceptTcpClientAsync();
+        await using var channel = new EventChannel();
+        var faulted = new TaskCompletionSource<Exception>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.Faulted += (_, error) => faulted.TrySetResult(error);
+
+        await channel.ConnectAsync(
+            IPAddress.Loopback.ToString(),
+            port,
+            new byte[32],
+            new byte[32],
+            CancellationToken.None);
+        using (var accepted = await accept)
+        {
+            accepted.Close();
+        }
+
+        var error = await faulted.Task.WaitAsync(
+            TimeSpan.FromSeconds(1));
+        Assert.IsType<IOException>(error);
     }
 }

@@ -13,11 +13,6 @@ public sealed class AppSettings
     public bool MonitorCapture { get; set; }
 
     /// <summary>
-    /// Experimental AirPlay 2 path. Off by default until pairing/PTP validation is green.
-    /// </summary>
-    public bool EnableAirPlay2Experimental { get; set; }
-
-    /// <summary>
     /// Set once the user dismisses the hint about enabling AirPlay Receiver on a Mac.
     /// </summary>
     public bool AirPlayReceiverHintDismissed { get; set; }
@@ -26,4 +21,10 @@ public sealed class AppSettings
     /// Store builds use loopback. VirtualDriver requires the optional sideload driver.
     /// </summary>
     public CaptureMode CaptureMode { get; set; } = CaptureMode.Loopback;
+
+    /// <summary>
+    /// Locally administered MAC used as the AirPlay 2 sender deviceID / PTP peer ID.
+    /// Generated once per install when missing.
+    /// </summary>
+    public string? SenderDeviceId { get; set; }
 }

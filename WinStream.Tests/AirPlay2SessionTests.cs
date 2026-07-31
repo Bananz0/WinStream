@@ -1,103 +1,141 @@
-using WinStream.Core.Protocol.AirPlay2;
 using WinStream.Core.Streaming;
 using WinStream.Network;
-using WinStream.Streaming;
 
 namespace WinStream.Tests;
 
 public class AirPlay2SessionTests
 {
     [Fact]
-    public async Task Connect_with_gate_disabled_fails_clearly()
-    {
-        var receiver = new DeviceInfo
-        {
-            DisplayName = "Test Mac",
-            IPAddress = "127.0.0.1",
-            Port = 7000,
-            DeviceID = "AA:BB:CC:DD:EE:FF"
-        };
-
-        await using var session = new AirPlay2Session(receiver, gateEnabled: false);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => session.ConnectAsync());
-        Assert.Contains("gated", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(SessionState.Failed, session.State);
-    }
-
-    [Fact]
-    public void SubmitPcm_is_noop_when_not_streaming()
+    public void SubmitPcm_is_noop_when_disconnected()
     {
         var receiver = new DeviceInfo
         {
             DisplayName = "Test",
             IPAddress = "127.0.0.1",
-            Port = 7000
+            Port = 7000,
+            DeviceID = "AA:BB:CC:DD:EE:FF"
         };
-        var session = new AirPlay2Session(receiver, gateEnabled: true);
+
+        var session = new AirPlay2Session(receiver);
+        Assert.Equal(SessionState.Disconnected, session.State);
+
+        // Must not throw when no stream is active.
         session.SubmitPcm(new byte[352 * 4], new WinStream.Core.Audio.AudioFormat(44100, 2, 16));
+    }
+
+    [Fact]
+    public void SharedMediaClockAlignment_adopts_shared_stamp_only_once()
+    {
+        uint rtp = 100;
+        var pending = true;
+
+        Assert.True(SharedMediaClockAlignment.Freeze(ref rtp, ref pending, 500));
+        Assert.Equal(500u, rtp);
+        Assert.False(pending);
+
+        Assert.False(SharedMediaClockAlignment.Freeze(ref rtp, ref pending, 900));
+        Assert.Equal(500u, rtp);
+    }
+
+    [Fact]
+    public void SharedMediaClockAlignment_freezes_existing_base_without_shared_stamp()
+    {
+        // The unshared path keeps its own base, but must still settle so the
+        // timeline anchor knows the timebase will no longer move.
+        uint rtp = 100;
+        var pending = true;
+
+        Assert.True(SharedMediaClockAlignment.Freeze(ref rtp, ref pending, null));
+        Assert.Equal(100u, rtp);
+        Assert.False(pending);
+
+        // A late shared stamp must not rebase a stream already anchored.
+        Assert.False(SharedMediaClockAlignment.Freeze(ref rtp, ref pending, 900));
+        Assert.Equal(100u, rtp);
+    }
+
+    [Fact]
+    public async Task TimelineAnchorGate_does_not_publish_before_freeze()
+    {
+        var frozen = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var published = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var run = TimelineAnchorGate.RunAfterFreezeAsync(
+            frozen.Task,
+            _ =>
+            {
+                published.TrySetResult();
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        await Task.Delay(25);
+        Assert.False(published.Task.IsCompleted);
+
+        frozen.SetResult();
+        await run;
+        Assert.True(published.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task TimelineAnchorGate_cancellation_prevents_publication()
+    {
+        var frozen = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var published = false;
+        using var cancellation = new CancellationTokenSource();
+
+        var run = TimelineAnchorGate.RunAfterFreezeAsync(
+            frozen.Task,
+            _ =>
+            {
+                published = true;
+                return Task.CompletedTask;
+            },
+            cancellation.Token);
+
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.False(published);
+    }
+
+    [Fact]
+    public async Task Disconnect_when_already_disconnected_is_noop()
+    {
+        var receiver = new DeviceInfo
+        {
+            DisplayName = "Test",
+            IPAddress = "127.0.0.1",
+            Port = 7000,
+            DeviceID = "AA:BB:CC:DD:EE:FF"
+        };
+
+        await using var session = new AirPlay2Session(receiver);
+        await session.DisconnectAsync();
         Assert.Equal(SessionState.Disconnected, session.State);
     }
-}
 
-public class HkpPairSetupClientTests
-{
     [Fact]
-    public async Task PairAsync_maps_470_to_everyone_guidance()
+    public async Task Streaming_fault_cancels_pending_freeze_barrier()
     {
-        var http = System.Text.Encoding.ASCII.GetBytes(
-            "HTTP/1.1 470 Connection Authorization Required\r\nContent-Length: 0\r\n\r\n");
-        await using var stream = new ScriptedDuplexStream(http);
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => HkpPairSetupClient.PairAsync(stream, "127.0.0.1", 7000));
-        Assert.Contains("Everyone", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("brew", ex.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private sealed class ScriptedDuplexStream : Stream
-    {
-        private readonly byte[] _response;
-        private int _readOffset;
-
-        public ScriptedDuplexStream(byte[] response) => _response = response;
-
-        public override bool CanRead => true;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => throw new NotSupportedException();
-        public override long Position
+        var receiver = new DeviceInfo
         {
-            get => throw new NotSupportedException();
-            set => throw new NotSupportedException();
-        }
+            DisplayName = "Test",
+            IPAddress = "127.0.0.1",
+            Port = 7000,
+            DeviceID = "AA:BB:CC:DD:EE:FF"
+        };
 
-        public override void Flush()
-        {
-        }
+        await using var session = new AirPlay2Session(receiver);
+        var freeze = session.SeedStreamingFreezeBarrierForTests();
+        Assert.Equal(SessionState.Streaming, session.State);
+        Assert.False(freeze.IsCompleted);
 
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            var remaining = _response.Length - _readOffset;
-            if (remaining <= 0)
-            {
-                return 0;
-            }
+        session.FailStreamingForTests("AirPlay event channel closed.");
 
-            var n = Math.Min(count, remaining);
-            Buffer.BlockCopy(_response, _readOffset, buffer, offset, n);
-            _readOffset += n;
-            return n;
-        }
-
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            // Discard request bytes; response is pre-scripted.
-        }
-
-        public override long Seek(long offset, SeekOrigin origin) =>
-            throw new NotSupportedException();
-
-        public override void SetLength(long value) => throw new NotSupportedException();
+        Assert.Equal(SessionState.Failed, session.State);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => freeze);
     }
 }

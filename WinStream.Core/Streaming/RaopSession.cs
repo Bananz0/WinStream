@@ -9,11 +9,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Audio;
 using WinStream.Core.Protocol.Raop;
-using WinStream.Core.Streaming;
 using WinStream.Network;
 using WinStream.Networking;
 
-namespace WinStream.Streaming;
+namespace WinStream.Core.Streaming;
 
 public sealed class RaopSession : IAirPlaySession
 {
@@ -46,6 +45,7 @@ public sealed class RaopSession : IAirPlaySession
     private uint _ssrc;
     private bool _sendMarker = true;
     private bool _firstSync = true;
+    private bool _rtpBasePending = true;
     private float _volumeDb = -20f;
     private bool _disposed;
 
@@ -151,6 +151,7 @@ public sealed class RaopSession : IAirPlaySession
                 _ssrc = (uint)RandomNumberGenerator.GetInt32(1, int.MaxValue);
                 _sendMarker = true;
                 _firstSync = true;
+                _rtpBasePending = true;
                 _pcmBuffer.Reset();
 
                 var record = await _rtspClient.SendRecordAsync(
@@ -193,10 +194,10 @@ public sealed class RaopSession : IAirPlaySession
         byte[][] packets;
         lock (_mediaGate)
         {
-            if (sharedMediaTimestamp.HasValue)
-            {
-                _rtpTimestamp = sharedMediaTimestamp.Value;
-            }
+            SharedMediaClockAlignment.Freeze(
+                ref _rtpTimestamp,
+                ref _rtpBasePending,
+                sharedMediaTimestamp);
 
             packets = new System.Collections.Generic.List<byte[]>(
                 _pcmBuffer.Push(pcm.Span, format)).ToArray();
@@ -594,7 +595,7 @@ public sealed class RaopSession : IAirPlaySession
         {
             throw new InvalidOperationException(
                 "Receiver does not advertise classic RAOP encryption (et=0 or et=1). " +
-                "If this is a Mac, enable AirPlay 2 experimental and set AirPlay Receiver to Everyone.");
+                "If this is a Mac, set AirPlay Receiver to Everyone (or anyone on the same network).");
         }
     }
 

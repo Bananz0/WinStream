@@ -9,20 +9,31 @@ public class PcmFanoutClockTests
     {
         var clock = new PcmFanoutClock(initialTimestamp: 1000);
 
-        var tick = clock.Advance(352);
-        var consumerA = tick.Timestamp;
-        var consumerB = tick.Timestamp;
-
-        Assert.Equal(1000u, consumerA);
-        Assert.Equal(consumerA, consumerB);
+        var stamp = clock.Advance(352);
+        Assert.Equal(1000u, stamp);
         Assert.Equal(1352u, clock.CurrentTimestamp);
     }
 
     [Fact]
-    public void Peek_does_not_advance()
+    public void Default_constructor_starts_above_typical_latency_window()
     {
-        var clock = new PcmFanoutClock(50);
-        Assert.Equal(50u, clock.Peek().Timestamp);
-        Assert.Equal(50u, clock.CurrentTimestamp);
+        var clock = new PcmFanoutClock();
+        Assert.True(clock.CurrentTimestamp > 88_200u);
+    }
+
+    [Fact]
+    public void Reset_zero_picks_a_safe_non_zero_base()
+    {
+        var clock = new PcmFanoutClock(100);
+        clock.Reset(0);
+        Assert.True(clock.CurrentTimestamp > 88_200u);
+    }
+
+    [Fact]
+    public void Reset_explicit_sets_value()
+    {
+        var clock = new PcmFanoutClock();
+        clock.Reset(42);
+        Assert.Equal(42u, clock.CurrentTimestamp);
     }
 }

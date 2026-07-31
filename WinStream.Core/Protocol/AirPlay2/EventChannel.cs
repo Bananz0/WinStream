@@ -43,6 +43,7 @@ public sealed class EventChannel : IAsyncDisposable
     {
         try
         {
+            var pending = new StringBuilder();
             while (!cancellationToken.IsCancellationRequested)
             {
                 var chunk = await _crypto!.ReadNextChunkAsync(cancellationToken)
@@ -52,13 +53,17 @@ public sealed class EventChannel : IAsyncDisposable
                     continue;
                 }
 
-                var text = Encoding.ASCII.GetString(chunk);
-                if (text.Contains("POST /command", StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("POST /feedback", StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains("\r\n\r\n", StringComparison.Ordinal))
+                pending.Append(Encoding.ASCII.GetString(chunk));
+                while (TryConsumeRequest(pending, out var cSeq))
                 {
-                    var reply = Encoding.ASCII.GetBytes("RTSP/1.0 200 OK\r\nCSeq: 0\r\n\r\n");
-                    await _crypto.WritePlaintextAsync(reply, cancellationToken)
+                    // Bare 200 only — Content-Length / Audio-Latency on this reply
+                    // corrupts the receiver realtime timeline (akustikrausch #90).
+                    var reply = string.IsNullOrEmpty(cSeq)
+                        ? "RTSP/1.0 200 OK\r\nServer: AirTunes/550.10\r\n\r\n"
+                        : $"RTSP/1.0 200 OK\r\nServer: AirTunes/550.10\r\nCSeq: {cSeq}\r\n\r\n";
+                    await _crypto.WritePlaintextAsync(
+                            Encoding.ASCII.GetBytes(reply),
+                            cancellationToken)
                         .ConfigureAwait(false);
                 }
             }
@@ -71,6 +76,52 @@ public sealed class EventChannel : IAsyncDisposable
         {
             Faulted?.Invoke(this, ex);
         }
+    }
+
+    /// <summary>Parse one complete RTSP request from the buffer; echo its CSeq.</summary>
+    public static bool TryConsumeRequest(StringBuilder pending, out string? cSeq)
+    {
+        cSeq = null;
+        var text = pending.ToString();
+        var headEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        if (headEnd < 0)
+        {
+            return false;
+        }
+
+        var header = text[..headEnd];
+        var contentLength = 0;
+        foreach (var rawLine in header.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            var colon = line.IndexOf(':');
+            if (colon <= 0)
+            {
+                continue;
+            }
+
+            var name = line[..colon].Trim();
+            var value = line[(colon + 1)..].Trim();
+            if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(value, out var len) &&
+                len > 0)
+            {
+                contentLength = len;
+            }
+            else if (name.Equals("CSeq", StringComparison.OrdinalIgnoreCase))
+            {
+                cSeq = value;
+            }
+        }
+
+        var total = headEnd + 4 + contentLength;
+        if (text.Length < total)
+        {
+            return false;
+        }
+
+        pending.Remove(0, total);
+        return true;
     }
 
     public async ValueTask DisposeAsync()

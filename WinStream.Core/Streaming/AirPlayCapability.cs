@@ -21,7 +21,8 @@ public enum RaopEncryptionMode
 }
 
 /// <summary>
-/// Capability helpers for classic RAOP vs AirPlay 2. AP2 streaming remains gated.
+/// Capability helpers for classic RAOP vs AirPlay 2. Prefers AirPlay 2 when
+/// the receiver advertises it; otherwise falls back to classic RAOP.
 /// </summary>
 public static class AirPlayCapability
 {
@@ -91,28 +92,16 @@ public static class AirPlayCapability
         return false;
     }
 
-    public static AirPlayProtocolKind PreferredProtocol(
-        bool classic,
-        bool airPlay2,
-        bool airPlay2GateEnabled)
+    public static AirPlayProtocolKind PreferredProtocol(bool classic, bool airPlay2)
     {
-        if (classic && airPlay2)
+        if (airPlay2)
         {
-            return airPlay2GateEnabled
-                ? AirPlayProtocolKind.AirPlay2
-                : AirPlayProtocolKind.ClassicRaop;
+            return AirPlayProtocolKind.AirPlay2;
         }
 
         if (classic)
         {
             return AirPlayProtocolKind.ClassicRaop;
-        }
-
-        if (airPlay2)
-        {
-            return airPlay2GateEnabled
-                ? AirPlayProtocolKind.AirPlay2
-                : AirPlayProtocolKind.Unknown;
         }
 
         return AirPlayProtocolKind.Unknown;

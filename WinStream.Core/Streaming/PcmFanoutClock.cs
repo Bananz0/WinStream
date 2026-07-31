@@ -1,6 +1,6 @@
-namespace WinStream.Core.Streaming;
+using System.Security.Cryptography;
 
-public readonly record struct FanoutTick(uint Timestamp, long HostTimestamp);
+namespace WinStream.Core.Streaming;
 
 /// <summary>
 /// Shared media clock so every fan-out consumer sees the same stamp for a PCM tick.
@@ -10,9 +10,16 @@ public sealed class PcmFanoutClock
     private readonly object _gate = new();
     private uint _timestamp;
 
+    /// <summary>
+    /// Starts at a random RTP timestamp in the middle of the uint range so
+    /// receivers that subtract a few seconds of latency never wrap under zero.
+    /// Passing 0 still means "pick a safe random base", not literal zero.
+    /// </summary>
     public PcmFanoutClock(uint initialTimestamp = 0)
     {
-        _timestamp = initialTimestamp;
+        _timestamp = initialTimestamp == 0
+            ? (uint)RandomNumberGenerator.GetInt32(1 << 20, int.MaxValue)
+            : initialTimestamp;
     }
 
     public uint CurrentTimestamp
@@ -26,21 +33,13 @@ public sealed class PcmFanoutClock
         }
     }
 
-    public FanoutTick Peek()
+    public uint Advance(uint frames)
     {
         lock (_gate)
         {
-            return new FanoutTick(_timestamp, Environment.TickCount64);
-        }
-    }
-
-    public FanoutTick Advance(uint frames)
-    {
-        lock (_gate)
-        {
-            var tick = new FanoutTick(_timestamp, Environment.TickCount64);
+            var stamp = _timestamp;
             _timestamp += frames;
-            return tick;
+            return stamp;
         }
     }
 
@@ -48,7 +47,9 @@ public sealed class PcmFanoutClock
     {
         lock (_gate)
         {
-            _timestamp = timestamp;
+            _timestamp = timestamp == 0
+                ? (uint)RandomNumberGenerator.GetInt32(1 << 20, int.MaxValue)
+                : timestamp;
         }
     }
 }

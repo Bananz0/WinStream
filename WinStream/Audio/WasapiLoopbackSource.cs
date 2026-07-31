@@ -18,6 +18,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private MMDevice? _device;
     private WasapiLoopbackCapture? _capture;
     private AudioFormat? _format;
+    private CaptureSampleFormat _sourceFormat;
     private string? _requestedEndpointId;
     private string? _activeEndpointId;
     private bool _disposed;
@@ -143,7 +144,10 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _activeEndpointId = _device.ID;
         _capture = new WasapiLoopbackCapture(_device);
         var waveFormat = _capture.WaveFormat;
-        _format = new AudioFormat(waveFormat.SampleRate, waveFormat.Channels, waveFormat.BitsPerSample);
+        _sourceFormat = ResolveSampleFormat(waveFormat);
+
+        // The pipeline downstream is 16-bit only, so publish the normalized format.
+        _format = new AudioFormat(waveFormat.SampleRate, waveFormat.Channels, 16);
         _capture.DataAvailable += OnDataAvailable;
         _capture.RecordingStopped += OnRecordingStopped;
         _capture.StartRecording();
@@ -190,9 +194,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
             return;
         }
 
-        var copy = new byte[e.BytesRecorded];
-        Buffer.BlockCopy(e.Buffer, 0, copy, 0, e.BytesRecorded);
-        var rms = RmsCalculator.CalculatePcm16(copy.AsSpan(0, e.BytesRecorded));
+        var copy = Pcm16Converter.ToPcm16(e.Buffer.AsSpan(0, e.BytesRecorded), _sourceFormat);
+        var rms = RmsCalculator.CalculatePcm16(copy);
         lock (_gate)
         {
             _currentRms = rms;
@@ -217,6 +220,41 @@ public sealed class WasapiLoopbackSource : IAudioSource
                 IsCapturing = false;
             }
         }
+    }
+
+    private static CaptureSampleFormat ResolveSampleFormat(WaveFormat waveFormat)
+    {
+        var encoding = waveFormat.Encoding;
+        if (waveFormat is WaveFormatExtensible extensible)
+        {
+            try
+            {
+                encoding = extensible.ToStandardWaveFormat().Encoding;
+            }
+            catch (InvalidOperationException)
+            {
+                // Unknown subformat: 32-bit shared-mode mixes are float in practice.
+                encoding = waveFormat.BitsPerSample == 32
+                    ? WaveFormatEncoding.IeeeFloat
+                    : WaveFormatEncoding.Pcm;
+            }
+        }
+
+        return encoding switch
+        {
+            WaveFormatEncoding.IeeeFloat => waveFormat.BitsPerSample == 64
+                ? CaptureSampleFormat.Float64
+                : CaptureSampleFormat.Float32,
+            WaveFormatEncoding.Pcm => waveFormat.BitsPerSample switch
+            {
+                16 => CaptureSampleFormat.Pcm16,
+                24 => CaptureSampleFormat.Pcm24,
+                32 => CaptureSampleFormat.Pcm32,
+                _ => throw new NotSupportedException(
+                    $"Unsupported capture depth {waveFormat.BitsPerSample}-bit.")
+            },
+            _ => throw new NotSupportedException($"Unsupported capture encoding {encoding}.")
+        };
     }
 
     private static MMDevice ResolveDevice(MMDeviceEnumerator enumerator, string? endpointId)

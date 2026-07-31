@@ -66,37 +66,44 @@ namespace WinStream.Network
         {
             try
             {
-                var adapters = GetMulticastCapableAdapters();
+                var adapters = MulticastAdapters.Usable();
                 var raopResults = await ZeroconfResolver.ResolveAsync("_raop._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken, netInterfacesToSendRequestOn: adapters);
                 var airplayResults = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken, netInterfacesToSendRequestOn: adapters);
 
-                var currentDevices = raopResults.Select(host => new DeviceInfo
+                var currentDevices = raopResults.Select(host =>
                 {
-                    DisplayName = ExtractDeviceName(host, airplayResults),
-                    IPAddress = host.IPAddresses.FirstOrDefault(),
-                    Port = host.Services.FirstOrDefault().Value.Port,
-                    ToolTipText = $"IP Address: {host.IPAddresses.FirstOrDefault()}",
-                    Manufacturer = GetTxtRecordValue(host, "manufacturer"),
-                    Model = GetTxtRecordValue(host, "model"),
-                    FirmwareVersion = GetTxtRecordValue(host, "fv"),
-                    OSVersion = GetTxtRecordValue(host, "osvers"),
-                    BluetoothAddress = GetTxtRecordValue(host, "btaddr"),
-                    DeviceID = GetTxtRecordValue(host, "deviceid"),
-                    ProtocolVersion = GetTxtRecordValue(host, "protovers"),
-                    AirPlayVersion = GetTxtRecordValue(host, "srcvers"),
-                    SerialNumber = GetTxtRecordValue(host, "serialNumber"),
-                    PublicCUAirPlayPairingIdentity = GetTxtRecordValue(host, "pi"),
-                    PublicCUSystemPairingIdentity = GetTxtRecordValue(host, "psi"),
-                    PublicKey = GetTxtRecordValue(host, "pk"),
-                    EncryptionTypes = GetTxtRecordValue(host, "et"),
-                    HouseholdID = GetTxtRecordValue(host, "hmid"),
-                    GroupUUID = GetTxtRecordValue(host, "gid"),
-                    IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
-                    RequiredSenderFeatures = TryParseLong(GetTxtRecordValue(host, "rsf")),
-                    SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags")),
-                    FeaturesRaw = GetTxtRecordValue(host, "features"),
-                    Features = WinStream.Core.Streaming.AirPlayCapability.ParseFeatures(
-                        GetTxtRecordValue(host, "features"))
+                    // _raop advertises ft/vs/am; features/srcvers/pi only exist on
+                    // _airplay, so AirPlay 2 detection needs both records merged.
+                    var txt = MergeTxtRecords(host, FindAirPlayHost(host, airplayResults));
+                    var features = FirstValue(txt, "features", "ft");
+
+                    return new DeviceInfo
+                    {
+                        DisplayName = ExtractDeviceName(host, airplayResults),
+                        IPAddress = host.IPAddresses.FirstOrDefault(),
+                        Port = host.Services.FirstOrDefault().Value.Port,
+                        ToolTipText = $"IP Address: {host.IPAddresses.FirstOrDefault()}",
+                        Manufacturer = FirstValue(txt, "manufacturer"),
+                        Model = FirstValue(txt, "model", "am"),
+                        FirmwareVersion = FirstValue(txt, "fv"),
+                        OSVersion = FirstValue(txt, "osvers"),
+                        BluetoothAddress = FirstValue(txt, "btaddr"),
+                        DeviceID = FirstValue(txt, "deviceid"),
+                        ProtocolVersion = FirstValue(txt, "protovers"),
+                        AirPlayVersion = FirstValue(txt, "srcvers", "vs"),
+                        SerialNumber = FirstValue(txt, "serialNumber"),
+                        PublicCUAirPlayPairingIdentity = FirstValue(txt, "pi"),
+                        PublicCUSystemPairingIdentity = FirstValue(txt, "psi"),
+                        PublicKey = FirstValue(txt, "pk"),
+                        EncryptionTypes = FirstValue(txt, "et"),
+                        HouseholdID = FirstValue(txt, "hmid"),
+                        GroupUUID = FirstValue(txt, "gid"),
+                        IsGroupLeader = TryParseBoolean(FirstValue(txt, "igl")),
+                        RequiredSenderFeatures = TryParseLong(FirstValue(txt, "rsf")),
+                        SystemFlags = TryParseLong(FirstValue(txt, "flags")),
+                        FeaturesRaw = features,
+                        Features = WinStream.Core.Streaming.AirPlayCapability.ParseFeatures(features)
+                    };
                 }).ToList();
 
                 ProcessDiscoveredDevices(currentDevices);
@@ -139,59 +146,74 @@ namespace WinStream.Network
             }
         }
 
-        /// <summary>
-        /// Zeroconf throws NetworkInformationException (10043) when an adapter has no
-        /// IPv4 stack, so only hand it adapters that can actually carry mDNS.
-        /// </summary>
-        private static System.Net.NetworkInformation.NetworkInterface[] GetMulticastCapableAdapters()
+        private static Dictionary<string, string> MergeTxtRecords(params IZeroconfHost[] hosts)
         {
-            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
-                .Where(IsUsableAdapter)
-                .ToArray();
-        }
+            var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        private static bool IsUsableAdapter(System.Net.NetworkInformation.NetworkInterface adapter)
-        {
-            if (adapter.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up ||
-                !adapter.SupportsMulticast ||
-                adapter.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback ||
-                adapter.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
+            foreach (var host in hosts)
             {
-                return false;
-            }
+                if (host?.Services == null) continue;
 
-            try
-            {
-                var properties = adapter.GetIPProperties();
-                properties.GetIPv4Properties();
-                return properties.UnicastAddresses.Any(address =>
-                    address.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-            }
-            catch (System.Net.NetworkInformation.NetworkInformationException)
-            {
-                return false;
-            }
-            catch (PlatformNotSupportedException)
-            {
-                return false;
-            }
-        }
-
-        private static string GetTxtRecordValue(IZeroconfHost host, string key)
-        {
-            foreach (var service in host.Services.Values)
-            {
-                if (service.Properties == null) continue;
-
-                foreach (var record in service.Properties)
+                foreach (var service in host.Services.Values)
                 {
-                    if (record.TryGetValue(key, out var value))
+                    if (service.Properties == null) continue;
+
+                    foreach (var record in service.Properties)
                     {
-                        return value;
+                        foreach (var pair in record)
+                        {
+                            if (!string.IsNullOrWhiteSpace(pair.Value))
+                            {
+                                merged[pair.Key] = pair.Value;
+                            }
+                        }
                     }
                 }
             }
+
+            return merged;
+        }
+
+        /// <summary>Returns the first populated value across the given TXT key aliases.</summary>
+        private static string FirstValue(Dictionary<string, string> txt, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (txt.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
             return string.Empty;
+        }
+
+        private static IZeroconfHost FindAirPlayHost(
+            IZeroconfHost raopHost,
+            IReadOnlyList<IZeroconfHost> airplayResults)
+        {
+            var match = airplayResults.FirstOrDefault(h =>
+                h.IPAddresses.Any(address => raopHost.IPAddresses.Contains(address)));
+            if (match != null)
+            {
+                return match;
+            }
+
+            // Some receivers publish the two services on different interfaces.
+            var raopName = StripMacPrefix(raopHost.DisplayName);
+            return airplayResults.FirstOrDefault(h =>
+                string.Equals(StripMacPrefix(h.DisplayName), raopName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string StripMacPrefix(string displayName)
+        {
+            if (string.IsNullOrEmpty(displayName))
+            {
+                return string.Empty;
+            }
+
+            var separator = displayName.IndexOf('@');
+            return separator >= 0 ? displayName.Substring(separator + 1) : displayName;
         }
 
         private static bool TryParseBoolean(string value)

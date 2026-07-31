@@ -80,6 +80,57 @@ public class RtpPacketizerTests
     }
 
     [Fact]
+    public void WriteTimeAnnouncePacket_carries_grandmaster_identity()
+    {
+        var destination = new byte[28];
+
+        var length = RtpPacketizer.WriteTimeAnnouncePacket(
+            destination,
+            anchorRtpTime: 1822257130,
+            networkTimeNanoseconds: 538506250528900UL,
+            applyRtpTime: 1822345330,
+            clockId: 0x001FF3A0F3B30008UL,
+            first: true);
+
+        Assert.Equal(28, length);
+        Assert.Equal(0x90, destination[0]); // sentinel bit set on the first anchor
+        Assert.Equal(0xd7, destination[1]);
+        Assert.Equal(1822257130u, BinaryPrimitives.ReadUInt32BigEndian(destination.AsSpan(4)));
+        Assert.Equal(
+            538506250528900UL,
+            BinaryPrimitives.ReadUInt64BigEndian(destination.AsSpan(8)));
+        Assert.Equal(1822345330u, BinaryPrimitives.ReadUInt32BigEndian(destination.AsSpan(16)));
+        Assert.Equal(
+            0x001FF3A0F3B30008UL,
+            BinaryPrimitives.ReadUInt64BigEndian(destination.AsSpan(20)));
+    }
+
+    [Fact]
+    public void WriteTimeAnnouncePacket_clears_sentinel_after_the_first()
+    {
+        var destination = new byte[28];
+
+        RtpPacketizer.WriteTimeAnnouncePacket(destination, 1, 2, 3, 4, first: false);
+
+        Assert.Equal(0x80, destination[0]);
+    }
+
+    [Fact]
+    public void WriteTimeAnnouncePacket_writes_sequence_seven()
+    {
+        var destination = new byte[28];
+        RtpPacketizer.WriteTimeAnnouncePacket(destination, 1, 2, 3, 4, first: false);
+        Assert.Equal(7, BinaryPrimitives.ReadUInt16BigEndian(destination.AsSpan(2)));
+    }
+
+    [Fact]
+    public void WriteTimeAnnouncePacket_rejects_short_destination()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            RtpPacketizer.WriteTimeAnnouncePacket(new byte[20], 1, 2, 3, 4, first: true));
+    }
+
+    [Fact]
     public void TryReadResendRequest_parses_range()
     {
         var packet = new byte[8];

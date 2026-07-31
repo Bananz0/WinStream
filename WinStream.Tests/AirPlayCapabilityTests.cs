@@ -22,21 +22,19 @@ public class AirPlayCapabilityTests
     }
 
     [Fact]
-    public void PreferredProtocol_prefers_ap2_when_gate_on_for_dual_capable()
+    public void PreferredProtocol_prefers_ap2_when_dual_capable()
     {
         Assert.Equal(
             AirPlayProtocolKind.AirPlay2,
-            AirPlayCapability.PreferredProtocol(
-                classic: true,
-                airPlay2: true,
-                airPlay2GateEnabled: true));
+            AirPlayCapability.PreferredProtocol(classic: true, airPlay2: true));
+    }
 
+    [Fact]
+    public void PreferredProtocol_falls_back_to_classic_when_ap2_unavailable()
+    {
         Assert.Equal(
             AirPlayProtocolKind.ClassicRaop,
-            AirPlayCapability.PreferredProtocol(
-                classic: true,
-                airPlay2: true,
-                airPlay2GateEnabled: false));
+            AirPlayCapability.PreferredProtocol(classic: true, airPlay2: false));
     }
 
     [Fact]
@@ -44,36 +42,20 @@ public class AirPlayCapabilityTests
     {
         Assert.Equal(
             AirPlayProtocolKind.AirPlay2,
-            AirPlayCapability.PreferredProtocol(
-                classic: false,
-                airPlay2: true,
-                airPlay2GateEnabled: true));
-
-        Assert.Equal(
-            AirPlayProtocolKind.Unknown,
-            AirPlayCapability.PreferredProtocol(
-                classic: false,
-                airPlay2: true,
-                airPlay2GateEnabled: false));
+            AirPlayCapability.PreferredProtocol(classic: false, airPlay2: true));
     }
 
     [Theory]
-    [InlineData(true, true, true, AirPlayProtocolKind.AirPlay2)]
-    [InlineData(true, true, false, AirPlayProtocolKind.ClassicRaop)]
-    [InlineData(false, true, true, AirPlayProtocolKind.AirPlay2)]
-    [InlineData(false, true, false, AirPlayProtocolKind.Unknown)]
-    [InlineData(true, false, true, AirPlayProtocolKind.ClassicRaop)]
-    [InlineData(true, false, false, AirPlayProtocolKind.ClassicRaop)]
-    [InlineData(false, false, true, AirPlayProtocolKind.Unknown)]
+    [InlineData(true, true, AirPlayProtocolKind.AirPlay2)]
+    [InlineData(false, true, AirPlayProtocolKind.AirPlay2)]
+    [InlineData(true, false, AirPlayProtocolKind.ClassicRaop)]
+    [InlineData(false, false, AirPlayProtocolKind.Unknown)]
     public void PreferredProtocol_truth_table(
         bool classic,
         bool airPlay2,
-        bool gate,
         AirPlayProtocolKind expected)
     {
-        Assert.Equal(
-            expected,
-            AirPlayCapability.PreferredProtocol(classic, airPlay2, gate));
+        Assert.Equal(expected, AirPlayCapability.PreferredProtocol(classic, airPlay2));
     }
 
     [Theory]

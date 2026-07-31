@@ -10,6 +10,9 @@ public static class RtpPacketizer
     public const byte PayloadSync = 0x54;
     public const byte PayloadResendRequest = 0x55;
 
+    /// <summary>AirPlay 2 anchor announcement (RTP type 215) on the control port.</summary>
+    public const byte PayloadTimeAnnounce = 0xD7;
+
     public static int WriteAudioPacket(
         Span<byte> destination,
         ushort sequenceNumber,
@@ -53,6 +56,39 @@ public static class RtpPacketizer
         BinaryPrimitives.WriteUInt32BigEndian(destination[12..], (uint)ntpTimestamp);
         BinaryPrimitives.WriteUInt32BigEndian(destination[16..], now);
         return 20;
+    }
+
+    /// <summary>
+    /// Writes the AirPlay 2 anchor announcement that maps an RTP timestamp onto
+    /// the PTP grandmaster timeline.
+    /// </summary>
+    /// <remarks>
+    /// The trailing clock identity is what a classic 20-byte sync packet lacks:
+    /// without it the receiver reads timeline 0, rejects the anchor as coming
+    /// from a foreign grandmaster, and renders nothing.
+    /// </remarks>
+    public static int WriteTimeAnnouncePacket(
+        Span<byte> destination,
+        uint anchorRtpTime,
+        ulong networkTimeNanoseconds,
+        uint applyRtpTime,
+        ulong clockId,
+        bool first)
+    {
+        const int length = 28;
+        if (destination.Length < length)
+        {
+            throw new ArgumentException("Destination is too small for anchor packet.");
+        }
+
+        destination[0] = (byte)(0x80 | (first ? 0x10 : 0));
+        destination[1] = PayloadTimeAnnounce;
+        BinaryPrimitives.WriteUInt16BigEndian(destination[2..], 7);
+        BinaryPrimitives.WriteUInt32BigEndian(destination[4..], anchorRtpTime);
+        BinaryPrimitives.WriteUInt64BigEndian(destination[8..], networkTimeNanoseconds);
+        BinaryPrimitives.WriteUInt32BigEndian(destination[16..], applyRtpTime);
+        BinaryPrimitives.WriteUInt64BigEndian(destination[20..], clockId);
+        return length;
     }
 
     public static int WriteTimingResponse(

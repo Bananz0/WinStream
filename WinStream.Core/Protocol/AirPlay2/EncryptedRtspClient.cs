@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,6 +16,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
     private readonly string _host;
     private readonly int _port;
     private readonly TcpClient _tcp = new();
+    private readonly SemaphoreSlim _requestGate = new(1, 1);
     private readonly string _dacpId =
         Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
     private readonly string _activeRemote =
@@ -42,9 +44,19 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
 
     public int ControlPort { get; private set; }
 
+    /// <summary>Receiver clock identity from session SETUP, when advertised.</summary>
+    public ulong? RemoteClockId { get; private set; }
+
     public string SessionUuid { get; private set; } = Guid.NewGuid().ToString().ToUpperInvariant();
 
+    /// <summary>Stable sender MAC; must not be the receiver's deviceid.</summary>
     public string DeviceId { get; set; } = "AA:BB:CC:DD:EE:FF";
+
+    /// <summary>Our address on the interface that reaches the receiver.</summary>
+    public string LocalAddress =>
+        _tcp.Client?.LocalEndPoint is IPEndPoint endpoint
+            ? endpoint.Address.ToString()
+            : "0.0.0.0";
 
     public async Task ConnectAndPairAsync(CancellationToken cancellationToken = default)
     {
@@ -84,29 +96,20 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         response.EnsureSuccess("GET /info");
     }
 
+    /// <summary>
+    /// Session SETUP with PTP timing. This receiver answers 400 for NTP, so PTP
+    /// is the only usable timing protocol here.
+    /// </summary>
+    /// <remarks>
+    /// <c>ClockPorts</c> is mandatory even though it looks optional: it maps each
+    /// peer address to the PTP port identity used toward that peer. Omit it and
+    /// the receiver logs "remote port is unknown", declines to enable our clock
+    /// port, and never sends us a single Sync — leaving the anchor stamped in the
+    /// wrong timeline.
+    /// </remarks>
     public async Task SessionSetupAsync(CancellationToken cancellationToken = default)
     {
         EnsureCrypto();
-        var timingId = Guid.NewGuid().ToString().ToUpperInvariant();
-        var setup = new Dictionary<string, object>
-        {
-            ["deviceID"] = DeviceId,
-            ["macAddress"] = DeviceId,
-            ["sessionUUID"] = SessionUuid,
-            ["timingProtocol"] = "NTP",
-            ["timingPort"] = 0L,
-            ["name"] = "WinStream",
-            ["model"] = "WinStream",
-            ["sourceVersion"] = "415.3",
-            ["osName"] = "Windows",
-            ["osVersion"] = "10.0",
-            ["osBuildVersion"] = "19041",
-            ["groupUUID"] = timingId,
-            ["groupContainsGroupLeader"] = false,
-            ["isMultiSelectAirPlay"] = false,
-            ["senderSupportsRelay"] = false
-        };
-
         var response = await SendAsync(
             "SETUP",
             $"rtsp://{_host}/{SessionUuid}",
@@ -114,7 +117,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             {
                 ["Content-Type"] = "application/x-apple-binary-plist"
             },
-            BinaryPlist.Write(setup),
+            BinaryPlist.Write(BuildSessionSetupPayload(LocalAddress, _host, DeviceId, SessionUuid)),
             cancellationToken).ConfigureAwait(false);
         response.EnsureSuccess("SETUP session");
 
@@ -131,6 +134,89 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         }
 
         EventPort = (int)eventPort;
+        ParseTimingPeerInfo(plist);
+    }
+
+    /// <summary>Builds the session SETUP plist (testable without a live RTSP socket).</summary>
+    internal static Dictionary<string, object> BuildSessionSetupPayload(
+        string localAddress,
+        string host,
+        string deviceId,
+        string sessionUuid)
+    {
+        var groupUuid = Guid.NewGuid().ToString().ToUpperInvariant();
+        var clockId = unchecked((long)PtpClock.ClockIdFromDeviceId(deviceId));
+        var peer = new Dictionary<string, object>
+        {
+            ["Addresses"] = new List<object> { localAddress },
+            ["ID"] = deviceId,
+            ["DeviceType"] = 0L,
+            ["ClockID"] = clockId,
+            ["ClockPorts"] = new Dictionary<string, object>
+            {
+                [localAddress] = (long)PtpClock.PortNumber,
+                [host] = (long)PtpClock.PortNumber
+            },
+            ["SupportsClockPortMatchingOverride"] = true
+        };
+
+        return new Dictionary<string, object>
+        {
+            ["deviceID"] = deviceId,
+            ["macAddress"] = deviceId,
+            ["sessionUUID"] = sessionUuid,
+            ["timingProtocol"] = "PTP",
+            ["timingPeerInfo"] = peer,
+            ["timingPeerList"] = new List<object> { peer },
+            ["name"] = "WinStream",
+            ["model"] = "WinStream",
+            ["sourceVersion"] = "415.3",
+            ["osName"] = "Windows",
+            ["osVersion"] = "10.0",
+            ["osBuildVersion"] = "19041",
+            ["groupUUID"] = groupUuid,
+            ["groupContainsGroupLeader"] = false,
+            ["isMultiSelectAirPlay"] = false,
+            ["senderSupportsRelay"] = false
+        };
+    }
+
+    private void ParseTimingPeerInfo(object plist)
+    {
+        if (plist is not Dictionary<string, object?> root ||
+            !root.TryGetValue("timingPeerInfo", out var raw) ||
+            raw is not Dictionary<string, object?> peer)
+        {
+            return;
+        }
+
+        // ClockID is an EUI-64 bit pattern — accept any non-zero ulong encoding,
+        // including values that look negative as signed long.
+        if (peer.TryGetValue("ClockID", out var clockRaw) &&
+            TryUInt64(clockRaw, out var clockId) &&
+            clockId != 0)
+        {
+            RemoteClockId = clockId;
+        }
+    }
+
+    private static bool TryUInt64(object? raw, out ulong value)
+    {
+        switch (raw)
+        {
+            case ulong u:
+                value = u;
+                return true;
+            case long l:
+                value = unchecked((ulong)l);
+                return true;
+            case int i:
+                value = unchecked((ulong)i);
+                return true;
+            default:
+                value = 0;
+                return false;
+        }
     }
 
     public async Task RecordAsync(CancellationToken cancellationToken = default)
@@ -157,9 +243,10 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             throw new ArgumentException("shk must be 32 bytes.", nameof(audioSharedKey));
         }
 
+        // Realtime type 0x60 / 96, ALAC — receiver hardcodes ALAC and ignores ct.
         var stream = new Dictionary<string, object>
         {
-            ["type"] = 96L,
+            ["type"] = 0x60L,
             ["audioFormat"] = 0x40000L,
             ["audioMode"] = "default",
             ["ct"] = 2L,
@@ -170,7 +257,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             ["sr"] = 44100L,
             ["controlPort"] = (long)senderControlPort,
             ["shk"] = audioSharedKey,
-            ["supportsDynamicStreamID"] = true,
+            ["supportsDynamicStreamID"] = false,
             ["streamConnectionID"] = (long)RandomNumberGenerator.GetInt32(1, int.MaxValue)
         };
 
@@ -222,6 +309,25 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         response.EnsureSuccess("SET_PARAMETER volume");
     }
 
+    /// <summary>
+    /// Periodic sender heartbeat. Without it the receiver drops the session after
+    /// roughly 30 seconds of control-channel silence.
+    /// </summary>
+    public async Task SendFeedbackAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureCrypto();
+        var response = await SendAsync(
+            "POST",
+            "/feedback",
+            new Dictionary<string, string>
+            {
+                ["Content-Type"] = "application/x-apple-binary-plist"
+            },
+            BinaryPlist.Write(new Dictionary<string, object>()),
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccess("POST /feedback");
+    }
+
     public async Task TeardownAsync(CancellationToken cancellationToken = default)
     {
         EnsureCrypto();
@@ -252,9 +358,20 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         EnsureCrypto();
-        var request = BuildRequest(method, target, headers, body);
-        await _crypto!.WritePlaintextAsync(request, cancellationToken).ConfigureAwait(false);
-        return await ReadResponseAsync(cancellationToken).ConfigureAwait(false);
+
+        // One request/response pair at a time: the keep-alive heartbeat and volume
+        // changes would otherwise interleave frames on the same encrypted channel.
+        await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var request = BuildRequest(method, target, headers, body);
+            await _crypto!.WritePlaintextAsync(request, cancellationToken).ConfigureAwait(false);
+            return await ReadResponseAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _requestGate.Release();
+        }
     }
 
     private async Task<RtspResponse> ReadResponseAsync(CancellationToken cancellationToken)
@@ -389,6 +506,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         }
 
         _tcp.Dispose();
+        _requestGate.Dispose();
         _disposed = true;
     }
 }
