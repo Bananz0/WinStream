@@ -56,7 +56,8 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
     /// </param>
     /// <param name="waitUntilDue">
     /// Overrides how the worker waits for a packet's deadline. Returns false when
-    /// cancelled. Test seam; production uses the built-in hybrid wait.
+    /// cancelled. The app layer supplies a high-resolution timer here; the
+    /// built-in hybrid wait is the fallback when none is given.
     /// </param>
     public AudioFrameSendPump(
         int capacity,

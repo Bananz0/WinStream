@@ -12,9 +12,10 @@ namespace WinStream.Audio;
 /// </summary>
 /// <remarks>
 /// Registration is per-thread, so this must be constructed on the thread it is
-/// meant to raise, and disposed on that same thread. A thread that exits releases
-/// its association anyway, which is the fallback for callback threads WinStream
-/// does not own.
+/// meant to raise and disposed on that same thread. Only threads WinStream owns
+/// qualify: nothing documents that thread exit releases the association, so
+/// registering a library's callback thread — which cannot be reverted from
+/// anywhere — leaks the handle and leaves it boosted for the process lifetime.
 /// </remarks>
 internal sealed class MmcssHandle : IDisposable
 {

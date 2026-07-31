@@ -38,7 +38,6 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private long _captureGapCount;
     private long _lastInterCallbackTicks;
     private int _inGap;
-    private int _captureThreadElevated;
     private CancellationTokenSource? _gapFillCts;
     private Task? _gapFillLoop;
 
@@ -243,8 +242,6 @@ public sealed class WasapiLoopbackSource : IAudioSource
         IsCapturing = false;
         _currentRms = 0;
         _format = null;
-        // A restart gets a fresh NAudio thread, which needs raising again.
-        Interlocked.Exchange(ref _captureThreadElevated, 0);
         _activeEndpointId = null;
         Interlocked.Exchange(ref _lastCallbackQpc, 0);
         Interlocked.Exchange(ref _inGap, 0);
@@ -270,8 +267,6 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        EnsureCaptureThreadElevated();
-
         if (e.BytesRecorded <= 0 || _format is null)
         {
             return;
@@ -348,21 +343,6 @@ public sealed class WasapiLoopbackSource : IAudioSource
             EmitSilence(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
             Interlocked.Exchange(ref _lastCallbackQpc, now);
         }
-    }
-
-    /// <summary>
-    /// Raises NAudio's capture thread the first time it calls back. The handle is
-    /// intentionally not held: NAudio owns this thread, so there is no safe moment
-    /// to revert from elsewhere, and the association is released when it exits.
-    /// </summary>
-    private void EnsureCaptureThreadElevated()
-    {
-        if (Interlocked.Exchange(ref _captureThreadElevated, 1) == 1)
-        {
-            return;
-        }
-
-        MmcssHandle.TryRegisterCurrentThread();
     }
 
     private void MaybeLogGap()

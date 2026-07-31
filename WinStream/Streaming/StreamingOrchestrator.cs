@@ -35,6 +35,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly ExtremePressureHysteresis _extremePressure = new();
     private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
     private AudioFrameSendPump? _sendPump;
+    private HighResolutionWaiter? _waiter;
     private IAudioSource? _audioSource;
     private DateTimeOffset? _silentSince;
     private CancellationTokenSource? _reconnectCts;
@@ -343,10 +344,12 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             _audioSource.DeviceInvalidated += OnDeviceInvalidated;
             _audioSource.CaptureFailed += OnCaptureFailed;
             _fanoutClock.Reset();
+            _waiter = new HighResolutionWaiter();
             _sendPump = new AudioFrameSendPump(
                 SendQueueCapacity,
                 DispatchQueuedFrame,
-                MmcssHandle.TryRegisterCurrentThread);
+                MmcssHandle.TryRegisterCurrentThread,
+                _waiter.WaitUntilDue);
             _sendPump.Start();
             return;
         }
@@ -377,6 +380,10 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             await pump.DisposeAsync().ConfigureAwait(false);
         }
+
+        // Only after the worker has stopped: it waits on the timer handle.
+        _waiter?.Dispose();
+        _waiter = null;
     }
 
     private void OnFrameAvailable(object? sender, AudioFrame frame)
