@@ -1053,6 +1053,34 @@ namespace WinStream
                 return;
             }
 
+            if (LabSessionPolicy.WarnsCaptureTooCoarse(
+                    mode,
+                    WasapiLoopbackSource.CaptureBufferMilliseconds))
+            {
+                var warn = new ContentDialog
+                {
+                    Title = StreamingQualityCopy.ExtremeCaptureWarningTitle,
+                    Content = StreamingQualityCopy.ExtremeCaptureWarningBody,
+                    PrimaryButtonText = "Continue Extreme",
+                    SecondaryButtonText = "Use Experimental",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Secondary,
+                    XamlRoot = Content.XamlRoot
+                };
+                var choice = await warn.ShowAsync();
+                if (choice == ContentDialogResult.None)
+                {
+                    SelectQualityOptionSilently(playbackResponsivenessComboBox, previous);
+                    return;
+                }
+
+                if (choice == ContentDialogResult.Secondary)
+                {
+                    mode = PlaybackResponsiveness.Experimental;
+                    SelectQualityOptionSilently(playbackResponsivenessComboBox, mode);
+                }
+            }
+
             _settings.Update(settings => settings.PlaybackResponsiveness = mode);
             RefreshStreamingQualityHints();
 

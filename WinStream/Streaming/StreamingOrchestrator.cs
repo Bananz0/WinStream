@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Audio;
 using WinStream.Core;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
@@ -333,7 +334,10 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             _audioSource.DeviceInvalidated += OnDeviceInvalidated;
             _audioSource.CaptureFailed += OnCaptureFailed;
             _fanoutClock.Reset();
-            _sendPump = new AudioFrameSendPump(SendQueueCapacity, DispatchQueuedFrame);
+            _sendPump = new AudioFrameSendPump(
+                SendQueueCapacity,
+                DispatchQueuedFrame,
+                MmcssHandle.TryRegisterCurrentThread);
             _sendPump.Start();
             return;
         }

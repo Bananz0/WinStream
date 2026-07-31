@@ -1,4 +1,4 @@
-using WinStream.Core;
+using WinStream.Core.Streaming;
 
 namespace WinStream.Streaming;
 
@@ -7,11 +7,16 @@ public static class StreamingQualityCopy
 {
     public const string ExtremeLabel = "Extreme (~8 ms)";
     public const string ExtremeHint =
-        "Shortest delay WinStream can request. Often stutters or fails — for testing only, one speaker.";
+        "Speaker buffer ≈ one ALAC packet. Capture is still ~50 ms loopback, so this is a " +
+        "wire probe — expect stutter. One speaker. Not end-to-end 8 ms.";
 
     public static string LabEscapeBody =>
         "The receiver did not accept Extreme (~8 ms). " +
         "Switch to Experimental (~250 ms) and reconnect now?";
+
+    public static string ExtremeCaptureWarningTitle => "Extreme is a probe";
+
+    public static string ExtremeCaptureWarningBody => LabSessionPolicy.CaptureTooCoarseWarning;
 
     /// <summary>
     /// Shown when a receiver asks for the persistent-pairing secret. Covers both forms
@@ -37,7 +42,8 @@ public static class StreamingQualityCopy
     public static string ResponsivenessInfoBody =>
         "This setting changes playback delay, not sound fidelity. Lower delay = less buffer against Wi‑Fi glitches.\n\n" +
         "• Auto — Starts near ~250 ms and may climb toward ~2 s if delivery pressure is detected.\n" +
-        "• Extreme (~8 ms) — Testing only; often fails. One speaker.\n" +
+        "• Extreme (~8 ms) — Probe only: shrinks the speaker buffer to one packet. " +
+        "Capture is still ~50 ms, so this is not end-to-end 8 ms. Often stutters. One speaker.\n" +
         "• Experimental (~250 ms) — Fixed short buffer; expect stutter on some receivers.\n" +
         "• Very low (~500 ms) — Fixed half-second buffer.\n" +
         "• Low delay (~1 s) — Snappier than Balanced; more stutter risk.\n" +

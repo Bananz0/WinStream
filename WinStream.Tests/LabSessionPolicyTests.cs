@@ -41,6 +41,30 @@ public class LabSessionPolicyTests
     }
 
     [Fact]
+    public void Warns_when_Extreme_meets_coarse_capture()
+    {
+        Assert.True(LabSessionPolicy.WarnsCaptureTooCoarse(
+            PlaybackResponsiveness.LabPacket,
+            captureContributionMilliseconds: 50));
+        Assert.True(LabSessionPolicy.WarnsCaptureTooCoarse(
+            PlaybackResponsiveness.LabPacket,
+            LabSessionPolicy.MaxCaptureContributionMillisecondsForExtreme + 1));
+        Assert.False(LabSessionPolicy.WarnsCaptureTooCoarse(
+            PlaybackResponsiveness.LabPacket,
+            LabSessionPolicy.MaxCaptureContributionMillisecondsForExtreme));
+        Assert.False(LabSessionPolicy.WarnsCaptureTooCoarse(
+            PlaybackResponsiveness.Experimental,
+            captureContributionMilliseconds: 50));
+    }
+
+    [Fact]
+    public void Capture_warning_names_Extreme_and_Experimental()
+    {
+        Assert.Contains("Extreme", LabSessionPolicy.CaptureTooCoarseWarning, StringComparison.Ordinal);
+        Assert.Contains("Experimental", LabSessionPolicy.CaptureTooCoarseWarning, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Allows_live_switch_to_non_Lab_presets_with_many_sessions()
     {
         Assert.False(LabSessionPolicy.BlocksQualityApply(PlaybackResponsiveness.Auto, 3));

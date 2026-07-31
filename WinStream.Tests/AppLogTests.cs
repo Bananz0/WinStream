@@ -25,7 +25,14 @@ public class AppLogTests
             AppLog.Error("test", "disk-persisted-line");
             AppLog.Warn("test", "aesiv=secret");
 
-            var contents = File.ReadAllText(path!);
+            // The sink keeps the file open for append; read with a shared handle.
+            string contents;
+            using (var reader = new StreamReader(
+                new FileStream(path!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
+            {
+                contents = reader.ReadToEnd();
+            }
+
             Assert.Contains("disk-persisted-line", contents);
             Assert.Contains("[redacted]", contents);
             Assert.DoesNotContain("aesiv=secret", contents);

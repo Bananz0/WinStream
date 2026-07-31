@@ -48,6 +48,7 @@ public sealed class PtpClock : IAsyncDisposable
     private readonly ulong _clockId;
     private readonly Stopwatch _mono = Stopwatch.StartNew();
     private readonly object _gate = new();
+    private readonly LogRateLimiter _deltaLog = new(TimeSpan.FromSeconds(1));
     private UdpClient? _event;
     private UdpClient? _general;
     private CancellationTokenSource? _cts;
@@ -61,7 +62,6 @@ public sealed class PtpClock : IAsyncDisposable
     private ulong _masterClockId;
     private int _samples;
     private int _spikesRejected;
-    private long _lastPtpDeltaLogMs;
     private int _consecutiveReceiveFaults;
     private bool _disposed;
 
@@ -383,13 +383,13 @@ public sealed class PtpClock : IAsyncDisposable
 
     private void MaybeLogPtpDelta(long deltaNs, bool rejected)
     {
-        var nowMs = Environment.TickCount64;
-        if (!rejected && nowMs - Interlocked.Read(ref _lastPtpDeltaLogMs) < 1_000)
+        // Rate-limit both accepted and rejected samples. Spike rejects used to log
+        // every Follow_Up under a noisy link and drowned the Extreme encode path.
+        if (!_deltaLog.ShouldLog(out _))
         {
             return;
         }
 
-        Interlocked.Exchange(ref _lastPtpDeltaLogMs, nowMs);
         if (rejected || deltaNs > 1_000_000)
         {
             AppLog.Info(

@@ -83,7 +83,7 @@ public class AudioFrameSendPumpPacingTests
     private static async Task<List<byte[]>> DrainAsync(
         AudioFrame frame,
         int expectedChunks,
-        Action? elevateCurrentThread = null)
+        Func<IDisposable?>? elevateCurrentThread = null)
     {
         var chunks = new List<byte[]>();
         var gate = new object();
@@ -169,5 +169,31 @@ public class AudioFrameSendPumpPacingTests
             elevateCurrentThread: () => throw new InvalidOperationException("no MMCSS here"));
 
         Assert.Single(chunks);
+    }
+
+    [Fact]
+    public async Task Thread_elevation_is_released_when_the_worker_stops()
+    {
+        var reverted = false;
+        var pump = new AudioFrameSendPump(
+            capacity: 4,
+            _ => { },
+            () => new CallbackDisposable(() => reverted = true),
+            waitUntilDue: (_, token) => !token.IsCancellationRequested);
+
+        pump.Start();
+        pump.Enqueue(new AudioFrame(
+            new byte[PacketBytes],
+            new AudioFormat(44100, 2, 16),
+            1));
+
+        await pump.DisposeAsync();
+
+        Assert.True(reverted);
+    }
+
+    private sealed class CallbackDisposable(Action onDispose) : IDisposable
+    {
+        public void Dispose() => onDispose();
     }
 }

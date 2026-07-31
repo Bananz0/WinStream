@@ -20,10 +20,11 @@ public sealed class WasapiLoopbackSource : IAudioSource
     /// inside <see cref="CaptureGapFiller.ThresholdMilliseconds"/> while leaving the client
     /// ring twice as long as the poll interval.
     /// </summary>
-    private const int CaptureBufferMilliseconds = 50;
+    public const int CaptureBufferMilliseconds = 50;
 
     private readonly object _gate = new();
     private readonly ConcurrentQueue<double> _recentRms = new();
+    private readonly LogRateLimiter _gapLog = new(TimeSpan.FromSeconds(5));
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
     private WasapiCapture? _capture;
@@ -37,6 +38,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private long _captureGapCount;
     private long _lastInterCallbackTicks;
     private int _inGap;
+    private int _captureThreadElevated;
     private CancellationTokenSource? _gapFillCts;
     private Task? _gapFillLoop;
 
@@ -241,6 +243,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
         IsCapturing = false;
         _currentRms = 0;
         _format = null;
+        // A restart gets a fresh NAudio thread, which needs raising again.
+        Interlocked.Exchange(ref _captureThreadElevated, 0);
         _activeEndpointId = null;
         Interlocked.Exchange(ref _lastCallbackQpc, 0);
         Interlocked.Exchange(ref _inGap, 0);
@@ -266,6 +270,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
+        EnsureCaptureThreadElevated();
+
         if (e.BytesRecorded <= 0 || _format is null)
         {
             return;
@@ -333,9 +339,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
                 if (CaptureGapFiller.TryBeginGap(ref _inGap, ref _captureGapCount))
                 {
-                    AppLog.Info(
-                        "capture",
-                        "Loopback gap — inserting silence to keep RTP continuous");
+                    MaybeLogGap();
                 }
             }
 
@@ -344,6 +348,35 @@ public sealed class WasapiLoopbackSource : IAudioSource
             EmitSilence(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
             Interlocked.Exchange(ref _lastCallbackQpc, now);
         }
+    }
+
+    /// <summary>
+    /// Raises NAudio's capture thread the first time it calls back. The handle is
+    /// intentionally not held: NAudio owns this thread, so there is no safe moment
+    /// to revert from elsewhere, and the association is released when it exits.
+    /// </summary>
+    private void EnsureCaptureThreadElevated()
+    {
+        if (Interlocked.Exchange(ref _captureThreadElevated, 1) == 1)
+        {
+            return;
+        }
+
+        MmcssHandle.TryRegisterCurrentThread();
+    }
+
+    private void MaybeLogGap()
+    {
+        if (!_gapLog.ShouldLog(out var suppressed))
+        {
+            return;
+        }
+
+        AppLog.Info(
+            "capture",
+            suppressed > 0
+                ? $"Loopback gap — inserting silence (suppressed {suppressed} similar)"
+                : "Loopback gap — inserting silence to keep RTP continuous");
     }
 
     private void EmitSilence(double gapMilliseconds, AudioFormat format)

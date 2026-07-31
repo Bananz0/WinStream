@@ -18,19 +18,20 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
 {
     private readonly BoundedAudioFrameQueue _queue;
     private readonly Action<AudioFrame> _send;
-    private readonly Action? _elevateCurrentThread;
+    private readonly Func<IDisposable?>? _elevateCurrentThread;
     private readonly Func<long, CancellationToken, bool>? _waitUntilDue;
     private readonly PacketSendScheduler _scheduler = new();
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly ManualResetEventSlim _workerGate = new(true);
     private readonly ManualResetEventSlim _ready = new(false);
+    private readonly Logging.LogRateLimiter _slowSendLog =
+        new(TimeSpan.FromMilliseconds(SlowSendLogIntervalMilliseconds));
+
     private ManualResetEventSlim? _workerEnteredGate;
     private CancellationTokenSource? _cts;
     private Task? _worker;
     private long _sendCount;
     private long _slowSendCount;
-    private long _lastSlowSendLogMs;
-    private long _suppressedSlowSendLogs;
     private bool _disposed;
 
     /// <summary>
@@ -50,7 +51,8 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
 
     /// <param name="elevateCurrentThread">
     /// Invoked once on the worker thread before the first send, so the app layer can
-    /// register it with MMCSS. Core stays free of Win32 interop.
+    /// register it with MMCSS. Core stays free of Win32 interop. Anything returned is
+    /// disposed on that same thread when the worker stops.
     /// </param>
     /// <param name="waitUntilDue">
     /// Overrides how the worker waits for a packet's deadline. Returns false when
@@ -59,7 +61,7 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
     public AudioFrameSendPump(
         int capacity,
         Action<AudioFrame> send,
-        Action? elevateCurrentThread = null,
+        Func<IDisposable?>? elevateCurrentThread = null,
         Func<long, CancellationToken, bool>? waitUntilDue = null)
     {
         ArgumentNullException.ThrowIfNull(send);
@@ -122,9 +124,9 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
 
     private void RunWorker(CancellationToken cancellationToken)
     {
-        // LongRunning gives this a dedicated thread, so an MMCSS registration made
-        // here stays bound to the thread that actually sends.
-        TryElevateThread();
+        // LongRunning gives this a dedicated thread, so a priority registration made
+        // here stays bound to the thread that actually sends, and is released on it.
+        using var elevation = TryElevateThread();
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -169,22 +171,23 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
         }
     }
 
-    private void TryElevateThread()
+    private IDisposable? TryElevateThread()
     {
         if (_elevateCurrentThread is null)
         {
-            return;
+            return null;
         }
 
         try
         {
-            _elevateCurrentThread();
+            return _elevateCurrentThread();
         }
         catch (Exception ex)
         {
             Logging.AppLog.Warn(
                 "stream",
                 $"Send thread priority not raised; continuing: {ex.GetType().Name}: {ex.Message}");
+            return null;
         }
     }
 
@@ -297,21 +300,11 @@ public sealed class AudioFrameSendPump : IAsyncDisposable
 
     private void MaybeLogSlowSend(double elapsedMs)
     {
-        var nowMs = Environment.TickCount64;
-        var last = Interlocked.Read(ref _lastSlowSendLogMs);
-        if (nowMs - last < SlowSendLogIntervalMilliseconds)
+        if (!_slowSendLog.ShouldLog(out var suppressed))
         {
-            Interlocked.Increment(ref _suppressedSlowSendLogs);
             return;
         }
 
-        if (Interlocked.CompareExchange(ref _lastSlowSendLogMs, nowMs, last) != last)
-        {
-            Interlocked.Increment(ref _suppressedSlowSendLogs);
-            return;
-        }
-
-        var suppressed = Interlocked.Exchange(ref _suppressedSlowSendLogs, 0);
         Logging.AppLog.Info(
             "stream",
             suppressed > 0

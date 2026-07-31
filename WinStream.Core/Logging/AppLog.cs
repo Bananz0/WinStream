@@ -14,6 +14,7 @@ public static class AppLog
 
     private static readonly object FileGate = new();
     private static string? _filePath;
+    private static StreamWriter? _writer;
 
     public static event EventHandler<string>? LineWritten;
 
@@ -46,6 +47,16 @@ public static class AppLog
 
             lock (FileGate)
             {
+                _writer?.Dispose();
+                _writer = new StreamWriter(
+                    new FileStream(
+                        path,
+                        FileMode.Append,
+                        FileAccess.Write,
+                        FileShare.ReadWrite))
+                {
+                    AutoFlush = true
+                };
                 _filePath = path;
             }
 
@@ -65,6 +76,8 @@ public static class AppLog
     {
         lock (FileGate)
         {
+            _writer?.Dispose();
+            _writer = null;
             _filePath = null;
         }
     }
@@ -122,14 +135,14 @@ public static class AppLog
     {
         lock (FileGate)
         {
-            if (_filePath is null)
+            if (_writer is null)
             {
                 return;
             }
 
             try
             {
-                File.AppendAllText(_filePath, line + Environment.NewLine);
+                _writer.WriteLine(line);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
