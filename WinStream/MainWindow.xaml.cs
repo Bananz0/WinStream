@@ -7,8 +7,8 @@ using Microsoft.UI;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
@@ -18,18 +18,29 @@ using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 using WinStream.Network;
 using WinStream.Streaming;
+using WinStream.ViewModels;
 
 namespace WinStream
 {
     public sealed partial class MainWindow : Window
     {
-        public ObservableCollection<DeviceInfo> DeviceList { get; } = new ObservableCollection<DeviceInfo>();
+        /// <summary>Receiver volume floor in dB; the slider maps 0-100% onto this range.</summary>
+        private const double MinVolumeDb = -30.0;
+
+        private const double PreferredWidthDips = 900;
+        private const double PreferredHeightDips = 780;
+
+        public ObservableCollection<DeviceViewModel> DeviceList { get; } = new();
+
+        private readonly List<DeviceViewModel> _allDevices = new();
         private readonly CaptureMonitorService _captureMonitor = new();
         private readonly StreamingOrchestrator _streamingOrchestrator = new();
         private readonly DispatcherTimer _scanTimer;
         private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
+        private string _filterText = string.Empty;
         private bool _allowClose;
+        private bool _isScanning;
         private bool _suppressCaptureSelectionEvents;
 
         public MainWindow()
@@ -38,8 +49,10 @@ namespace WinStream
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
-            _appWindow.Resize(new Windows.Graphics.SizeInt32(760, 620));
             _appWindow.Closing += OnAppWindowClosing;
+
+            // The window only reports its real DPI once it is shown on a monitor.
+            Activated += OnFirstActivated;
 
             _scanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             _scanTimer.Tick += async (_, _) => await DiscoverAndDisplayDevicesAsync();
@@ -52,7 +65,7 @@ namespace WinStream
             _captureMonitor.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(RefreshCaptureStatus);
             _streamingOrchestrator.StateChanged += (_, _) =>
-                DispatcherQueue.TryEnqueue(() => UpdateUI(true));
+                DispatcherQueue.TryEnqueue(OnStreamingStateChanged);
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
@@ -61,6 +74,8 @@ namespace WinStream
                 _captureMonitor.Settings.EnableAirPlay2Experimental;
             captureModeComboBox.SelectedIndex =
                 _captureMonitor.Settings.CaptureMode == CaptureMode.VirtualDriver ? 1 : 0;
+            UpdateVolumeReadout(streamVolumeSlider.Value);
+            RefreshSessionStatus();
             _ = DiscoverAndDisplayDevicesAsync();
         }
 
@@ -87,6 +102,32 @@ namespace WinStream
             Close();
         }
 
+        private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
+        {
+            Activated -= OnFirstActivated;
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                ApplyPreferredWindowSize);
+        }
+
+        private void ApplyPreferredWindowSize()
+        {
+            var dpi = GetDpiForWindow(WindowHandle);
+            var scale = dpi > 0 ? dpi / 96.0 : 1.0;
+
+            var work = DisplayArea
+                .GetFromWindowId(_appWindow.Id, DisplayAreaFallback.Nearest)
+                .WorkArea;
+            var width = Math.Min((int)(PreferredWidthDips * scale), (int)(work.Width * 0.9));
+            var height = Math.Min((int)(PreferredHeightDips * scale), (int)(work.Height * 0.9));
+
+            _appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                work.X + ((work.Width - width) / 2),
+                work.Y + ((work.Height - height) / 2),
+                width,
+                height));
+        }
+
         private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
         {
             if (_allowClose)
@@ -100,32 +141,20 @@ namespace WinStream
 
         private async void SearchButton_Click(object sender, RoutedEventArgs e)
         {
-            await DiscoverAndDisplayDevicesAsync();
+            await DiscoverAndDisplayDevicesAsync(showProgress: true);
         }
 
-        private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+        private void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
             LoadCaptureEndpoints();
-            await DiscoverAndDisplayDevicesAsync();
         }
 
-        private void FilterTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        private void FilterBox_TextChanged(
+            AutoSuggestBox sender,
+            AutoSuggestBoxTextChangedEventArgs args)
         {
-            ApplyFilter(filterTextBox.Text.ToLowerInvariant());
-        }
-
-        private void ApplyFilter(string filterText)
-        {
-            if (string.IsNullOrWhiteSpace(filterText))
-            {
-                devicesList.ItemsSource = DeviceList;
-            }
-            else
-            {
-                devicesList.ItemsSource = DeviceList.Where(d =>
-                    (d.DisplayName?.ToLowerInvariant().Contains(filterText) ?? false) ||
-                    (d.IPAddress?.ToLowerInvariant().Contains(filterText) ?? false));
-            }
+            _filterText = sender.Text?.Trim() ?? string.Empty;
+            RebuildVisibleDevices();
         }
 
         private async void CaptureDeviceComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -135,7 +164,7 @@ namespace WinStream
                 return;
             }
 
-            if (captureDeviceComboBox.SelectedItem is RenderEndpointInfo endpoint)
+            if (captureDeviceComboBox.SelectedItem is CaptureEndpointViewModel endpoint)
             {
                 await _captureMonitor.SetSelectedEndpointAsync(endpoint.Id);
                 RefreshCaptureStatus();
@@ -158,20 +187,25 @@ namespace WinStream
             _suppressCaptureSelectionEvents = true;
             try
             {
-                var endpoints = _captureMonitor.ListEndpoints();
+                var endpoints = _captureMonitor.ListEndpoints()
+                    .Select(endpoint => new CaptureEndpointViewModel(endpoint))
+                    .ToList();
                 captureDeviceComboBox.ItemsSource = endpoints;
 
                 var selectedId = _captureMonitor.Settings.SelectedRenderDeviceId;
-                var selected = endpoints.FirstOrDefault(e =>
-                                   string.Equals(e.Id, selectedId, StringComparison.OrdinalIgnoreCase))
-                               ?? endpoints.FirstOrDefault(e => e.IsDefault)
-                               ?? endpoints.FirstOrDefault();
-                captureDeviceComboBox.SelectedItem = selected;
+                captureDeviceComboBox.SelectedItem =
+                    endpoints.FirstOrDefault(e =>
+                        string.Equals(e.Id, selectedId, StringComparison.OrdinalIgnoreCase))
+                    ?? endpoints.FirstOrDefault(e => e.Endpoint.IsDefault)
+                    ?? endpoints.FirstOrDefault();
             }
             catch (Exception ex)
             {
                 AppLog.Warn("capture", $"Failed to enumerate capture endpoints: {ex.GetType().Name}");
-                captureStatusText.Text = "No audio devices";
+                ShowMessage(
+                    InfoBarSeverity.Error,
+                    "No audio devices available",
+                    "Windows didn't return any playback devices to capture from.");
             }
             finally
             {
@@ -216,20 +250,20 @@ namespace WinStream
             if (!_captureMonitor.IsCapturing)
             {
                 captureStatusText.Text = "Idle";
-                captureStatusText.Foreground = new SolidColorBrush(Colors.Gray);
+                captureStatusText.Foreground = ThemeBrush("TextFillColorSecondaryBrush");
                 return;
             }
 
             if (_captureMonitor.IsSilent)
             {
                 captureStatusText.Text = "Silent";
-                captureStatusText.Foreground = new SolidColorBrush(Colors.Orange);
+                captureStatusText.Foreground = ThemeBrush("SystemFillColorCautionBrush");
                 return;
             }
 
             var format = _captureMonitor.Format;
             captureStatusText.Text = format is null ? "Capturing" : format.ToString();
-            captureStatusText.Foreground = new SolidColorBrush(Colors.SeaGreen);
+            captureStatusText.Foreground = ThemeBrush("SystemFillColorSuccessBrush");
         }
 
         private void AirPlay2GateToggle_Toggled(object sender, RoutedEventArgs e)
@@ -248,8 +282,11 @@ namespace WinStream
                 _captureMonitor.SetCaptureMode(mode);
                 if (mode == CaptureMode.VirtualDriver)
                 {
-                    captureStatusText.Text = "Driver mode: install optional VAD (not in Store MSIX).";
-                    captureStatusText.Foreground = new SolidColorBrush(Colors.DarkOrange);
+                    ShowMessage(
+                        InfoBarSeverity.Warning,
+                        "Virtual audio driver required",
+                        "Install the optional WinStream audio driver to use this mode. " +
+                        "It isn't included in the Store version.");
                 }
             }
         }
@@ -258,195 +295,333 @@ namespace WinStream
             object sender,
             RangeBaseValueChangedEventArgs e)
         {
-            if (streamVolumeText is not null)
-            {
-                streamVolumeText.Text = $"{e.NewValue:0} dB";
-            }
+            UpdateVolumeReadout(e.NewValue);
 
             if (_streamingOrchestrator.State == SessionState.Streaming)
             {
-                await _streamingOrchestrator.SetVolumeAsync((float)e.NewValue);
+                await _streamingOrchestrator.SetVolumeAsync(PercentToDb(e.NewValue));
             }
         }
+
+        private void UpdateVolumeReadout(double percent)
+        {
+            if (streamVolumeText is not null)
+            {
+                streamVolumeText.Text = $"{percent:0}%";
+            }
+        }
+
+        private static float PercentToDb(double percent) =>
+            percent <= 0
+                ? -144f
+                : (float)(MinVolumeDb - (MinVolumeDb * percent / 100.0));
 
         private async void ConnectButton_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
+            if (sender is not Button { DataContext: DeviceViewModel device })
             {
-                var container = (button.Parent as FrameworkElement)?.Parent as Grid;
-                if (container != null)
+                return;
+            }
+
+            messageBar.IsOpen = false;
+            device.ClearStatus();
+            device.IsBusy = true;
+            UpdateUI(false);
+
+            try
+            {
+                if (device.IsConnected)
                 {
-                    var progressRing = container.FindName("connectProgressRing") as ProgressRing;
-                    var statusTextBlock = container.FindName("connectStatusTextBlock") as TextBlock;
-
-                    AppLog.Info("ui", "Connecting to selected receiver.");
-                    UpdateUI(false);
-                    progressRing.Visibility = Visibility.Visible;
-                    statusTextBlock.Text = string.Empty;
-
-                    try
-                    {
-                        if (_streamingOrchestrator.ConnectedReceivers.Any(receiver =>
-                                ReceiverEquals(receiver, deviceInfo)))
-                        {
-                            await _streamingOrchestrator.DisconnectAsync(deviceInfo);
-                            statusTextBlock.Text = _streamingOrchestrator.ConnectedReceivers.Count == 0
-                                ? "Disconnected."
-                                : $"Removed. {_streamingOrchestrator.State} ({_streamingOrchestrator.ConnectedReceivers.Count} left).";
-                            statusTextBlock.Foreground = new SolidColorBrush(Colors.Gray);
-                            button.Content = "Connect";
-                            return;
-                        }
-
-                        await _captureMonitor.EnsureStartedAsync();
-                        var source = _captureMonitor.GetSourceForStreaming()
-                            ?? throw new InvalidOperationException(
-                                "Capture source is not available.");
-                        await _streamingOrchestrator.ConnectAsync(deviceInfo, source);
-                        await _streamingOrchestrator.SetVolumeAsync(
-                            (float)streamVolumeSlider.Value);
-                        statusTextBlock.Text =
-                            $"{_streamingOrchestrator.State} ({_streamingOrchestrator.ConnectedReceivers.Count} room(s)).";
-                        statusTextBlock.Foreground = new SolidColorBrush(
-                            _streamingOrchestrator.State == SessionState.Degraded
-                                ? Colors.Orange
-                                : Colors.Green);
-                        button.Content = "Disconnect";
-                    }
-                    catch (Exception ex)
-                    {
-                        statusTextBlock.Text =
-                            $"Connection failed: {FormatConnectionFailure(ex.Message)}";
-                        statusTextBlock.Foreground = new SolidColorBrush(Colors.Red);
-                        AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
-                    }
-                    finally
-                    {
-                        progressRing.Visibility = Visibility.Collapsed;
-                        UpdateUI(true);
-                    }
+                    await _streamingOrchestrator.DisconnectAsync(device.Device);
+                    device.SetStatus("Disconnected.", DeviceStatusKind.Neutral);
+                    AppLog.Info("ui", "Disconnected from receiver.");
+                    return;
                 }
+
+                AppLog.Info("ui", "Connecting to selected receiver.");
+                await _captureMonitor.EnsureStartedAsync();
+                var source = _captureMonitor.GetSourceForStreaming()
+                    ?? throw new InvalidOperationException(
+                        "Windows didn't provide an audio source to capture.");
+
+                await _streamingOrchestrator.ConnectAsync(device.Device, source);
+                await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
+
+                if (_streamingOrchestrator.State == SessionState.Degraded)
+                {
+                    device.SetStatus("Connected, but the stream is degraded.", DeviceStatusKind.Caution);
+                }
+                else
+                {
+                    device.SetStatus("Streaming.", DeviceStatusKind.Success);
+                }
+            }
+            catch (Exception ex)
+            {
+                device.SetStatus("Couldn't connect.", DeviceStatusKind.Error);
+                ShowMessage(
+                    InfoBarSeverity.Error,
+                    $"Couldn't connect to {device.DisplayName}",
+                    FormatConnectionFailure(ex.Message));
+                AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
+            }
+            finally
+            {
+                device.IsBusy = false;
+                UpdateUI(true);
+                SyncConnectionState();
+                RefreshSessionStatus();
             }
         }
 
-        private async Task DiscoverAndDisplayDevicesAsync()
+        /// <summary>
+        /// Background rescans stay silent so the list doesn't flicker every five
+        /// seconds; only an explicit scan reports progress.
+        /// </summary>
+        private async Task DiscoverAndDisplayDevicesAsync(bool showProgress = false)
         {
-            UpdateUI(false);
-            progressBar.Visibility = Visibility.Visible;
+            if (_isScanning)
+            {
+                return;
+            }
+
+            _isScanning = true;
+            var announce = showProgress || _allDevices.Count == 0;
+            if (announce)
+            {
+                searchButton.IsEnabled = false;
+                deviceCountText.Text = "Looking for devices…";
+            }
+
             var cts = new CancellationTokenSource();
 
             try
             {
                 var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync(cts.Token);
-                UpdateDeviceList(discoveredDevices);
-                searchButton.Content = $"Devices Updated ({DeviceList.Count})";
+                MergeDiscoveredDevices(discoveredDevices);
+                RebuildVisibleDevices();
+                RefreshAirPlayReceiverHint();
             }
             catch (Exception ex)
             {
                 AppLog.Error("ui", $"Discovery error: {ex.GetType().Name}");
-                searchButton.Content = "Discovery Error";
+                deviceCountText.Text = "Couldn't scan the network.";
             }
             finally
             {
-                progressBar.Visibility = Visibility.Collapsed;
-                UpdateUI(true);
+                _isScanning = false;
+                searchButton.IsEnabled = true;
             }
         }
 
-        private void ExpandToggle_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// Folds a discovery pass into the existing rows so UI state (busy, status,
+        /// connection) survives the five-second rescan.
+        /// </summary>
+        private void MergeDiscoveredDevices(List<DeviceInfo> discoveredDevices)
         {
-            if (sender is ToggleButton toggleButton)
-            {
-                var parentGrid = toggleButton.Parent as Grid;
-                if (parentGrid != null)
-                {
-                    var expandedInfo = parentGrid.FindName("ExpandedInfo") as StackPanel;
-                    if (expandedInfo != null)
-                    {
-                        expandedInfo.Visibility = toggleButton.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-                    }
-                }
-            }
-        }
+            var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        private void UpdateDeviceList(List<DeviceInfo> discoveredDevices)
-        {
-            var currentDevices = new HashSet<string>(discoveredDevices.Select(d => d.IPAddress));
-
-            foreach (var device in DeviceList.ToList())
+            foreach (var discovered in discoveredDevices)
             {
-                if (!currentDevices.Contains(device.IPAddress))
-                {
-                    DeviceList.Remove(device);
-                }
-            }
+                var key = DeviceViewModel.BuildKey(discovered);
+                seen.Add(key);
 
-            foreach (var discoveredDevice in discoveredDevices)
-            {
-                var existingDevice = DeviceList.FirstOrDefault(d => d.IPAddress == discoveredDevice.IPAddress);
-                if (existingDevice != null)
+                var existing = _allDevices.FirstOrDefault(d =>
+                    string.Equals(d.Key, key, StringComparison.Ordinal));
+                if (existing is null)
                 {
-                    existingDevice.DisplayName = discoveredDevice.DisplayName;
-                    existingDevice.Manufacturer = discoveredDevice.Manufacturer;
-                    existingDevice.Model = discoveredDevice.Model;
-                    existingDevice.IPAddress = discoveredDevice.IPAddress;
-                    existingDevice.ToolTipText = CreateTooltipSummary(existingDevice);
+                    _allDevices.Add(new DeviceViewModel(discovered));
                 }
                 else
                 {
-                    discoveredDevice.ToolTipText = CreateTooltipSummary(discoveredDevice);
-                    DeviceList.Add(discoveredDevice);
+                    existing.Update(discovered);
                 }
+            }
+
+            // A device that misses one scan pass but is still streaming stays listed.
+            _allDevices.RemoveAll(d => !seen.Contains(d.Key) && !d.IsConnected);
+            _allDevices.Sort((left, right) =>
+                string.Compare(left.DisplayName, right.DisplayName, StringComparison.CurrentCultureIgnoreCase));
+        }
+
+        private void RebuildVisibleDevices()
+        {
+            var target = string.IsNullOrWhiteSpace(_filterText)
+                ? _allDevices.ToList()
+                : _allDevices.Where(d => d.MatchesFilter(_filterText)).ToList();
+
+            for (var i = DeviceList.Count - 1; i >= 0; i--)
+            {
+                if (!target.Contains(DeviceList[i]))
+                {
+                    DeviceList.RemoveAt(i);
+                }
+            }
+
+            for (var i = 0; i < target.Count; i++)
+            {
+                if (i >= DeviceList.Count)
+                {
+                    DeviceList.Add(target[i]);
+                    continue;
+                }
+
+                if (!ReferenceEquals(DeviceList[i], target[i]))
+                {
+                    var existingIndex = DeviceList.IndexOf(target[i]);
+                    if (existingIndex >= 0)
+                    {
+                        DeviceList.Move(existingIndex, i);
+                    }
+                    else
+                    {
+                        DeviceList.Insert(i, target[i]);
+                    }
+                }
+            }
+
+            UpdateDeviceCount();
+        }
+
+        private void UpdateDeviceCount()
+        {
+            var hasDevices = DeviceList.Count > 0;
+            devicesList.Visibility = hasDevices ? Visibility.Visible : Visibility.Collapsed;
+            emptyStatePanel.Visibility = hasDevices ? Visibility.Collapsed : Visibility.Visible;
+
+            if (!hasDevices)
+            {
+                deviceCountText.Text = string.IsNullOrWhiteSpace(_filterText)
+                    ? "No devices found yet"
+                    : "No devices match your search";
+                return;
+            }
+
+            deviceCountText.Text = DeviceList.Count == 1
+                ? "1 device found"
+                : $"{DeviceList.Count} devices found";
+        }
+
+        /// <summary>
+        /// macOS refuses AirPlay connections until the receiver is opened up, and Macs
+        /// that still advertise classic AirPlay hit the same wall, so this shows up front
+        /// rather than after a failed attempt. It stays dismissed once closed.
+        /// </summary>
+        private void RefreshAirPlayReceiverHint()
+        {
+            if (_captureMonitor.Settings.AirPlayReceiverHintDismissed)
+            {
+                macHintBar.IsOpen = false;
+                return;
+            }
+
+            macHintBar.IsOpen = _allDevices.Count > 0;
+        }
+
+        private void MacHintBar_CloseButtonClick(InfoBar sender, object args)
+        {
+            _captureMonitor.DismissAirPlayReceiverHint();
+            AppLog.Info("ui", "AirPlay receiver hint dismissed.");
+        }
+
+        private void OnStreamingStateChanged()
+        {
+            SyncConnectionState();
+            RefreshSessionStatus();
+        }
+
+        private void SyncConnectionState()
+        {
+            var connected = _streamingOrchestrator.ConnectedReceivers;
+            foreach (var device in _allDevices)
+            {
+                device.IsConnected = connected.Any(receiver => ReceiverEquals(receiver, device.Device));
             }
         }
 
-        private string CreateTooltipSummary(DeviceInfo device)
+        private void RefreshSessionStatus()
         {
-            var classic = AirPlayCapability.SupportsClassicRaop(device.EncryptionTypes);
-            var ap2 = AirPlayCapability.SupportsAirPlay2(
-                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
-                device.Features,
-                device.AirPlayVersion);
-            var protocol = classic
-                ? "Classic RAOP"
-                : ap2
-                    ? "AirPlay 2 (gated)"
-                    : "Unknown";
-            var et = string.IsNullOrWhiteSpace(device.EncryptionTypes)
-                ? "n/a"
-                : device.EncryptionTypes;
-            return $"Name: {device.DisplayName}\n" +
-                   $"Model: {device.Model}\n" +
-                   $"IP: {device.IPAddress}\n" +
-                   $"Port: {device.Port}\n" +
-                   $"Encryption: {et}\n" +
-                   $"Protocol: {protocol}";
+            var connectedCount = _streamingOrchestrator.ConnectedReceivers.Count;
+            var (text, brushKey) = _streamingOrchestrator.State switch
+            {
+                SessionState.Connecting => ("Connecting…", "SystemFillColorCautionBrush"),
+                SessionState.Reconnecting => ("Reconnecting…", "SystemFillColorCautionBrush"),
+                SessionState.Streaming => (
+                    connectedCount == 1 ? "Streaming" : $"Streaming to {connectedCount} devices",
+                    "SystemFillColorSuccessBrush"),
+                SessionState.Degraded => ("Streaming (degraded)", "SystemFillColorCautionBrush"),
+                SessionState.Disconnecting => ("Disconnecting…", "TextFillColorSecondaryBrush"),
+                SessionState.Failed => ("Stream failed", "SystemFillColorCriticalBrush"),
+                _ => ("Not connected", "TextFillColorSecondaryBrush")
+            };
+
+            statusPillText.Text = text;
+            statusDot.Fill = ThemeBrush(brushKey);
+        }
+
+        private void ShowMessage(InfoBarSeverity severity, string title, string message)
+        {
+            messageBar.Severity = severity;
+            messageBar.Title = title;
+            messageBar.Message = message;
+            messageBar.IsOpen = true;
         }
 
         private async void InfoButton_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is Button button && button.DataContext is DeviceInfo deviceInfo)
+            if (sender is not Button { DataContext: DeviceViewModel device })
             {
-                var dialog = new ContentDialog()
-                {
-                    Title = deviceInfo.DisplayName,
-                    Content = new ScrollViewer
-                    {
-                        Content = new TextBlock
-                        {
-                            Text = deviceInfo.ToolTipText,
-                            TextWrapping = TextWrapping.Wrap
-                        },
-                        VerticalScrollMode = ScrollMode.Auto,
-                        HorizontalScrollMode = ScrollMode.Disabled
-                    },
-                    CloseButtonText = "Close"
-                };
-
-                dialog.XamlRoot = this.Content.XamlRoot;
-                await dialog.ShowAsync();
+                return;
             }
+
+            var dialog = new ContentDialog
+            {
+                Title = device.DisplayName,
+                Content = new ScrollViewer
+                {
+                    Content = new TextBlock
+                    {
+                        Text = CreateDeviceSummary(device.Device),
+                        TextWrapping = TextWrapping.Wrap,
+                        IsTextSelectionEnabled = true
+                    },
+                    VerticalScrollMode = ScrollMode.Auto,
+                    HorizontalScrollMode = ScrollMode.Disabled
+                },
+                CloseButtonText = "Close",
+                XamlRoot = Content.XamlRoot
+            };
+
+            await dialog.ShowAsync();
         }
+
+        private string CreateDeviceSummary(DeviceInfo device)
+        {
+            var classic = AirPlayCapability.SupportsClassicRaop(device.EncryptionTypes);
+            var airPlay2 = AirPlayCapability.SupportsAirPlay2(
+                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
+                device.Features,
+                device.AirPlayVersion);
+            var protocol = AirPlayCapability.PreferredProtocol(
+                classic,
+                airPlay2,
+                airPlay2GateToggle.IsOn) switch
+            {
+                AirPlayProtocolKind.AirPlay2 => "AirPlay 2",
+                AirPlayProtocolKind.ClassicRaop => "AirPlay (classic)",
+                _ => "Not supported"
+            };
+
+            return $"Model: {Fallback(device.Model)}\n" +
+                   $"Manufacturer: {Fallback(device.Manufacturer)}\n" +
+                   $"Address: {Fallback(device.IPAddress)}:{device.Port}\n" +
+                   $"Protocol: {protocol}\n" +
+                   $"Encryption: {Fallback(device.EncryptionTypes)}";
+        }
+
+        private static string Fallback(string value) =>
+            string.IsNullOrWhiteSpace(value) ? "Unknown" : value;
 
         private static bool ReceiverEquals(DeviceInfo left, DeviceInfo right)
         {
@@ -479,8 +654,9 @@ namespace WinStream
                 message.Contains("pair-setup", StringComparison.OrdinalIgnoreCase))
             {
                 return message +
-                    " On a Mac, set AirPlay Receiver to allow Everyone " +
-                    "(or anyone on the same network) and disable a required password.";
+                    " On a Mac, open System Settings > General > AirDrop & Handoff, set " +
+                    "AirPlay Receiver to \"Everyone\" or \"Anyone on the same network\", " +
+                    "and turn off the required password.";
             }
 
             return message;
@@ -491,5 +667,13 @@ namespace WinStream
             searchButton.IsEnabled = isEnabled;
             refreshButton.IsEnabled = isEnabled;
         }
+
+        private static Brush ThemeBrush(string key) =>
+            Application.Current.Resources.TryGetValue(key, out var value) && value is Brush brush
+                ? brush
+                : new SolidColorBrush(Colors.Gray);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
     }
 }

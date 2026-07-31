@@ -18,6 +18,11 @@ public sealed class AppSettings
     public bool EnableAirPlay2Experimental { get; set; }
 
     /// <summary>
+    /// Set once the user dismisses the hint about enabling AirPlay Receiver on a Mac.
+    /// </summary>
+    public bool AirPlayReceiverHintDismissed { get; set; }
+
+    /// <summary>
     /// Store builds use loopback. VirtualDriver requires the optional sideload driver.
     /// </summary>
     public CaptureMode CaptureMode { get; set; } = CaptureMode.Loopback;

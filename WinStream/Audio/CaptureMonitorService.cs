@@ -70,6 +70,18 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void DismissAirPlayReceiverHint()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_settings.AirPlayReceiverHintDismissed)
+        {
+            return;
+        }
+
+        _settings.AirPlayReceiverHintDismissed = true;
+        _settingsStore.Save(_settings);
+    }
+
     public void SetCaptureMode(CaptureMode mode)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
