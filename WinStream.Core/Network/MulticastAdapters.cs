@@ -1,7 +1,7 @@
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
-namespace WinStream.Network;
+namespace WinStream.Core.Network;
 
 /// <summary>
 /// Zeroconf throws NetworkInformationException (10043) when an adapter has no

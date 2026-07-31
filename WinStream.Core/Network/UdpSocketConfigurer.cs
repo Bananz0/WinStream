@@ -4,7 +4,7 @@ using System;
 using System.Net.Sockets;
 using WinStream.Core.Logging;
 
-namespace WinStream.Networking;
+namespace WinStream.Core.Network;
 
 public static class UdpSocketConfigurer
 {

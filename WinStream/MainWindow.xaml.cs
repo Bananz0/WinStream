@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using WinStream.Audio;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
+using WinStream.Core.Network;
 using WinStream.Core.Persistence;
 using WinStream.Core.Streaming;
 using WinStream.Network;
@@ -33,21 +34,25 @@ namespace WinStream
         public ObservableCollection<DeviceViewModel> DeviceList { get; } = new();
 
         private readonly List<DeviceViewModel> _allDevices = new();
-        private readonly CaptureMonitorService _captureMonitor = new();
-        private readonly StreamingOrchestrator _streamingOrchestrator = new();
+        private readonly AppSettingsService _settings = new();
+        private readonly CaptureMonitorService _captureMonitor;
+        private readonly StreamingOrchestrator _streamingOrchestrator;
+        private readonly DeviceDiscoveryCoordinator _discovery = new();
+        private readonly AutoConnectAttemptTracker _autoConnectAttempts = new();
         private readonly DispatcherTimer _scanTimer;
         private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
         private string _filterText = string.Empty;
         private bool _allowClose;
-        private bool _isScanning;
+        private bool _connectionInFlight;
         private bool _suppressCaptureSelectionEvents;
         private bool _suppressAutoConnectEvents;
-        private bool _autoConnectAttempted;
 
         public MainWindow()
         {
             InitializeComponent();
+            _captureMonitor = new CaptureMonitorService(_settings);
+            _streamingOrchestrator = new StreamingOrchestrator(_settings.EnsureSenderDeviceId());
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
             _appWindow = AppWindow.GetFromWindowId(windowId);
@@ -73,8 +78,6 @@ namespace WinStream
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
             RestoreAutoConnectSetting();
-            captureModeComboBox.SelectedIndex =
-                _captureMonitor.Settings.CaptureMode == CaptureMode.VirtualDriver ? 1 : 0;
             UpdateVolumeReadout(streamVolumeSlider.Value);
             RefreshSessionStatus();
             _ = DiscoverAndDisplayDevicesAsync();
@@ -98,8 +101,11 @@ namespace WinStream
             _allowClose = true;
             _scanTimer.Stop();
             _captureLevelTimer.Stop();
-            await _captureMonitor.DisposeAsync();
+
+            // Tear down streaming first: the orchestrator is still subscribed to the
+            // capture source and would pump frames into a disposed WASAPI client.
             await _streamingOrchestrator.DisposeAsync();
+            await _captureMonitor.DisposeAsync();
             Close();
         }
 
@@ -209,7 +215,7 @@ namespace WinStream
                     .ToList();
                 captureDeviceComboBox.ItemsSource = endpoints;
 
-                var selectedId = _captureMonitor.Settings.SelectedRenderDeviceId;
+                var selectedId = _captureMonitor.SelectedEndpointId;
                 captureDeviceComboBox.SelectedItem =
                     endpoints.FirstOrDefault(e =>
                         string.Equals(e.Id, selectedId, StringComparison.OrdinalIgnoreCase))
@@ -235,14 +241,14 @@ namespace WinStream
             _suppressCaptureSelectionEvents = true;
             try
             {
-                monitorCaptureToggle.IsOn = _captureMonitor.Settings.MonitorCapture;
+                monitorCaptureToggle.IsOn = _captureMonitor.IsMonitoring;
             }
             finally
             {
                 _suppressCaptureSelectionEvents = false;
             }
 
-            if (_captureMonitor.Settings.MonitorCapture)
+            if (_captureMonitor.IsMonitoring)
             {
                 _ = _captureMonitor.SetMonitoringAsync(true);
             }
@@ -255,7 +261,7 @@ namespace WinStream
             _suppressAutoConnectEvents = true;
             try
             {
-                autoConnectToggle.IsOn = _captureMonitor.Settings.AutoConnectLastReceiver;
+                autoConnectToggle.IsOn = _settings.Settings.AutoConnectLastReceiver;
                 RefreshAutoConnectDescription();
             }
             finally
@@ -271,11 +277,12 @@ namespace WinStream
                 return;
             }
 
-            _captureMonitor.SetAutoConnectLastReceiver(autoConnectToggle.IsOn);
-            _autoConnectAttempted = false;
+            var enabled = autoConnectToggle.IsOn;
+            _settings.Update(settings => settings.AutoConnectLastReceiver = enabled);
+            _autoConnectAttempts.Reset();
             RefreshAutoConnectDescription();
 
-            if (autoConnectToggle.IsOn)
+            if (enabled)
             {
                 await TryAutoConnectToLastReceiverAsync();
             }
@@ -283,10 +290,17 @@ namespace WinStream
 
         private void RefreshAutoConnectDescription()
         {
-            var receiverName = _captureMonitor.Settings.LastReceiverName;
-            autoConnectDescriptionText.Text = string.IsNullOrWhiteSpace(receiverName)
-                ? "Your next successful connection will become the startup device."
-                : $"Automatically reconnect to {receiverName} as soon as it appears.";
+            var receiverName = _settings.Settings.LastReceiverName;
+            if (string.IsNullOrWhiteSpace(receiverName))
+            {
+                autoConnectDescriptionText.Text =
+                    "Your next successful connection will become the startup device.";
+                return;
+            }
+
+            autoConnectDescriptionText.Text = autoConnectToggle.IsOn
+                ? $"Automatically reconnect to {receiverName} as soon as it appears."
+                : $"Your last device was {receiverName}. Turn this on to reconnect to it automatically.";
         }
 
         private void UpdateCaptureLevelUi()
@@ -320,24 +334,6 @@ namespace WinStream
             var format = _captureMonitor.Format;
             captureStatusText.Text = format is null ? "Capturing" : format.ToString();
             captureStatusText.Foreground = ThemeBrush("SystemFillColorSuccessBrush");
-        }
-
-        private void CaptureModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (captureModeComboBox.SelectedItem is ComboBoxItem item &&
-                item.Tag is string tag &&
-                Enum.TryParse<CaptureMode>(tag, out var mode))
-            {
-                _captureMonitor.SetCaptureMode(mode);
-                if (mode == CaptureMode.VirtualDriver)
-                {
-                    ShowMessage(
-                        InfoBarSeverity.Warning,
-                        "Virtual audio driver required",
-                        "Install the optional WinStream audio driver to use this mode. " +
-                        "It isn't included in the Store version.");
-                }
-            }
         }
 
         private async void StreamVolumeSlider_ValueChanged(
@@ -375,11 +371,21 @@ namespace WinStream
             await SetDeviceConnectionAsync(device, connect: !device.IsConnected);
         }
 
+        /// <summary>
+        /// The single connect/disconnect path. One attempt runs at a time so an automatic
+        /// connection and a button press cannot race into the exclusive AirPlay 2 session.
+        /// </summary>
         private async Task SetDeviceConnectionAsync(
             DeviceViewModel device,
             bool connect,
             bool isAutomatic = false)
         {
+            if (_connectionInFlight)
+            {
+                return;
+            }
+
+            _connectionInFlight = true;
             messageBar.IsOpen = false;
             device.ClearStatus();
             if (connect && isAutomatic)
@@ -397,6 +403,7 @@ namespace WinStream
                     await _streamingOrchestrator.DisconnectAsync(device.Device);
                     device.SetStatus("Disconnected.", DeviceStatusKind.Neutral);
                     AppLog.Info("ui", "Disconnected from receiver.");
+                    await StopCaptureIfIdleAsync();
                     return;
                 }
 
@@ -408,8 +415,8 @@ namespace WinStream
 
                 await _streamingOrchestrator.ConnectAsync(device.Device, source);
                 await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
-                _captureMonitor.RememberReceiver(device.Key, device.DisplayName);
-                RefreshAutoConnectDescription();
+                RememberReceiver(device);
+                _autoConnectAttempts.RecordSuccess();
 
                 if (_streamingOrchestrator.State == SessionState.Degraded)
                 {
@@ -422,10 +429,13 @@ namespace WinStream
             }
             catch (Exception ex)
             {
+                if (isAutomatic)
+                {
+                    _autoConnectAttempts.RecordFailure();
+                }
+
                 device.SetStatus(
-                    isAutomatic
-                        ? "Automatic connection failed. Connect manually to try again."
-                        : "Couldn't connect.",
+                    isAutomatic ? "Automatic connection failed. Retrying later." : "Couldn't connect.",
                     DeviceStatusKind.Error);
                 if (!isAutomatic)
                 {
@@ -439,11 +449,50 @@ namespace WinStream
             }
             finally
             {
+                _connectionInFlight = false;
                 device.IsBusy = false;
                 UpdateUI(true);
                 SyncConnectionState();
                 RefreshSessionStatus();
             }
+        }
+
+        private void RememberReceiver(DeviceViewModel device)
+        {
+            var key = device.Key;
+            var name = device.DisplayName;
+            var changed = !string.Equals(
+                _settings.Settings.LastReceiverKey,
+                key,
+                StringComparison.Ordinal);
+
+            _settings.Update(settings =>
+            {
+                settings.LastReceiverKey = key;
+                settings.LastReceiverName = name;
+            });
+
+            if (changed)
+            {
+                _autoConnectAttempts.Reset();
+            }
+
+            RefreshAutoConnectDescription();
+        }
+
+        /// <summary>
+        /// Loopback capture only exists for streaming unless the user asked to monitor,
+        /// so it must not keep running once the last receiver is gone.
+        /// </summary>
+        private async Task StopCaptureIfIdleAsync()
+        {
+            if (_captureMonitor.IsMonitoring ||
+                _streamingOrchestrator.ConnectedReceivers.Count > 0)
+            {
+                return;
+            }
+
+            await _captureMonitor.StopAsync();
         }
 
         /// <summary>
@@ -452,12 +501,6 @@ namespace WinStream
         /// </summary>
         private async Task DiscoverAndDisplayDevicesAsync(bool showProgress = false)
         {
-            if (_isScanning)
-            {
-                return;
-            }
-
-            _isScanning = true;
             var announce = showProgress || _allDevices.Count == 0;
             if (announce)
             {
@@ -465,12 +508,15 @@ namespace WinStream
                 deviceCountText.Text = "Looking for devices…";
             }
 
-            var cts = new CancellationTokenSource();
-
             try
             {
-                var discoveredDevices = await DeviceDiscovery.DiscoverDevicesAsync(cts.Token);
-                MergeDiscoveredDevices(discoveredDevices);
+                var present = await _discovery.ScanAsync(IsConnectedKey);
+                if (present is null)
+                {
+                    return;
+                }
+
+                ApplyDiscoveredDevices(present);
                 RebuildVisibleDevices();
                 RefreshAirPlayReceiverHint();
                 await TryAutoConnectToLastReceiverAsync();
@@ -482,73 +528,79 @@ namespace WinStream
             }
             finally
             {
-                _isScanning = false;
                 searchButton.IsEnabled = true;
             }
         }
 
+        private bool IsConnectedKey(string key) =>
+            _allDevices.Any(device =>
+                device.IsConnected && string.Equals(device.Key, key, StringComparison.Ordinal));
+
         private async Task TryAutoConnectToLastReceiverAsync()
         {
-            var settings = _captureMonitor.Settings;
-            if (_autoConnectAttempted ||
-                !settings.AutoConnectLastReceiver ||
-                string.IsNullOrWhiteSpace(settings.LastReceiverKey) ||
-                _streamingOrchestrator.State != SessionState.Disconnected)
-            {
-                return;
-            }
-
-            var device = _allDevices.FirstOrDefault(candidate =>
-                string.Equals(
-                    candidate.Key,
+            var settings = _settings.Settings;
+            if (!AutoConnectPolicy.ShouldAttempt(
+                    settings.AutoConnectLastReceiver,
                     settings.LastReceiverKey,
-                    StringComparison.Ordinal));
-            if (device is null || device.IsBusy)
+                    _streamingOrchestrator.State,
+                    _connectionInFlight,
+                    _autoConnectAttempts.AttemptsAvailable))
             {
                 return;
             }
 
-            _autoConnectAttempted = true;
-            AppLog.Info("ui", "Startup receiver found; connecting automatically.");
-            await SetDeviceConnectionAsync(device, connect: true, isAutomatic: true);
+            var target = AutoConnectPolicy.FindTarget(
+                _allDevices.Select(device => device.Device),
+                settings.LastReceiverKey);
+            if (target is null)
+            {
+                return;
+            }
+
+            var row = _allDevices.First(device => ReferenceEquals(device.Device, target));
+            AppLog.Info("ui", "Remembered receiver found; connecting automatically.");
+            await SetDeviceConnectionAsync(row, connect: true, isAutomatic: true);
         }
 
         /// <summary>
-        /// Folds a discovery pass into the existing rows so UI state (busy, status,
-        /// connection) survives the five-second rescan.
+        /// Folds the receivers the coordinator reports as present into the existing rows,
+        /// so UI state (busy, status, connection) survives the five-second rescan.
         /// </summary>
-        private void MergeDiscoveredDevices(List<DeviceInfo> discoveredDevices)
+        private void ApplyDiscoveredDevices(IReadOnlyList<DeviceInfo> present)
         {
             var seen = new HashSet<string>(StringComparer.Ordinal);
 
-            foreach (var discovered in discoveredDevices)
+            foreach (var device in present)
             {
-                var key = DeviceViewModel.BuildKey(discovered);
+                var key = DeviceViewModel.BuildKey(device);
                 seen.Add(key);
 
-                var existing = _allDevices.FirstOrDefault(d =>
-                    string.Equals(d.Key, key, StringComparison.Ordinal));
+                var existing = _allDevices.FirstOrDefault(row =>
+                    string.Equals(row.Key, key, StringComparison.Ordinal));
                 if (existing is null)
                 {
-                    _allDevices.Add(new DeviceViewModel(discovered));
+                    _allDevices.Add(new DeviceViewModel(device));
                 }
                 else
                 {
-                    existing.Update(discovered);
+                    existing.Update(device);
                 }
             }
 
-            // A device that misses one scan pass but is still streaming stays listed.
-            _allDevices.RemoveAll(d => !seen.Contains(d.Key) && !d.IsConnected);
+            _allDevices.RemoveAll(row => !seen.Contains(row.Key));
             _allDevices.Sort((left, right) =>
                 string.Compare(left.DisplayName, right.DisplayName, StringComparison.CurrentCultureIgnoreCase));
         }
 
+        /// <summary>
+        /// Syncs the bound collection in place rather than rebuilding it, so a rescan
+        /// every five seconds doesn't reset scroll position or flash the list.
+        /// </summary>
         private void RebuildVisibleDevices()
         {
             var target = string.IsNullOrWhiteSpace(_filterText)
                 ? _allDevices.ToList()
-                : _allDevices.Where(d => d.MatchesFilter(_filterText)).ToList();
+                : _allDevices.Where(device => device.MatchesFilter(_filterText)).ToList();
 
             for (var i = DeviceList.Count - 1; i >= 0; i--)
             {
@@ -560,23 +612,19 @@ namespace WinStream
 
             for (var i = 0; i < target.Count; i++)
             {
-                if (i >= DeviceList.Count)
+                if (i < DeviceList.Count && ReferenceEquals(DeviceList[i], target[i]))
                 {
-                    DeviceList.Add(target[i]);
                     continue;
                 }
 
-                if (!ReferenceEquals(DeviceList[i], target[i]))
+                var existingIndex = DeviceList.IndexOf(target[i]);
+                if (existingIndex >= 0)
                 {
-                    var existingIndex = DeviceList.IndexOf(target[i]);
-                    if (existingIndex >= 0)
-                    {
-                        DeviceList.Move(existingIndex, i);
-                    }
-                    else
-                    {
-                        DeviceList.Insert(i, target[i]);
-                    }
+                    DeviceList.Move(existingIndex, i);
+                }
+                else
+                {
+                    DeviceList.Insert(i, target[i]);
                 }
             }
 
@@ -609,7 +657,7 @@ namespace WinStream
         /// </summary>
         private void RefreshAirPlayReceiverHint()
         {
-            if (_captureMonitor.Settings.AirPlayReceiverHintDismissed)
+            if (_settings.Settings.AirPlayReceiverHintDismissed)
             {
                 macHintBar.IsOpen = false;
                 return;
@@ -620,7 +668,7 @@ namespace WinStream
 
         private void MacHintBar_CloseButtonClick(InfoBar sender, object args)
         {
-            _captureMonitor.DismissAirPlayReceiverHint();
+            _settings.Update(settings => settings.AirPlayReceiverHintDismissed = true);
             AppLog.Info("ui", "AirPlay receiver hint dismissed.");
         }
 
@@ -635,7 +683,8 @@ namespace WinStream
             var connected = _streamingOrchestrator.ConnectedReceivers;
             foreach (var device in _allDevices)
             {
-                device.IsConnected = connected.Any(receiver => ReceiverEquals(receiver, device.Device));
+                device.IsConnected = connected.Any(receiver =>
+                    ReceiverKey.SameReceiver(receiver, device.Device));
             }
         }
 
@@ -695,9 +744,9 @@ namespace WinStream
             await dialog.ShowAsync();
         }
 
-        private string CreateDeviceSummary(DeviceInfo device)
+        private static string CreateDeviceSummary(DeviceInfo device)
         {
-            var protocol = StreamingOrchestrator.DescribePreferredProtocol(device);
+            var protocol = AirPlayCapability.DescribePreferred(device);
 
             return $"Model: {Fallback(device.Model)}\n" +
                    $"Manufacturer: {Fallback(device.Manufacturer)}\n" +
@@ -708,18 +757,6 @@ namespace WinStream
 
         private static string Fallback(string value) =>
             string.IsNullOrWhiteSpace(value) ? "Unknown" : value;
-
-        private static bool ReceiverEquals(DeviceInfo left, DeviceInfo right)
-        {
-            if (!string.IsNullOrWhiteSpace(left.DeviceID) &&
-                !string.IsNullOrWhiteSpace(right.DeviceID))
-            {
-                return string.Equals(left.DeviceID, right.DeviceID, StringComparison.Ordinal);
-            }
-
-            return string.Equals(left.IPAddress, right.IPAddress, StringComparison.Ordinal) &&
-                   left.Port == right.Port;
-        }
 
         private static string FormatConnectionFailure(string message)
         {

@@ -1,5 +1,5 @@
 using System.Net.NetworkInformation;
-using WinStream.Network;
+using WinStream.Core.Network;
 
 namespace WinStream.Tests;
 

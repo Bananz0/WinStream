@@ -377,25 +377,6 @@
                                    Style="{StaticResource HintTextStyle}"/>
                     </StackPanel>
                 </Border>
-
-                <!-- Rarely used, so it stays collapsed -->
-                <Expander HorizontalAlignment="Stretch"
-                          HorizontalContentAlignment="Stretch"
-                          Header="Advanced">
-                    <StackPanel Spacing="16" Padding="0,8,0,4">
-                        <StackPanel Spacing="4">
-                            <ComboBox x:Name="captureModeComboBox"
-                                      Header="Capture method"
-                                      MinWidth="220"
-                                      SelectionChanged="CaptureModeComboBox_SelectionChanged">
-                                <ComboBoxItem Content="System loopback" Tag="Loopback"/>
-                                <ComboBoxItem Content="Virtual audio driver" Tag="VirtualDriver"/>
-                            </ComboBox>
-                            <TextBlock Style="{StaticResource HintTextStyle}"
-                                       Text="System loopback works out of the box. The virtual driver must be installed separately and is not included in the Store version."/>
-                        </StackPanel>
-                    </StackPanel>
-                </Expander>
             </StackPanel>
         </ScrollViewer>
     </Grid>

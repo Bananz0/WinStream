@@ -11,7 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Protocol.Raop;
 
-namespace WinStream.Network;
+namespace WinStream.Core.Network;
 
 public sealed class RtspClient : IAsyncDisposable
 {

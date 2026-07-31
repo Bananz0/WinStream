@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using WinStream.Core.Logging;
-using WinStream.Networking;
+using WinStream.Core.Network;
 
 namespace WinStream.Core.Protocol.AirPlay2;
 

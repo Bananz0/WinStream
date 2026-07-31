@@ -1,3 +1,5 @@
+using WinStream.Core.Network;
+
 namespace WinStream.Core.Streaming;
 
 public enum AirPlayProtocolKind
@@ -106,6 +108,31 @@ public static class AirPlayCapability
 
         return AirPlayProtocolKind.Unknown;
     }
+
+    /// <summary>
+    /// The single decision point for which protocol a receiver is driven with, so
+    /// connect logic and any label describing it can never disagree.
+    /// </summary>
+    public static AirPlayProtocolKind PreferredProtocol(DeviceInfo device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        return PreferredProtocol(
+            SupportsClassicRaop(device.EncryptionTypes),
+            SupportsAirPlay2(
+                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
+                device.Features,
+                device.AirPlayVersion));
+    }
+
+    public static string Describe(AirPlayProtocolKind kind) => kind switch
+    {
+        AirPlayProtocolKind.AirPlay2 => "AirPlay 2",
+        AirPlayProtocolKind.ClassicRaop => "AirPlay (classic)",
+        _ => "Not supported"
+    };
+
+    public static string DescribePreferred(DeviceInfo device) =>
+        Describe(PreferredProtocol(device));
 
     public static void EnsureHomogeneousSelection(
         IEnumerable<AirPlayProtocolKind> selectedProtocols)

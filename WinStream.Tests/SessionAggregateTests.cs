@@ -33,6 +33,21 @@ public class SessionAggregateTests
     }
 
     [Fact]
+    public void No_sessions_is_disconnected()
+    {
+        Assert.Equal(SessionState.Disconnected, SessionAggregate.Calculate([]));
+    }
+
+    [Fact]
+    public void All_failed_is_failed()
+    {
+        var state = SessionAggregate.Calculate(
+            [SessionState.Failed, SessionState.Failed]);
+
+        Assert.Equal(SessionState.Failed, state);
+    }
+
+    [Fact]
     public void Reconnect_in_progress_wins()
     {
         var state = SessionAggregate.Calculate(

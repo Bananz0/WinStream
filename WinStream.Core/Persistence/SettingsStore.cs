@@ -1,5 +1,5 @@
 using System.Text.Json;
-using WinStream.Core.Persistence;
+using WinStream.Core.Logging;
 
 namespace WinStream.Core.Persistence;
 
@@ -35,8 +35,11 @@ public sealed class SettingsStore
             var json = File.ReadAllText(_settingsPath);
             return JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
         }
-        catch
+        catch (Exception ex)
         {
+            // Falling back to defaults silently makes a wiped sender identity or lost
+            // auto-connect target look like a bug elsewhere.
+            AppLog.Warn("settings", $"Failed to read settings; using defaults: {ex.GetType().Name}");
             return new AppSettings();
         }
     }

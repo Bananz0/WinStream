@@ -1,4 +1,4 @@
-using WinStream.Network;
+using WinStream.Core.Network;
 using Zeroconf;
 
 namespace WinStream.Tools.RaopProbe;

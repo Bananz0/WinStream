@@ -1,5 +1,5 @@
+using WinStream.Core.Network;
 using WinStream.Core.Streaming;
-using WinStream.Network;
 
 namespace WinStream.Tests;
 

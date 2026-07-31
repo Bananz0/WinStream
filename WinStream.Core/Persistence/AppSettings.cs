@@ -33,7 +33,8 @@ public sealed class AppSettings
     public bool AirPlayReceiverHintDismissed { get; set; }
 
     /// <summary>
-    /// Store builds use loopback. VirtualDriver requires the optional sideload driver.
+    /// Store builds use loopback. VirtualDriver requires the optional sideload driver
+    /// and is not user-selectable until a virtual-driver capture source exists.
     /// </summary>
     public CaptureMode CaptureMode { get; set; } = CaptureMode.Loopback;
 

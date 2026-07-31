@@ -7,8 +7,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
+using WinStream.Core.Network;
 using WinStream.Core.Streaming;
-using WinStream.Network;
 
 namespace WinStream.Streaming;
 
@@ -17,6 +17,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     // ~1.5 s of 10 ms frames at drop-oldest under CPU spikes before late audio is discarded.
     private const int SendQueueCapacity = 64;
 
+    private readonly string? _senderDeviceId;
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
@@ -31,17 +32,18 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private SessionState _aggregateState = SessionState.Disconnected;
     private bool _disposed;
 
-    public StreamingOrchestrator()
+    /// <param name="senderDeviceId">
+    /// Persisted per-install sender MAC for AirPlay 2 sessions, resolved by the app.
+    /// </param>
+    public StreamingOrchestrator(string? senderDeviceId = null)
     {
+        _senderDeviceId = senderDeviceId;
         _resilience.RecoverRequested += OnRecoverRequested;
     }
 
     public event EventHandler<SessionStateChanged>? StateChanged;
 
     public SessionState State => _aggregateState;
-
-    public DeviceInfo? CurrentReceiver =>
-        _sessions.Values.Select(entry => entry.Receiver).FirstOrDefault();
 
     public IReadOnlyList<DeviceInfo> ConnectedReceivers =>
         _sessions.Values.Select(entry => entry.Receiver).ToList();
@@ -57,7 +59,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var id = ReceiverKey(receiver);
+            var id = Core.Network.ReceiverKey.For(receiver);
             lock (_sessionsGate)
             {
                 if (_sessions.ContainsKey(id))
@@ -76,9 +78,9 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 await _audioSource.StartAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            SetAggregate(SessionState.Connecting, $"Connecting {SafeName(receiver)}");
+            SetAggregate(SessionState.Connecting, "Connecting receiver");
             IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(receiver)
+                ? new AirPlay2Session(receiver, _senderDeviceId)
                 : new RaopSession(receiver);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
@@ -136,7 +138,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             }
             else
             {
-                await RemoveSessionAsync(ReceiverKey(receiver), cancellationToken)
+                await RemoveSessionAsync(Core.Network.ReceiverKey.For(receiver), cancellationToken)
                     .ConfigureAwait(false);
                 RefreshAggregate("removed");
             }
@@ -226,14 +228,17 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
         foreach (var entry in snapshot)
         {
-            if (entry.Session.State is not (SessionState.Streaming or SessionState.Degraded))
+            // Read the session once: reconnect can swap it mid-loop, and submitting to
+            // the replaced instance would touch a disposed session.
+            var session = entry.Session;
+            if (session.State is not (SessionState.Streaming or SessionState.Degraded))
             {
                 continue;
             }
 
             try
             {
-                entry.Session.SubmitPcm(frame.Pcm, frame.Format, stamp);
+                session.SubmitPcm(frame.Pcm, frame.Format, stamp);
             }
             catch (Exception ex)
             {
@@ -437,26 +442,29 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 // ignore
             }
 
-            entry.Session.StateChanged -= OnSessionStateChanged;
-            await entry.Session.DisposeAsync().ConfigureAwait(false);
+            var retired = entry.Session;
+            retired.StateChanged -= OnSessionStateChanged;
 
             IAirPlaySession replacement = entry.Protocol == AirPlayProtocolKind.AirPlay2
-                ? new AirPlay2Session(entry.Receiver)
+                ? new AirPlay2Session(entry.Receiver, _senderDeviceId)
                 : new RaopSession(entry.Receiver);
             replacement.StateChanged += OnSessionStateChanged;
-            entry.Session = replacement;
+
+            // Publish the replacement before disposing the old session so the send
+            // pump never observes an entry pointing at disposed state.
+            lock (_sessionsGate)
+            {
+                entry.Session = replacement;
+            }
+
+            await retired.DisposeAsync().ConfigureAwait(false);
             await replacement.ConnectAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private AirPlayProtocolKind ResolveProtocol(DeviceInfo receiver)
+    private static AirPlayProtocolKind ResolveProtocol(DeviceInfo receiver)
     {
-        var classic = AirPlayCapability.SupportsClassicRaop(receiver.EncryptionTypes);
-        var ap2 = AirPlayCapability.SupportsAirPlay2(
-            !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
-            receiver.Features,
-            receiver.AirPlayVersion);
-        var preferred = AirPlayCapability.PreferredProtocol(classic, ap2);
+        var preferred = AirPlayCapability.PreferredProtocol(receiver);
         if (preferred == AirPlayProtocolKind.Unknown)
         {
             throw new InvalidOperationException(
@@ -490,22 +498,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 "Only one AirPlay 2 receiver can be connected at a time " +
                 "(PTP clock ports 319/320 are exclusive).");
         }
-    }
-
-    /// <summary>UI-facing protocol label from the same decision as ConnectAsync.</summary>
-    public static string DescribePreferredProtocol(DeviceInfo receiver)
-    {
-        var classic = AirPlayCapability.SupportsClassicRaop(receiver.EncryptionTypes);
-        var ap2 = AirPlayCapability.SupportsAirPlay2(
-            !string.IsNullOrWhiteSpace(receiver.PublicCUAirPlayPairingIdentity),
-            receiver.Features,
-            receiver.AirPlayVersion);
-        return AirPlayCapability.PreferredProtocol(classic, ap2) switch
-        {
-            AirPlayProtocolKind.AirPlay2 => "AirPlay 2",
-            AirPlayProtocolKind.ClassicRaop => "AirPlay (classic)",
-            _ => "Not supported"
-        };
     }
 
     private async Task FailAllAsync(string reason)
@@ -580,13 +572,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             AppLog.Info("stream", $"State={state}; {reason}");
         }
     }
-
-    private static string ReceiverKey(DeviceInfo receiver) =>
-        !string.IsNullOrWhiteSpace(receiver.DeviceID)
-            ? receiver.DeviceID
-            : $"{receiver.IPAddress}:{receiver.Port}";
-
-    private static string SafeName(DeviceInfo _) => "receiver";
 
     private sealed class SessionEntry(
         DeviceInfo receiver,

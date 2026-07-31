@@ -8,9 +8,8 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Core.Audio;
+using WinStream.Core.Network;
 using WinStream.Core.Protocol.Raop;
-using WinStream.Network;
-using WinStream.Networking;
 
 namespace WinStream.Core.Streaming;
 
@@ -52,9 +51,7 @@ public sealed class RaopSession : IAirPlaySession
     public RaopSession(DeviceInfo receiver)
     {
         _receiver = receiver ?? throw new ArgumentNullException(nameof(receiver));
-        ReceiverId = !string.IsNullOrWhiteSpace(receiver.DeviceID)
-            ? receiver.DeviceID
-            : $"{receiver.IPAddress}:{receiver.Port}";
+        ReceiverId = ReceiverKey.For(receiver);
         _stateMachine.StateChanged += (_, change) =>
             StateChanged?.Invoke(this, change);
     }

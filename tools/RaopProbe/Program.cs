@@ -2,7 +2,7 @@ using System.Diagnostics;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
 using WinStream.Core.Streaming;
-using WinStream.Network;
+using WinStream.Core.Network;
 
 // Headless RAOP diagnostic harness. Drives the same RaopSession the app uses so
 // protocol fixes can be validated without the WinUI shell.

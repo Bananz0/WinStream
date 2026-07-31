@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using WinStream.Core.Protocol.AirPlay2;
-using WinStream.Network;
+using WinStream.Core.Network;
 
 namespace WinStream.Tools.RaopProbe;
 

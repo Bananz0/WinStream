@@ -6,8 +6,8 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
+using WinStream.Core.Network;
 using WinStream.Core.Streaming;
-using WinStream.Network;
 
 namespace WinStream.ViewModels;
 
@@ -110,10 +110,7 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
         Notify(nameof(Subtitle));
     }
 
-    public static string BuildKey(DeviceInfo device) =>
-        string.IsNullOrWhiteSpace(device.DeviceID)
-            ? $"{device.IPAddress}:{device.Port}"
-            : device.DeviceID;
+    public static string BuildKey(DeviceInfo device) => ReceiverKey.For(device);
 
     public bool MatchesFilter(string filter) =>
         DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
@@ -173,23 +170,10 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
             parts.Add(device.IPAddress);
         }
 
-        parts.Add(DescribeProtocol(device));
+        // Same decision the connect path makes, so the label can't promise a protocol
+        // the session won't use.
+        parts.Add(AirPlayCapability.DescribePreferred(device));
         return string.Join("  •  ", parts);
-    }
-
-    private static string DescribeProtocol(DeviceInfo device)
-    {
-        if (AirPlayCapability.SupportsAirPlay2(
-                !string.IsNullOrWhiteSpace(device.PublicCUAirPlayPairingIdentity),
-                device.Features,
-                device.AirPlayVersion))
-        {
-            return "AirPlay 2";
-        }
-
-        return AirPlayCapability.SupportsClassicRaop(device.EncryptionTypes)
-            ? "AirPlay"
-            : "Unrecognized protocol";
     }
 
     private static Style? LookupStyle(string key) =>

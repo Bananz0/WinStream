@@ -5,11 +5,10 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
+using WinStream.Core.Network;
 using WinStream.Core.Persistence;
 using WinStream.Core.Protocol.AirPlay2;
 using WinStream.Core.Protocol.Raop;
-using WinStream.Network;
-using WinStream.Networking;
 
 namespace WinStream.Core.Streaming;
 
@@ -33,6 +32,7 @@ public sealed class AirPlay2Session : IAirPlaySession
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(2);
 
     private readonly DeviceInfo _receiver;
+    private readonly string _senderDeviceId;
     private readonly SessionStateMachine _stateMachine = new();
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly PcmPacketBuffer _pcmBuffer = new();
@@ -59,12 +59,17 @@ public sealed class AirPlay2Session : IAirPlaySession
     private float _volumeDb = -20f;
     private bool _disposed;
 
-    public AirPlay2Session(DeviceInfo receiver)
+    /// <param name="senderDeviceId">
+    /// Per-install sender MAC, resolved and persisted by the app. Sessions never touch
+    /// settings themselves; an unsupplied ID falls back to a throwaway per-session value.
+    /// </param>
+    public AirPlay2Session(DeviceInfo receiver, string? senderDeviceId = null)
     {
         _receiver = receiver ?? throw new ArgumentNullException(nameof(receiver));
-        ReceiverId = !string.IsNullOrWhiteSpace(receiver.DeviceID)
-            ? receiver.DeviceID
-            : $"{receiver.IPAddress}:{receiver.Port}";
+        _senderDeviceId = SenderIdentity.LooksLikeMac(senderDeviceId)
+            ? senderDeviceId!
+            : SenderIdentity.CreateLocallyAdministeredMac();
+        ReceiverId = ReceiverKey.For(receiver);
         _stateMachine.StateChanged += (_, change) =>
             StateChanged?.Invoke(this, change);
     }
@@ -98,7 +103,7 @@ public sealed class AirPlay2Session : IAirPlaySession
 
                 var client = new EncryptedRtspClient(_receiver.IPAddress, _receiver.Port)
                 {
-                    DeviceId = ResolveSenderDeviceId()
+                    DeviceId = _senderDeviceId
                 };
                 _control = client;
 
@@ -604,53 +609,4 @@ public sealed class AirPlay2Session : IAirPlaySession
     private static string NormalizeHost(string host) =>
         host.Trim().TrimStart('[').TrimEnd(']');
 
-    /// <summary>
-    /// Per-install locally administered MAC. Shared hard-coded IDs collide when
-    /// two WinStream instances share a LAN.
-    /// </summary>
-    private static string ResolveSenderDeviceId()
-    {
-        var store = new SettingsStore();
-        var settings = store.Load();
-        if (!string.IsNullOrWhiteSpace(settings.SenderDeviceId) &&
-            LooksLikeMac(settings.SenderDeviceId))
-        {
-            return settings.SenderDeviceId;
-        }
-
-        var bytes = RandomNumberGenerator.GetBytes(6);
-        bytes[0] = (byte)((bytes[0] | 0x02) & 0xFE); // locally administered, unicast
-        var id = string.Create(
-            17,
-            bytes,
-            static (span, src) =>
-            {
-                const string hex = "0123456789ABCDEF";
-                var o = 0;
-                for (var i = 0; i < 6; i++)
-                {
-                    if (i > 0)
-                    {
-                        span[o++] = ':';
-                    }
-
-                    span[o++] = hex[src[i] >> 4];
-                    span[o++] = hex[src[i] & 0xF];
-                }
-            });
-        settings.SenderDeviceId = id;
-        store.Save(settings);
-        return id;
-    }
-
-    private static bool LooksLikeMac(string value)
-    {
-        var hex = value.Replace(":", string.Empty).Replace("-", string.Empty);
-        return hex.Length == 12 &&
-               ulong.TryParse(
-                   hex,
-                   System.Globalization.NumberStyles.HexNumber,
-                   System.Globalization.CultureInfo.InvariantCulture,
-                   out _);
-    }
 }

@@ -15,23 +15,25 @@ namespace WinStream.Audio;
 /// </summary>
 public sealed class CaptureMonitorService : IAsyncDisposable
 {
-    private readonly SettingsStore _settingsStore;
+    private readonly AppSettingsService _settingsService;
     private readonly RenderEndpointEnumerator _endpointEnumerator = new();
     private readonly object _gate = new();
     private WasapiLoopbackSource? _source;
-    private AppSettings _settings;
     private bool _disposed;
     private int _rebindAttempts;
 
-    public CaptureMonitorService(SettingsStore? settingsStore = null)
+    public CaptureMonitorService(AppSettingsService settingsService)
     {
-        _settingsStore = settingsStore ?? new SettingsStore();
-        _settings = _settingsStore.Load();
+        _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
     }
 
     public event EventHandler? StateChanged;
 
-    public AppSettings Settings => _settings;
+    private AppSettings Settings => _settingsService.Settings;
+
+    public bool IsMonitoring => Settings.MonitorCapture;
+
+    public string? SelectedEndpointId => Settings.SelectedRenderDeviceId;
 
     public bool IsCapturing => _source?.IsCapturing == true;
 
@@ -49,8 +51,7 @@ public sealed class CaptureMonitorService : IAsyncDisposable
     public async Task SetSelectedEndpointAsync(string? endpointId, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _settings.SelectedRenderDeviceId = endpointId;
-        _settingsStore.Save(_settings);
+        _settingsService.Update(settings => settings.SelectedRenderDeviceId = endpointId);
 
         if (_source is null)
         {
@@ -62,46 +63,10 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    public void DismissAirPlayReceiverHint()
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_settings.AirPlayReceiverHintDismissed)
-        {
-            return;
-        }
-
-        _settings.AirPlayReceiverHintDismissed = true;
-        _settingsStore.Save(_settings);
-    }
-
-    public void SetCaptureMode(CaptureMode mode)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        _settings.CaptureMode = mode;
-        _settingsStore.Save(_settings);
-        StateChanged?.Invoke(this, EventArgs.Empty);
-    }
-
-    public void SetAutoConnectLastReceiver(bool enabled)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        _settings.AutoConnectLastReceiver = enabled;
-        _settingsStore.Save(_settings);
-    }
-
-    public void RememberReceiver(string key, string displayName)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        _settings.LastReceiverKey = key;
-        _settings.LastReceiverName = displayName;
-        _settingsStore.Save(_settings);
-    }
-
     public async Task SetMonitoringAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _settings.MonitorCapture = enabled;
-        _settingsStore.Save(_settings);
+        _settingsService.Update(settings => settings.MonitorCapture = enabled);
 
         if (enabled)
         {
@@ -178,7 +143,7 @@ public sealed class CaptureMonitorService : IAsyncDisposable
     {
         var source = new WasapiLoopbackSource
         {
-            PreferredEndpointId = _settings.SelectedRenderDeviceId
+            PreferredEndpointId = Settings.SelectedRenderDeviceId
         };
         source.DeviceInvalidated += OnDeviceInvalidated;
         source.CaptureFailed += OnCaptureFailed;
@@ -197,9 +162,9 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         try
         {
             await Task.Delay(500).ConfigureAwait(false);
-            if (_source is not null && _settings.MonitorCapture)
+            if (_source is not null && Settings.MonitorCapture)
             {
-                await _source.RebindAsync(_settings.SelectedRenderDeviceId).ConfigureAwait(false);
+                await _source.RebindAsync(Settings.SelectedRenderDeviceId).ConfigureAwait(false);
                 _rebindAttempts = 0;
             }
         }
