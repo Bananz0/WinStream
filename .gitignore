@@ -3,6 +3,10 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Local env / packaging secrets (copy from .env.example)
+.env
+.env.local
+
 # User-specific files
 *.rsuser
 *.suo
@@ -222,6 +226,10 @@ _pkginfo.txt
 *.appx
 *.appxbundle
 *.appxupload
+*.msix
+*.msixbundle
+artifacts/msix/
+artifacts/dev-cert-probe/
 
 # Visual Studio cache files
 # files ending in .cache can be ignored

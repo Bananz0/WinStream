@@ -15,7 +15,8 @@ public class SettingsStoreTests
             MonitorCapture = true,
             AutoConnectLastReceiver = true,
             LastReceiverKey = "AA:BB:CC:DD:EE:FF",
-            LastReceiverName = "Living Room"
+            LastReceiverName = "Living Room",
+            PreferVirtualDriver = true
         });
 
         var loaded = store.Load();
@@ -25,6 +26,7 @@ public class SettingsStoreTests
         Assert.True(loaded.AutoConnectLastReceiver);
         Assert.Equal("AA:BB:CC:DD:EE:FF", loaded.LastReceiverKey);
         Assert.Equal("Living Room", loaded.LastReceiverName);
+        Assert.True(loaded.PreferVirtualDriver);
     }
 
     [Fact]
@@ -39,6 +41,7 @@ public class SettingsStoreTests
         Assert.Null(loaded.LastReceiverName);
         Assert.False(loaded.MonitorCapture);
         Assert.Equal(CaptureMode.Loopback, loaded.CaptureMode);
+        Assert.False(loaded.PreferVirtualDriver);
     }
 
     [Fact]

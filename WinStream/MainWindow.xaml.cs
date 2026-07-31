@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
@@ -13,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Audio;
 using WinStream.Core.Audio;
+using WinStream.Core.Drivers;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
 using WinStream.Core.Persistence;
@@ -36,6 +38,7 @@ namespace WinStream
         private readonly List<DeviceViewModel> _allDevices = new();
         private readonly AppSettingsService _settings = new();
         private readonly CaptureMonitorService _captureMonitor;
+        private readonly DriverLifecycleService _driverLifecycle = new();
         private readonly StreamingOrchestrator _streamingOrchestrator;
         private readonly DeviceDiscoveryCoordinator _discovery = new();
         private readonly AutoConnectAttemptTracker _autoConnectAttempts = new();
@@ -45,6 +48,7 @@ namespace WinStream
         private string _filterText = string.Empty;
         private bool _allowClose;
         private bool _connectionInFlight;
+        private bool _driverReadyPromptShown;
         private bool _suppressCaptureSelectionEvents;
         private bool _suppressAutoConnectEvents;
 
@@ -72,12 +76,14 @@ namespace WinStream
 
             _captureMonitor.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(RefreshCaptureStatus);
+            _driverLifecycle.StateChanged += OnDriverLifecycleStateChanged;
             _streamingOrchestrator.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(OnStreamingStateChanged);
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
             RestoreAutoConnectSetting();
+            RefreshDriverUi();
             UpdateVolumeReadout(streamVolumeSlider.Value);
             RefreshSessionStatus();
             _ = DiscoverAndDisplayDevicesAsync();
@@ -106,6 +112,7 @@ namespace WinStream
             // capture source and would pump frames into a disposed WASAPI client.
             await _streamingOrchestrator.DisposeAsync();
             await _captureMonitor.DisposeAsync();
+            _driverLifecycle.Dispose();
             Close();
         }
 
@@ -170,6 +177,153 @@ namespace WinStream
         private void RefreshButton_Click(object sender, RoutedEventArgs e)
         {
             LoadCaptureEndpoints();
+        }
+
+        private async void DriverActionButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_driverLifecycle.CanAcquireDriver)
+            {
+                await Windows.System.Launcher.LaunchUriAsync(
+                    new Uri("https://github.com/bananz0/WinStream/releases"));
+                return;
+            }
+
+            driverActionButton.IsEnabled = false;
+            await _driverLifecycle.DownloadAndInstallAsync();
+        }
+
+        private void OnDriverLifecycleStateChanged(object sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                RefreshDriverUi();
+                if (_driverLifecycle.StateMachine.State == DriverInstallState.Ready &&
+                    !_driverReadyPromptShown)
+                {
+                    _driverReadyPromptShown = true;
+                    await PromptToUseVirtualDriverAsync();
+                }
+            });
+        }
+
+        private void RefreshDriverUi()
+        {
+            var machine = _driverLifecycle.StateMachine;
+            var isBusy = machine.State is
+                DriverInstallState.Checking or
+                DriverInstallState.Downloading or
+                DriverInstallState.Verifying or
+                DriverInstallState.ReadyToInstall or
+                DriverInstallState.Installing or
+                DriverInstallState.Detecting;
+
+            driverProgressPanel.Visibility = isBusy ? Visibility.Visible : Visibility.Collapsed;
+            driverProgressBar.IsIndeterminate = machine.State != DriverInstallState.Downloading;
+            driverProgressBar.Value = machine.DownloadProgress;
+            driverActionButton.IsEnabled = false;
+
+            switch (machine.State)
+            {
+                case DriverInstallState.NotInstalled:
+                    driverStateIcon.Glyph = "\uE72E";
+                    driverStateBadge.Text = _driverLifecycle.CanAcquireDriver ? "Optional" : "Coming soon";
+                    driverStatusText.Text = _driverLifecycle.CanAcquireDriver
+                        ? "Add a dedicated WinStream output. The download is verified before Windows asks to install it."
+                        : "Signed driver downloads are not available in this build yet.";
+                    driverActionButton.Content = _driverLifecycle.CanAcquireDriver
+                        ? "Download & install"
+                        : "Learn more";
+                    driverActionButton.IsEnabled = true;
+                    AutomationProperties.SetName(
+                        driverActionButton,
+                        _driverLifecycle.CanAcquireDriver
+                            ? "Download and install WinStream virtual audio driver"
+                            : "Learn more about WinStream virtual audio driver");
+                    break;
+                case DriverInstallState.Checking:
+                    SetDriverProgress("Checking", "Checking compatibility…");
+                    break;
+                case DriverInstallState.Downloading:
+                    SetDriverProgress(
+                        "Downloading",
+                        $"Downloading securely… {machine.DownloadProgress}%");
+                    break;
+                case DriverInstallState.Verifying:
+                    SetDriverProgress("Verifying", "Verifying the download and publisher…");
+                    break;
+                case DriverInstallState.ReadyToInstall:
+                    SetDriverProgress("Ready", "Download verified. Preparing Windows installation…");
+                    break;
+                case DriverInstallState.Installing:
+                    SetDriverProgress("Installing", "Waiting for Windows to finish installation…");
+                    break;
+                case DriverInstallState.RestartRequired:
+                    driverStateBadge.Text = "Restart required";
+                    driverStatusText.Text = "Restart Windows to finish installing the virtual audio driver.";
+                    driverActionButton.Content = "Restart later";
+                    break;
+                case DriverInstallState.Detecting:
+                    SetDriverProgress("Finishing", "Looking for the new WinStream audio endpoint…");
+                    break;
+                case DriverInstallState.Ready:
+                    driverStateIcon.Glyph = "\uE73E";
+                    driverStateBadge.Text = "Ready";
+                    driverStatusText.Text = _settings.Settings.PreferVirtualDriver
+                        ? "Installed and selected for your next connection."
+                        : "Installed. System audio remains selected until you choose to switch.";
+                    driverActionButton.Content = "Installed";
+                    virtualDriverCard.Background = ThemeBrush("SystemFillColorSuccessBackgroundBrush");
+                    virtualDriverCard.BorderBrush = ThemeBrush("SystemFillColorSuccessBrush");
+                    break;
+                case DriverInstallState.Failed:
+                    driverStateIcon.Glyph = "\uEA39";
+                    driverStateBadge.Text = "Needs attention";
+                    driverStatusText.Text = machine.ErrorMessage ?? "The driver could not be prepared.";
+                    driverActionButton.Content = "Retry";
+                    driverActionButton.IsEnabled = _driverLifecycle.CanAcquireDriver;
+                    AutomationProperties.SetName(driverActionButton, "Retry virtual audio driver installation");
+                    break;
+            }
+
+            AutomationProperties.SetName(
+                virtualDriverCard,
+                $"WinStream virtual audio driver, {driverStateBadge.Text}");
+            AutomationProperties.SetHelpText(virtualDriverCard, driverStatusText.Text);
+        }
+
+        private void SetDriverProgress(string badge, string status)
+        {
+            driverStateBadge.Text = badge;
+            driverStatusText.Text = status;
+            driverProgressText.Text = status;
+            driverActionButton.Content = "Please wait";
+        }
+
+        private async Task PromptToUseVirtualDriverAsync()
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "WinStream driver is ready",
+                Content = "Use the dedicated WinStream audio source for future connections? " +
+                          "Your current stream will not be interrupted.",
+                PrimaryButtonText = "Use virtual driver",
+                CloseButtonText = "Keep system audio",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = Content.XamlRoot
+            };
+
+            var result = await dialog.ShowAsync();
+            var preferDriver = result == ContentDialogResult.Primary;
+            _settings.Update(settings => settings.PreferVirtualDriver = preferDriver);
+            RefreshDriverUi();
+
+            if (preferDriver)
+            {
+                ShowMessage(
+                    InfoBarSeverity.Success,
+                    "Virtual audio selected",
+                    "WinStream will use the dedicated source on your next connection.");
+            }
         }
 
         private void FilterBox_TextChanged(
@@ -528,7 +682,12 @@ namespace WinStream
             }
             finally
             {
-                searchButton.IsEnabled = true;
+                // A connect attempt owns the button while it runs, so a scan finishing
+                // underneath it must not re-enable the toolbar.
+                if (announce && !_connectionInFlight)
+                {
+                    searchButton.IsEnabled = true;
+                }
             }
         }
 
@@ -557,7 +716,14 @@ namespace WinStream
                 return;
             }
 
-            var row = _allDevices.First(device => ReferenceEquals(device.Device, target));
+            var key = ReceiverKey.For(target);
+            var row = _allDevices.FirstOrDefault(device =>
+                string.Equals(device.Key, key, StringComparison.Ordinal));
+            if (row is null)
+            {
+                return;
+            }
+
             AppLog.Info("ui", "Remembered receiver found; connecting automatically.");
             await SetDeviceConnectionAsync(row, connect: true, isAutomatic: true);
         }

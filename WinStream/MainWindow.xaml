@@ -95,70 +95,191 @@
                 <!-- Step 1: what to send -->
                 <Border Style="{StaticResource CardBorderStyle}">
                     <StackPanel Spacing="12">
-                        <TextBlock Text="Audio source" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <ComboBox x:Name="captureDeviceComboBox"
-                                      Grid.Column="0"
-                                      Header="Capture from"
-                                      HorizontalAlignment="Stretch"
-                                      SelectionChanged="CaptureDeviceComboBox_SelectionChanged">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:CaptureEndpointViewModel">
-                                        <StackPanel Padding="0,4">
-                                            <TextBlock Text="{x:Bind Name}"
-                                                       TextTrimming="CharacterEllipsis"/>
-                                            <TextBlock Text="{x:Bind Detail}"
-                                                       Visibility="{x:Bind DetailVisibility}"
-                                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                       TextTrimming="CharacterEllipsis"/>
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-                            <Button x:Name="refreshButton"
-                                    Grid.Column="1"
-                                    VerticalAlignment="Bottom"
-                                    Click="RefreshButton_Click"
-                                    ToolTipService.ToolTip="Reload audio devices"
-                                    AutomationProperties.Name="Reload audio devices">
-                                <FontIcon Glyph="&#xE72C;" FontSize="14"/>
-                            </Button>
-                        </Grid>
-
-                        <Grid ColumnSpacing="12" VerticalAlignment="Center">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       Text="Level"
-                                       VerticalAlignment="Center"
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Audio source" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Choose how WinStream captures sound from this PC."
                                        Style="{StaticResource HintTextStyle}"/>
-                            <ProgressBar x:Name="captureLevelBar"
-                                         Grid.Column="1"
-                                         Minimum="0"
-                                         Maximum="1"
-                                         Height="6"
-                                         VerticalAlignment="Center"/>
-                            <TextBlock x:Name="captureStatusText"
-                                       Grid.Column="2"
-                                       Text="Idle"
-                                       VerticalAlignment="Center"
-                                       Style="{StaticResource CaptionTextBlockStyle}"/>
-                        </Grid>
+                        </StackPanel>
 
-                        <ToggleSwitch x:Name="monitorCaptureToggle"
-                                      Header="Also play through this PC's speakers"
-                                      OnContent="On"
-                                      OffContent="Off"
-                                      Toggled="MonitorCaptureToggle_Toggled"/>
+                        <Border Padding="14"
+                                CornerRadius="8"
+                                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                                BorderThickness="2"
+                                Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                            <StackPanel Spacing="12">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="36"
+                                            Height="36"
+                                            CornerRadius="18"
+                                            Background="{ThemeResource AccentFillColorSecondaryBrush}">
+                                        <FontIcon Glyph="&#xE995;"
+                                                  FontSize="16"
+                                                  Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="System audio"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                        <TextBlock Text="Capture the sound already playing through Windows."
+                                                   Style="{StaticResource HintTextStyle}"/>
+                                    </StackPanel>
+                                    <Border Grid.Column="2"
+                                            CornerRadius="10"
+                                            Padding="8,3"
+                                            VerticalAlignment="Center"
+                                            Background="{ThemeResource AccentFillColorTertiaryBrush}">
+                                        <TextBlock Text="Selected"
+                                                   Style="{StaticResource CaptionTextBlockStyle}"/>
+                                    </Border>
+                                </Grid>
+
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="captureDeviceComboBox"
+                                              Grid.Column="0"
+                                              Header="Playback device to capture"
+                                              HorizontalAlignment="Stretch"
+                                              SelectionChanged="CaptureDeviceComboBox_SelectionChanged">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate x:DataType="vm:CaptureEndpointViewModel">
+                                                <StackPanel Padding="0,4">
+                                                    <TextBlock Text="{x:Bind Name}"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Text="{x:Bind Detail}"
+                                                               Visibility="{x:Bind DetailVisibility}"
+                                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
+                                    <Button x:Name="refreshButton"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Bottom"
+                                            Click="RefreshButton_Click"
+                                            ToolTipService.ToolTip="Reload audio devices"
+                                            AutomationProperties.Name="Reload audio devices">
+                                        <FontIcon Glyph="&#xE72C;" FontSize="14"/>
+                                    </Button>
+                                </Grid>
+
+                                <Grid ColumnSpacing="12" VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="Level"
+                                               VerticalAlignment="Center"
+                                               Style="{StaticResource HintTextStyle}"/>
+                                    <ProgressBar x:Name="captureLevelBar"
+                                                 Grid.Column="1"
+                                                 Minimum="0"
+                                                 Maximum="1"
+                                                 Height="6"
+                                                 VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="captureStatusText"
+                                               Grid.Column="2"
+                                               Text="Idle"
+                                               VerticalAlignment="Center"
+                                               Style="{StaticResource CaptionTextBlockStyle}"/>
+                                </Grid>
+
+                                <ToggleSwitch x:Name="monitorCaptureToggle"
+                                              Header="Also play through this PC's speakers"
+                                              OnContent="On"
+                                              OffContent="Off"
+                                              Toggled="MonitorCaptureToggle_Toggled"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="virtualDriverCard"
+                                Padding="14"
+                                CornerRadius="8"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                Background="{ThemeResource ControlFillColorDisabledBrush}"
+                                AutomationProperties.Name="WinStream virtual audio driver"
+                                AutomationProperties.HelpText="Optional audio source. Download and install it to unlock this source.">
+                            <Grid ColumnSpacing="12" RowSpacing="10">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Border Width="36"
+                                        Height="36"
+                                        CornerRadius="18"
+                                        Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                                    <FontIcon x:Name="driverStateIcon"
+                                              Glyph="&#xE72E;"
+                                              FontSize="16"
+                                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                                </Border>
+
+                                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="WinStream virtual audio"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                        <Border CornerRadius="9"
+                                                Padding="7,2"
+                                                Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                                            <TextBlock x:Name="driverStateBadge"
+                                                       Text="Locked"
+                                                       Style="{StaticResource CaptionTextBlockStyle}"/>
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock x:Name="driverStatusText"
+                                               Text="Install the optional driver for a dedicated WinStream audio output."
+                                               Style="{StaticResource HintTextStyle}"
+                                               AutomationProperties.LiveSetting="Polite"/>
+                                </StackPanel>
+
+                                <Button x:Name="driverActionButton"
+                                        Grid.Column="2"
+                                        MinWidth="142"
+                                        VerticalAlignment="Center"
+                                        Content="Download &amp; install"
+                                        Click="DriverActionButton_Click"
+                                        AutomationProperties.Name="Download and install WinStream virtual audio driver"
+                                        AutomationProperties.HelpText="Downloads the development driver and asks for administrator approval before installation."/>
+
+                                <StackPanel x:Name="driverProgressPanel"
+                                            Grid.Row="1"
+                                            Grid.Column="1"
+                                            Grid.ColumnSpan="2"
+                                            Spacing="4"
+                                            Visibility="Collapsed">
+                                    <ProgressBar x:Name="driverProgressBar"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 AutomationProperties.Name="Virtual audio driver download progress"/>
+                                    <TextBlock x:Name="driverProgressText"
+                                               Text="Preparing…"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               AutomationProperties.LiveSetting="Polite"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
                     </StackPanel>
                 </Border>
 

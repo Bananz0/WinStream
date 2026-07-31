@@ -39,6 +39,12 @@ public sealed class AppSettings
     public CaptureMode CaptureMode { get; set; } = CaptureMode.Loopback;
 
     /// <summary>
+    /// The user's explicit choice to use the optional virtual endpoint when it is available.
+    /// This preference is retained if the endpoint temporarily disappears.
+    /// </summary>
+    public bool PreferVirtualDriver { get; set; }
+
+    /// <summary>
     /// Locally administered MAC used as the AirPlay 2 sender deviceID / PTP peer ID.
     /// Generated once per install when missing.
     /// </summary>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -9,14 +9,14 @@
 
   <Identity
     Name="ff3e60d4-5cf4-4f54-9fce-7c650da09ac3"
-    Publisher="CN=glenm"
+    Publisher="CN=WinStream Dev, O=Local Development, C=US"
     Version="1.0.0.0" />
 
   <mp:PhoneIdentity PhoneProductId="ff3e60d4-5cf4-4f54-9fce-7c650da09ac3" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
     <DisplayName>WinStream</DisplayName>
-    <PublisherDisplayName>Glen Muthoka</PublisherDisplayName>
+    <PublisherDisplayName>WinStream Dev</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
