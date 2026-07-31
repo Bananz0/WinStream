@@ -240,6 +240,17 @@ ClientBin/
 *.publishsettings
 orleans.codegen.cs
 
+# WinStream virtual driver generated/signing artifacts.
+# Keep driver/installer source (including authored .inf files) tracked.
+drivers/winstream-vad/**/*.sys
+drivers/winstream-vad/**/*.cat
+drivers/winstream-vad/**/*.cer
+drivers/winstream-vad/**/*.cab
+drivers/winstream-vad/**/*.hlkx
+drivers/winstream-vad/**/*-package.zip
+drivers/winstream-vad/package/
+tools/WinStream.DriverInstaller/publish/
+
 # Including strong name files can present a security risk
 # (https://github.com/github/gitignore/pull/2483#issue-259490424)
 #*.snk
