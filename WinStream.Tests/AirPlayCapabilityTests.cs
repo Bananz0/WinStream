@@ -22,11 +22,10 @@ public class AirPlayCapabilityTests
     }
 
     [Fact]
-    public void PreferredProtocol_keeps_classic_first_until_phase4()
+    public void PreferredProtocol_prefers_ap2_when_gate_on_for_dual_capable()
     {
-        // Production must not steal dual-capable devices while AP2 Connect is a stub.
         Assert.Equal(
-            AirPlayProtocolKind.ClassicRaop,
+            AirPlayProtocolKind.AirPlay2,
             AirPlayCapability.PreferredProtocol(
                 classic: true,
                 airPlay2: true,
@@ -50,9 +49,8 @@ public class AirPlayCapabilityTests
                 airPlay2: true,
                 airPlay2GateEnabled: true));
 
-        // Gate is enforced by the orchestrator; PreferredProtocol still reports AP2.
         Assert.Equal(
-            AirPlayProtocolKind.AirPlay2,
+            AirPlayProtocolKind.Unknown,
             AirPlayCapability.PreferredProtocol(
                 classic: false,
                 airPlay2: true,

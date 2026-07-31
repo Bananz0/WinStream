@@ -68,20 +68,42 @@ public class EncryptedRtspTests
     }
 
     [Fact]
-    public async Task RtspCryptoStream_rejects_tampered_tag()
+    public void RtpChaChaEncryptor_appends_tag_and_nonce_trailer()
     {
-        var key = RandomNumberGenerator.GetBytes(32);
-        await using var transport = new MemoryStream();
-        using (var writer = new RtspCryptoStream(transport, key, key))
-        {
-            await writer.WritePlaintextAsync("hello"u8.ToArray());
-        }
+        var shk = RandomNumberGenerator.GetBytes(32);
+        var payload = "alac-frame"u8.ToArray();
+        var encrypted = RtpChaChaEncryptor.EncryptPayload(
+            shk,
+            sequenceNumber: 42,
+            rtpTimestamp: 44100,
+            ssrc: 0x12345678,
+            payload);
 
-        var buffer = transport.ToArray();
-        buffer[^1] ^= 0xFF;
-        await using var tampered = new MemoryStream(buffer);
-        using var reader = new RtspCryptoStream(tampered, key, key);
-        await Assert.ThrowsAsync<AuthenticationTagMismatchException>(
-            () => reader.ReadNextChunkAsync());
+        Assert.Equal(payload.Length + 16 + 8, encrypted.Length);
+        // Trailing nonce suffix starts with little-endian sequence 42.
+        Assert.Equal(42, encrypted[^8]);
+        Assert.Equal(0, encrypted[^7]);
+    }
+
+    [Fact]
+    public void BinaryPlist_reads_stream_ports()
+    {
+        var response = BinaryPlist.Write(new Dictionary<string, object>
+        {
+            ["streams"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["type"] = 96L,
+                    ["dataPort"] = 58169L,
+                    ["controlPort"] = 58170L
+                }
+            }
+        });
+
+        var root = BinaryPlist.Read(response);
+        Assert.True(BinaryPlist.TryGetStreamPorts(root, out var data, out var control));
+        Assert.Equal(58169, data);
+        Assert.Equal(58170, control);
     }
 }

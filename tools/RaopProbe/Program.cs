@@ -126,6 +126,11 @@ if (args.Contains("--setup"))
     }
 }
 
+if (args.Contains("--stream"))
+{
+    return await RunAp2StreamAsync(target, seconds);
+}
+
 if (args.Contains("--raw"))
 {
     await WinStream.Tools.RaopProbe.RawProbe.RunAsync(target.IPAddress, target.Port);
@@ -187,6 +192,55 @@ Console.WriteLine($"\nStreamed {seconds}s. Final state: {session.State}");
 await session.DisconnectAsync();
 Console.WriteLine("Disconnected cleanly.");
 return session.State == SessionState.Disconnected ? 0 : 1;
+
+static async Task<int> RunAp2StreamAsync(DeviceInfo target, int seconds)
+{
+    Console.WriteLine(
+        $"\n== AP2 stream {seconds}s to {target.DisplayName} ({target.IPAddress}:{target.Port}) ==");
+    await using var ap2 = new AirPlay2Session(target, gateEnabled: true);
+    ap2.StateChanged += (_, change) =>
+        Console.WriteLine($"  state| {change.Current}{(change.Reason is null ? "" : $" — {change.Reason}")}");
+    try
+    {
+        using var connectCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await ap2.ConnectAsync(connectCts.Token);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"STREAM_CONNECT_FAIL: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+
+    var format = new AudioFormat(44100, 2, 16);
+    var stopwatch = Stopwatch.StartNew();
+    var phase = 0.0;
+    const double toneHz = 440.0;
+    const int chunkFrames = 441;
+    while (stopwatch.Elapsed < TimeSpan.FromSeconds(seconds))
+    {
+        var pcm = new byte[chunkFrames * format.BlockAlign];
+        for (var i = 0; i < chunkFrames; i++)
+        {
+            phase += 2 * Math.PI * toneHz / format.SampleRate;
+            var sample = (short)(Math.Sin(phase) * 8000);
+            var offset = i * format.BlockAlign;
+            BitConverter.TryWriteBytes(pcm.AsSpan(offset), sample);
+            BitConverter.TryWriteBytes(pcm.AsSpan(offset + 2), sample);
+        }
+
+        ap2.SubmitPcm(pcm, format);
+        await Task.Delay(10);
+        if (ap2.State is SessionState.Failed or SessionState.Disconnected)
+        {
+            Console.WriteLine($"STREAM_DROPPED state={ap2.State}");
+            return 1;
+        }
+    }
+
+    await ap2.DisconnectAsync();
+    Console.WriteLine($"STREAM_OK seconds={seconds} final={ap2.State}");
+    return ap2.State == SessionState.Disconnected ? 0 : 1;
+}
 
 static int ParseInt(string[] args, string flag, int fallback)
 {

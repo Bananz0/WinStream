@@ -28,6 +28,8 @@ public sealed class HkpTransient : IDisposable
     private byte[]? _sessionKey;
     private byte[]? _controlWriteKey;
     private byte[]? _controlReadKey;
+    private byte[]? _eventsWriteKey;
+    private byte[]? _eventsReadKey;
     private bool _disposed;
 
     public IReadOnlyList<byte> SessionKey
@@ -54,6 +56,24 @@ public sealed class HkpTransient : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             return _controlReadKey ?? throw new InvalidOperationException("Pairing is not complete.");
+        }
+    }
+
+    public IReadOnlyList<byte> EventsWriteKey
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _eventsWriteKey ?? throw new InvalidOperationException("Pairing is not complete.");
+        }
+    }
+
+    public IReadOnlyList<byte> EventsReadKey
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _eventsReadKey ?? throw new InvalidOperationException("Pairing is not complete.");
         }
     }
 
@@ -167,6 +187,16 @@ public sealed class HkpTransient : IDisposable
             "Control-Salt",
             "Control-Read-Encryption-Key",
             32);
+        _eventsWriteKey = HkdfSha512(
+            _sessionKey,
+            "Events-Salt",
+            "Events-Write-Encryption-Key",
+            32);
+        _eventsReadKey = HkdfSha512(
+            _sessionKey,
+            "Events-Salt",
+            "Events-Read-Encryption-Key",
+            32);
 
         CryptographicOperations.ZeroMemory(_pendingM1);
         _pendingA = null;
@@ -195,6 +225,16 @@ public sealed class HkpTransient : IDisposable
             CryptographicOperations.ZeroMemory(_controlReadKey);
         }
 
+        if (_eventsWriteKey is not null)
+        {
+            CryptographicOperations.ZeroMemory(_eventsWriteKey);
+        }
+
+        if (_eventsReadKey is not null)
+        {
+            CryptographicOperations.ZeroMemory(_eventsReadKey);
+        }
+
         if (_pendingM1 is not null)
         {
             CryptographicOperations.ZeroMemory(_pendingM1);
@@ -203,6 +243,8 @@ public sealed class HkpTransient : IDisposable
         _sessionKey = null;
         _controlWriteKey = null;
         _controlReadKey = null;
+        _eventsWriteKey = null;
+        _eventsReadKey = null;
         _pendingA = null;
         _pendingM1 = null;
         _disposed = true;

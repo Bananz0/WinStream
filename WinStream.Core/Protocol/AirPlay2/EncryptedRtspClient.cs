@@ -38,11 +38,21 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
 
     public int EventPort { get; private set; }
 
+    public int DataPort { get; private set; }
+
+    public int ControlPort { get; private set; }
+
     public string SessionUuid { get; private set; } = Guid.NewGuid().ToString().ToUpperInvariant();
 
     public string DeviceId { get; set; } = "AA:BB:CC:DD:EE:FF";
 
     public string LocalIp { get; set; } = "127.0.0.1";
+
+    /// <summary>
+    /// When true (default), RECORD runs after session SETUP and before stream SETUP
+    /// (OwnTone / Apple order). When false, stream SETUP then RECORD.
+    /// </summary>
+    public bool RecordBeforeStreamSetup { get; set; } = true;
 
     public async Task ConnectAndPairAsync(CancellationToken cancellationToken = default)
     {
@@ -129,6 +139,117 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         }
 
         EventPort = (int)eventPort;
+    }
+
+    public async Task RecordAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureCrypto();
+        var response = await SendAsync(
+            "RECORD",
+            $"rtsp://{_host}/{SessionUuid}",
+            null,
+            null,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccess("RECORD");
+    }
+
+    public async Task StreamSetupAsync(
+        int senderControlPort,
+        byte[] audioSharedKey,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureCrypto();
+        ArgumentNullException.ThrowIfNull(audioSharedKey);
+        if (audioSharedKey.Length != 32)
+        {
+            throw new ArgumentException("shk must be 32 bytes.", nameof(audioSharedKey));
+        }
+
+        var stream = new Dictionary<string, object>
+        {
+            ["type"] = 96L,
+            ["audioFormat"] = 0x40000L,
+            ["audioMode"] = "default",
+            ["ct"] = 2L,
+            ["isMedia"] = true,
+            ["latencyMin"] = 11025L,
+            ["latencyMax"] = 88200L,
+            ["spf"] = 352L,
+            ["sr"] = 44100L,
+            ["controlPort"] = (long)senderControlPort,
+            ["shk"] = audioSharedKey,
+            ["supportsDynamicStreamID"] = true,
+            ["streamConnectionID"] = (long)RandomNumberGenerator.GetInt32(1, int.MaxValue)
+        };
+
+        var body = BinaryPlist.Write(new Dictionary<string, object>
+        {
+            ["streams"] = new List<object> { stream }
+        });
+
+        var response = await SendAsync(
+            "SETUP",
+            $"rtsp://{_host}/{SessionUuid}",
+            new Dictionary<string, string>
+            {
+                ["Content-Type"] = "application/x-apple-binary-plist"
+            },
+            body,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccess("SETUP stream");
+
+        if (response.Body.Length == 0)
+        {
+            throw new InvalidOperationException("Stream SETUP returned an empty body.");
+        }
+
+        var plist = BinaryPlist.Read(response.Body.Span);
+        if (!BinaryPlist.TryGetStreamPorts(plist, out var dataPort, out var controlPort))
+        {
+            throw new InvalidOperationException(
+                "Stream SETUP response missing dataPort/controlPort.");
+        }
+
+        DataPort = dataPort;
+        ControlPort = controlPort;
+    }
+
+    public async Task SetVolumeAsync(float volumeDb, CancellationToken cancellationToken = default)
+    {
+        EnsureCrypto();
+        var body = Encoding.ASCII.GetBytes($"volume: {volumeDb:0.000000}\r\n");
+        var response = await SendAsync(
+            "SET_PARAMETER",
+            $"rtsp://{_host}/{SessionUuid}",
+            new Dictionary<string, string>
+            {
+                ["Content-Type"] = "text/parameters"
+            },
+            body,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccess("SET_PARAMETER volume");
+    }
+
+    public async Task TeardownAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureCrypto();
+        try
+        {
+            var body = BinaryPlist.Write(new Dictionary<string, object>());
+            await SendAsync(
+                "TEARDOWN",
+                $"rtsp://{_host}/{SessionUuid}",
+                new Dictionary<string, string>
+                {
+                    ["Content-Type"] = "application/x-apple-binary-plist"
+                },
+                body,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort teardown.
+        }
     }
 
     public async Task<RtspResponse> SendAsync(

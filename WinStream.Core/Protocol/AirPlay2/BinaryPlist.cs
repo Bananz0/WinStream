@@ -70,6 +70,35 @@ public static class BinaryPlist
         return ParseObject(data, offsets, topObject, refSize, new Dictionary<int, object?>());
     }
 
+    public static bool TryGetStreamPorts(object root, out int dataPort, out int controlPort)
+    {
+        dataPort = 0;
+        controlPort = 0;
+        if (root is not Dictionary<string, object?> dict ||
+            !dict.TryGetValue("streams", out var streamsObj) ||
+            streamsObj is not object[] streams ||
+            streams.Length == 0 ||
+            streams[0] is not Dictionary<string, object?> stream)
+        {
+            return false;
+        }
+
+        if (!TryGetInteger(stream, "dataPort", out var data) ||
+            !TryGetInteger(stream, "controlPort", out var control))
+        {
+            return false;
+        }
+
+        if (data is <= 0 or > ushort.MaxValue || control is <= 0 or > ushort.MaxValue)
+        {
+            return false;
+        }
+
+        dataPort = (int)data;
+        controlPort = (int)control;
+        return true;
+    }
+
     public static bool TryGetInteger(object root, string key, out long value)
     {
         value = 0;
