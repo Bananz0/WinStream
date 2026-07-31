@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using WinStream.Core.Audio;
+using WinStream.Core.Logging;
 
 namespace WinStream.Audio;
 
@@ -27,6 +28,9 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private long _lastCallbackQpc;
     private long _captureGapCount;
     private long _lastInterCallbackTicks;
+    private int _inGap;
+    private CancellationTokenSource? _gapFillCts;
+    private Task? _gapFillLoop;
 
     public event EventHandler<AudioFrame>? FrameAvailable;
 
@@ -101,11 +105,28 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     public Task StopAsync(CancellationToken cancellationToken = default)
     {
+        CancellationTokenSource? gapCts;
+        Task? gapLoop;
         lock (_gate)
         {
+            gapCts = _gapFillCts;
+            gapLoop = _gapFillLoop;
+            _gapFillCts = null;
+            _gapFillLoop = null;
             StopCaptureLocked();
         }
 
+        gapCts?.Cancel();
+        try
+        {
+            gapLoop?.Wait(TimeSpan.FromSeconds(1));
+        }
+        catch (AggregateException)
+        {
+            // Expected on cancel.
+        }
+
+        gapCts?.Dispose();
         return Task.CompletedTask;
     }
 
@@ -117,14 +138,29 @@ public sealed class WasapiLoopbackSource : IAudioSource
             PreferredEndpointId = endpointId;
         }
 
+        CancellationTokenSource? gapCts;
+        Task? gapLoop;
         var wasCapturing = false;
         lock (_gate)
         {
             wasCapturing = IsCapturing;
+            gapCts = _gapFillCts;
+            gapLoop = _gapFillLoop;
+            _gapFillCts = null;
+            _gapFillLoop = null;
             StopCaptureLocked();
-            if (wasCapturing)
+        }
+
+        JoinGapFill(gapCts, gapLoop);
+
+        if (wasCapturing)
+        {
+            lock (_gate)
             {
-                StartCaptureLocked();
+                if (!_disposed)
+                {
+                    StartCaptureLocked();
+                }
             }
         }
 
@@ -138,12 +174,19 @@ public sealed class WasapiLoopbackSource : IAudioSource
             return ValueTask.CompletedTask;
         }
 
+        CancellationTokenSource? gapCts;
+        Task? gapLoop;
         lock (_gate)
         {
+            gapCts = _gapFillCts;
+            gapLoop = _gapFillLoop;
+            _gapFillCts = null;
+            _gapFillLoop = null;
             StopCaptureLocked();
             _disposed = true;
         }
 
+        JoinGapFill(gapCts, gapLoop);
         return ValueTask.CompletedTask;
     }
 
@@ -162,10 +205,17 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _capture.RecordingStopped += OnRecordingStopped;
         _capture.StartRecording();
         IsCapturing = true;
+        Interlocked.Exchange(ref _lastCallbackQpc, Stopwatch.GetTimestamp());
+        Interlocked.Exchange(ref _inGap, 0);
+        _gapFillCts = new CancellationTokenSource();
+        var token = _gapFillCts.Token;
+        _gapFillLoop = Task.Run(() => RunGapFillLoopAsync(token), token);
     }
 
     private void StopCaptureLocked()
     {
+        _gapFillCts?.Cancel();
+
         if (_capture is not null)
         {
             _capture.DataAvailable -= OnDataAvailable;
@@ -193,9 +243,25 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _format = null;
         _activeEndpointId = null;
         Interlocked.Exchange(ref _lastCallbackQpc, 0);
+        Interlocked.Exchange(ref _inGap, 0);
         while (_recentRms.TryDequeue(out _))
         {
         }
+    }
+
+    private static void JoinGapFill(CancellationTokenSource? gapCts, Task? gapLoop)
+    {
+        gapCts?.Cancel();
+        try
+        {
+            gapLoop?.Wait(TimeSpan.FromSeconds(1));
+        }
+        catch (AggregateException)
+        {
+            // Expected on cancel.
+        }
+
+        gapCts?.Dispose();
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
@@ -207,14 +273,16 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
         var now = Stopwatch.GetTimestamp();
         var previous = Interlocked.Exchange(ref _lastCallbackQpc, now);
+        Interlocked.Exchange(ref _inGap, 0);
         if (previous != 0)
         {
             var delta = now - previous;
             Interlocked.Exchange(ref _lastInterCallbackTicks, delta);
-            var gapMs = delta * 1000.0 / Stopwatch.Frequency;
-            if (gapMs > 50)
+            if (CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
             {
+                var gapMs = CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency);
                 Interlocked.Increment(ref _captureGapCount);
+                EmitSilence(gapMs);
             }
         }
 
@@ -231,6 +299,71 @@ public sealed class WasapiLoopbackSource : IAudioSource
         }
 
         FrameAvailable?.Invoke(this, new AudioFrame(copy, _format, DateTime.UtcNow.Ticks));
+    }
+
+    private async Task RunGapFillLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(
+            TimeSpan.FromMilliseconds(CaptureGapFiller.ChunkMilliseconds));
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!Volatile.Read(ref _disposed) && !IsCapturing)
+            {
+                return;
+            }
+
+            var format = _format;
+            if (format is null || !IsCapturing)
+            {
+                continue;
+            }
+
+            var last = Interlocked.Read(ref _lastCallbackQpc);
+            if (last == 0)
+            {
+                continue;
+            }
+
+            var delta = Stopwatch.GetTimestamp() - last;
+            if (!CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
+            {
+                Interlocked.Exchange(ref _inGap, 0);
+                continue;
+            }
+
+            if (Interlocked.CompareExchange(ref _inGap, 1, 0) == 0)
+            {
+                Interlocked.Increment(ref _captureGapCount);
+                AppLog.Info("capture", "Loopback gap — inserting silence to keep RTP continuous");
+            }
+
+            EmitSilence(CaptureGapFiller.ChunkMilliseconds);
+            Interlocked.Exchange(ref _lastCallbackQpc, Stopwatch.GetTimestamp());
+        }
+    }
+
+    private void EmitSilence(double gapMilliseconds)
+    {
+        AudioFormat? format;
+        lock (_gate)
+        {
+            format = _format;
+        }
+
+        if (format is null)
+        {
+            return;
+        }
+
+        var silence = CaptureGapFiller.CreateSilence(format, gapMilliseconds);
+        if (silence.Length == 0)
+        {
+            return;
+        }
+
+        FrameAvailable?.Invoke(
+            this,
+            new AudioFrame(silence, format, DateTime.UtcNow.Ticks));
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
