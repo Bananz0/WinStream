@@ -169,6 +169,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <Grid Grid.Row="0" ColumnSpacing="8">
@@ -201,7 +202,53 @@
                                     Click="SearchButton_Click"/>
                         </Grid>
 
-                        <ListView Grid.Row="1"
+                        <Border Grid.Row="1"
+                                Padding="14,12"
+                                CornerRadius="8"
+                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Border Grid.Column="0"
+                                        Width="36"
+                                        Height="36"
+                                        CornerRadius="18"
+                                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                        VerticalAlignment="Center">
+                                    <FontIcon Glyph="&#xE895;"
+                                              FontSize="16"
+                                              Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                                </Border>
+
+                                <StackPanel Grid.Column="1"
+                                            Spacing="2"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="Connect when WinStream starts"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                    <TextBlock x:Name="autoConnectDescriptionText"
+                                               Text="Connect to your last device as soon as it is found."
+                                               Style="{StaticResource HintTextStyle}"/>
+                                </StackPanel>
+
+                                <ToggleSwitch x:Name="autoConnectToggle"
+                                              Grid.Column="2"
+                                              VerticalAlignment="Center"
+                                              OnContent="On"
+                                              OffContent="Off"
+                                              Toggled="AutoConnectToggle_Toggled"
+                                              AutomationProperties.Name="Connect to the last device when WinStream starts"/>
+                            </Grid>
+                        </Border>
+
+                        <ListView Grid.Row="2"
                                   x:Name="devicesList"
                                   ItemsSource="{x:Bind DeviceList}"
                                   SelectionMode="None"
@@ -279,7 +326,7 @@
                             </ListView.ItemTemplate>
                         </ListView>
 
-                        <StackPanel Grid.Row="2"
+                        <StackPanel Grid.Row="3"
                                     x:Name="emptyStatePanel"
                                     Spacing="4"
                                     Padding="0,20,0,24"

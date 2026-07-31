@@ -13,6 +13,21 @@ public sealed class AppSettings
     public bool MonitorCapture { get; set; }
 
     /// <summary>
+    /// Connect to the most recently used AirPlay receiver when it appears after launch.
+    /// </summary>
+    public bool AutoConnectLastReceiver { get; set; }
+
+    /// <summary>
+    /// Stable receiver identity (device ID when available, otherwise address and port).
+    /// </summary>
+    public string? LastReceiverKey { get; set; }
+
+    /// <summary>
+    /// Friendly name retained so the startup setting remains understandable while offline.
+    /// </summary>
+    public string? LastReceiverName { get; set; }
+
+    /// <summary>
     /// Set once the user dismisses the hint about enabling AirPlay Receiver on a Mac.
     /// </summary>
     public bool AirPlayReceiverHintDismissed { get; set; }

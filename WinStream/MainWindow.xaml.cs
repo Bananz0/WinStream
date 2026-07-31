@@ -42,6 +42,8 @@ namespace WinStream
         private bool _allowClose;
         private bool _isScanning;
         private bool _suppressCaptureSelectionEvents;
+        private bool _suppressAutoConnectEvents;
+        private bool _autoConnectAttempted;
 
         public MainWindow()
         {
@@ -70,6 +72,7 @@ namespace WinStream
 
             LoadCaptureEndpoints();
             RestoreCaptureSettings();
+            RestoreAutoConnectSetting();
             captureModeComboBox.SelectedIndex =
                 _captureMonitor.Settings.CaptureMode == CaptureMode.VirtualDriver ? 1 : 0;
             UpdateVolumeReadout(streamVolumeSlider.Value);
@@ -247,6 +250,45 @@ namespace WinStream
             RefreshCaptureStatus();
         }
 
+        private void RestoreAutoConnectSetting()
+        {
+            _suppressAutoConnectEvents = true;
+            try
+            {
+                autoConnectToggle.IsOn = _captureMonitor.Settings.AutoConnectLastReceiver;
+                RefreshAutoConnectDescription();
+            }
+            finally
+            {
+                _suppressAutoConnectEvents = false;
+            }
+        }
+
+        private async void AutoConnectToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_suppressAutoConnectEvents)
+            {
+                return;
+            }
+
+            _captureMonitor.SetAutoConnectLastReceiver(autoConnectToggle.IsOn);
+            _autoConnectAttempted = false;
+            RefreshAutoConnectDescription();
+
+            if (autoConnectToggle.IsOn)
+            {
+                await TryAutoConnectToLastReceiverAsync();
+            }
+        }
+
+        private void RefreshAutoConnectDescription()
+        {
+            var receiverName = _captureMonitor.Settings.LastReceiverName;
+            autoConnectDescriptionText.Text = string.IsNullOrWhiteSpace(receiverName)
+                ? "Your next successful connection will become the startup device."
+                : $"Automatically reconnect to {receiverName} as soon as it appears.";
+        }
+
         private void UpdateCaptureLevelUi()
         {
             if (!_captureMonitor.IsCapturing)
@@ -330,14 +372,27 @@ namespace WinStream
                 return;
             }
 
+            await SetDeviceConnectionAsync(device, connect: !device.IsConnected);
+        }
+
+        private async Task SetDeviceConnectionAsync(
+            DeviceViewModel device,
+            bool connect,
+            bool isAutomatic = false)
+        {
             messageBar.IsOpen = false;
             device.ClearStatus();
+            if (connect && isAutomatic)
+            {
+                device.SetStatus("Found — connecting automatically…", DeviceStatusKind.Neutral);
+            }
+
             device.IsBusy = true;
             UpdateUI(false);
 
             try
             {
-                if (device.IsConnected)
+                if (!connect)
                 {
                     await _streamingOrchestrator.DisconnectAsync(device.Device);
                     device.SetStatus("Disconnected.", DeviceStatusKind.Neutral);
@@ -353,6 +408,8 @@ namespace WinStream
 
                 await _streamingOrchestrator.ConnectAsync(device.Device, source);
                 await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
+                _captureMonitor.RememberReceiver(device.Key, device.DisplayName);
+                RefreshAutoConnectDescription();
 
                 if (_streamingOrchestrator.State == SessionState.Degraded)
                 {
@@ -365,11 +422,19 @@ namespace WinStream
             }
             catch (Exception ex)
             {
-                device.SetStatus("Couldn't connect.", DeviceStatusKind.Error);
-                ShowMessage(
-                    InfoBarSeverity.Error,
-                    $"Couldn't connect to {device.DisplayName}",
-                    FormatConnectionFailure(ex.Message));
+                device.SetStatus(
+                    isAutomatic
+                        ? "Automatic connection failed. Connect manually to try again."
+                        : "Couldn't connect.",
+                    DeviceStatusKind.Error);
+                if (!isAutomatic)
+                {
+                    ShowMessage(
+                        InfoBarSeverity.Error,
+                        $"Couldn't connect to {device.DisplayName}",
+                        FormatConnectionFailure(ex.Message));
+                }
+
                 AppLog.Error("ui", $"Connection error: {ex.GetType().Name}");
             }
             finally
@@ -408,6 +473,7 @@ namespace WinStream
                 MergeDiscoveredDevices(discoveredDevices);
                 RebuildVisibleDevices();
                 RefreshAirPlayReceiverHint();
+                await TryAutoConnectToLastReceiverAsync();
             }
             catch (Exception ex)
             {
@@ -419,6 +485,32 @@ namespace WinStream
                 _isScanning = false;
                 searchButton.IsEnabled = true;
             }
+        }
+
+        private async Task TryAutoConnectToLastReceiverAsync()
+        {
+            var settings = _captureMonitor.Settings;
+            if (_autoConnectAttempted ||
+                !settings.AutoConnectLastReceiver ||
+                string.IsNullOrWhiteSpace(settings.LastReceiverKey) ||
+                _streamingOrchestrator.State != SessionState.Disconnected)
+            {
+                return;
+            }
+
+            var device = _allDevices.FirstOrDefault(candidate =>
+                string.Equals(
+                    candidate.Key,
+                    settings.LastReceiverKey,
+                    StringComparison.Ordinal));
+            if (device is null || device.IsBusy)
+            {
+                return;
+            }
+
+            _autoConnectAttempted = true;
+            AppLog.Info("ui", "Startup receiver found; connecting automatically.");
+            await SetDeviceConnectionAsync(device, connect: true, isAutomatic: true);
         }
 
         /// <summary>

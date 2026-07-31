@@ -82,6 +82,21 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    public void SetAutoConnectLastReceiver(bool enabled)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _settings.AutoConnectLastReceiver = enabled;
+        _settingsStore.Save(_settings);
+    }
+
+    public void RememberReceiver(string key, string displayName)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _settings.LastReceiverKey = key;
+        _settings.LastReceiverName = displayName;
+        _settingsStore.Save(_settings);
+    }
+
     public async Task SetMonitoringAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

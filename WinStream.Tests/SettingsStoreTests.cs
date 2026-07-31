@@ -14,12 +14,18 @@ public class SettingsStoreTests
             store.Save(new AppSettings
             {
                 SelectedRenderDeviceId = "endpoint-123",
-                MonitorCapture = true
+                MonitorCapture = true,
+                AutoConnectLastReceiver = true,
+                LastReceiverKey = "AA:BB:CC:DD:EE:FF",
+                LastReceiverName = "Living Room"
             });
 
             var loaded = store.Load();
             Assert.Equal("endpoint-123", loaded.SelectedRenderDeviceId);
             Assert.True(loaded.MonitorCapture);
+            Assert.True(loaded.AutoConnectLastReceiver);
+            Assert.Equal("AA:BB:CC:DD:EE:FF", loaded.LastReceiverKey);
+            Assert.Equal("Living Room", loaded.LastReceiverName);
         }
         finally
         {
