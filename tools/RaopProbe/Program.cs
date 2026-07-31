@@ -85,6 +85,24 @@ if (args.Contains("--check"))
     return status == 200 ? 0 : 1;
 }
 
+if (args.Contains("--pair"))
+{
+    Console.WriteLine($"\n== Transient HKP pair-setup {target.DisplayName} ({target.IPAddress}:{target.Port}) ==");
+    try
+    {
+        using var pairing = await WinStream.Core.Protocol.AirPlay2.HkpPairSetupClient.PairAsync(
+            target.IPAddress,
+            target.Port);
+        Console.WriteLine($"PAIR_OK sessionKeyLen={pairing.SessionKey.Count} shkLen={pairing.AudioSharedKey().Length}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"PAIR_FAIL: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+}
+
 if (args.Contains("--raw"))
 {
     await WinStream.Tools.RaopProbe.RawProbe.RunAsync(target.IPAddress, target.Port);
