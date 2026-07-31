@@ -1,4 +1,6 @@
-﻿namespace WinStream.Network
+﻿#nullable disable
+
+namespace WinStream.Network
 {
     public class DeviceInfo
     {
@@ -27,6 +29,8 @@
         public string PublicCUAirPlayPairingIdentity { get; set; }
         public string PublicCUSystemPairingIdentity { get; set; }
         public string PublicKey { get; set; }
+        /// <summary>RAOP TXT <c>et</c> — encryption types (0=none, 1=RSA, 3/5=modern/other).</summary>
+        public string EncryptionTypes { get; set; }
         public string HouseholdID { get; set; }
         public string GroupUUID { get; set; }
 

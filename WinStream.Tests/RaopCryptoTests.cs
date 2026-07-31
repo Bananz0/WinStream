@@ -6,7 +6,22 @@ namespace WinStream.Tests;
 public class RaopCryptoTests
 {
     [Fact]
-    public void CreateEncryptionMaterial_EncryptsKeyForReceiver()
+    public void CreateEncryptionMaterial_UsesAirTunesKey()
+    {
+        var material = RaopCrypto.CreateEncryptionMaterial();
+
+        Assert.Equal(16, material.AesKey.Length);
+        Assert.Equal(16, material.AesIv.Length);
+        Assert.False(string.IsNullOrWhiteSpace(material.EncryptedAesKeyBase64));
+        Assert.False(string.IsNullOrWhiteSpace(material.AesIvBase64));
+
+        // RSA-2048 OAEP ciphertext is 256 bytes (unpadded base64 length varies).
+        var encrypted = DecodeUnpaddedBase64(material.EncryptedAesKeyBase64);
+        Assert.Equal(256, encrypted.Length);
+    }
+
+    [Fact]
+    public void CreateEncryptionMaterial_EncryptsKeyForCustomReceiver()
     {
         using var receiver = RSA.Create(2048);
         var publicKey = Convert.ToBase64String(
@@ -16,9 +31,23 @@ public class RaopCryptoTests
         var encrypted = DecodeUnpaddedBase64(material.EncryptedAesKeyBase64);
         var decrypted = receiver.Decrypt(encrypted, RSAEncryptionPadding.OaepSHA1);
 
-        Assert.Equal(16, material.AesKey.Length);
-        Assert.Equal(16, material.AesIv.Length);
         Assert.Equal(material.AesKey, decrypted);
+    }
+
+    [Fact]
+    public void ImportAirTunesPublicKey_IsRsa2048()
+    {
+        using var rsa = RaopCrypto.ImportAirTunesPublicKey();
+        Assert.Equal(2048, rsa.KeySize);
+    }
+
+    [Fact]
+    public void ImportReceiverPublicKey_RejectsEd25519SizedPk()
+    {
+        var ed25519 = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var error = Assert.Throws<CryptographicException>(() =>
+            RaopCrypto.ImportReceiverPublicKey(ed25519));
+        Assert.Contains("Ed25519", error.Message);
     }
 
     [Theory]

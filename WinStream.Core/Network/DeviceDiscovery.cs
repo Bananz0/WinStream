@@ -1,4 +1,6 @@
-﻿using System;
+﻿#nullable disable
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -60,12 +62,13 @@ namespace WinStream.Network
             _cts?.Cancel();
         }
 
-        internal static async Task<List<DeviceInfo>> DiscoverDevicesAsync(CancellationToken cancellationToken)
+        public static async Task<List<DeviceInfo>> DiscoverDevicesAsync(CancellationToken cancellationToken)
         {
             try
             {
-                var raopResults = await ZeroconfResolver.ResolveAsync("_raop._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
-                var airplayResults = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+                var adapters = GetMulticastCapableAdapters();
+                var raopResults = await ZeroconfResolver.ResolveAsync("_raop._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken, netInterfacesToSendRequestOn: adapters);
+                var airplayResults = await ZeroconfResolver.ResolveAsync("_airplay._tcp.local.", TimeSpan.FromSeconds(5), cancellationToken: cancellationToken, netInterfacesToSendRequestOn: adapters);
 
                 var currentDevices = raopResults.Select(host => new DeviceInfo
                 {
@@ -85,6 +88,7 @@ namespace WinStream.Network
                     PublicCUAirPlayPairingIdentity = GetTxtRecordValue(host, "pi"),
                     PublicCUSystemPairingIdentity = GetTxtRecordValue(host, "psi"),
                     PublicKey = GetTxtRecordValue(host, "pk"),
+                    EncryptionTypes = GetTxtRecordValue(host, "et"),
                     HouseholdID = GetTxtRecordValue(host, "hmid"),
                     GroupUUID = GetTxtRecordValue(host, "gid"),
                     IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
@@ -132,6 +136,44 @@ namespace WinStream.Network
                         DeviceMissCounts.Remove(deviceIp);
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Zeroconf throws NetworkInformationException (10043) when an adapter has no
+        /// IPv4 stack, so only hand it adapters that can actually carry mDNS.
+        /// </summary>
+        private static System.Net.NetworkInformation.NetworkInterface[] GetMulticastCapableAdapters()
+        {
+            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .Where(IsUsableAdapter)
+                .ToArray();
+        }
+
+        private static bool IsUsableAdapter(System.Net.NetworkInformation.NetworkInterface adapter)
+        {
+            if (adapter.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up ||
+                !adapter.SupportsMulticast ||
+                adapter.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback ||
+                adapter.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel)
+            {
+                return false;
+            }
+
+            try
+            {
+                var properties = adapter.GetIPProperties();
+                properties.GetIPv4Properties();
+                return properties.UnicastAddresses.Any(address =>
+                    address.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+            }
+            catch (System.Net.NetworkInformation.NetworkInformationException)
+            {
+                return false;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return false;
             }
         }
 
