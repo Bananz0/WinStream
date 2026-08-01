@@ -68,6 +68,13 @@ public sealed class AppSettings
     /// </summary>
     public bool LinkFeatureEnabled { get; set; }
 
+    /// <summary>
+    /// Extreme-only lab: try event-driven WASAPI loopback instead of the frozen 50 ms
+    /// poll. Default false — enable in settings JSON to measure callback spacing.
+    /// Does not unfreeze 50 ms for non-Extreme presets.
+    /// </summary>
+    public bool ExtremeEventDrivenCapture { get; set; }
+
     /// <summary>Active sink: AirPlay speakers or WinStream Link companion.</summary>
     public SinkMode SinkMode { get; set; } = SinkMode.AirPlay;
 
@@ -93,6 +100,7 @@ public sealed class AppSettings
         PlaybackResponsiveness = PlaybackResponsiveness,
         AudioFidelity = AudioFidelity,
         LinkFeatureEnabled = LinkFeatureEnabled,
+        ExtremeEventDrivenCapture = ExtremeEventDrivenCapture,
         SinkMode = SinkMode,
         LastLinkReceiverKey = LastLinkReceiverKey,
         LastLinkReceiverName = LastLinkReceiverName

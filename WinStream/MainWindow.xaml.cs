@@ -1056,9 +1056,9 @@ namespace WinStream
                 return;
             }
 
-            if (LabSessionPolicy.WarnsCaptureTooCoarse(
-                    mode,
-                    WasapiLoopbackSource.CaptureBufferMilliseconds))
+                if (LabSessionPolicy.WarnsCaptureTooCoarse(
+                        mode,
+                        _captureMonitor.CaptureContributionMilliseconds))
             {
                 var warn = new ContentDialog
                 {
@@ -1281,6 +1281,7 @@ namespace WinStream
             {
                 do
                 {
+                    await _captureMonitor.SyncExtremeCaptureExperimentAsync();
                     await _streamingOrchestrator.ApplyStreamingQualityAsync(
                         _settings.Settings.PlaybackResponsiveness,
                         _settings.Settings.AudioFidelity);

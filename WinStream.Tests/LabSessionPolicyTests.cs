@@ -56,6 +56,10 @@ public class LabSessionPolicyTests
         Assert.False(LabSessionPolicy.WarnsCaptureTooCoarse(
             PlaybackResponsiveness.Experimental,
             captureContributionMilliseconds: 50));
+        // Injected measurement: event-driven p95 under the threshold stays quiet.
+        Assert.False(LabSessionPolicy.WarnsCaptureTooCoarse(
+            PlaybackResponsiveness.LabPacket,
+            captureContributionMilliseconds: 10));
     }
 
     [Fact]

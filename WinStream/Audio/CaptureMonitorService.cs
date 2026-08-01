@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using WinStream.Core;
 using WinStream.Core.Audio;
 using WinStream.Core.Persistence;
 
@@ -45,6 +46,24 @@ public sealed class CaptureMonitorService : IAsyncDisposable
 
     public string? ActiveEndpointId => _source?.EndpointId;
 
+    /// <summary>
+    /// Measured capture contribution for Extreme honesty, or the frozen 50 ms constant
+    /// when the event-driven experiment is off / not warmed up.
+    /// </summary>
+    public int CaptureContributionMilliseconds
+    {
+        get
+        {
+            var source = _source;
+            if (source is { UseEventDrivenCapture: true, HasMeasuredContribution: true })
+            {
+                return source.MeasuredContributionMilliseconds;
+            }
+
+            return WasapiLoopbackSource.CaptureBufferMilliseconds;
+        }
+    }
+
     public IReadOnlyList<RenderEndpointInfo> ListEndpoints() =>
         _endpointEnumerator.ListActiveRenderEndpoints();
 
@@ -83,6 +102,8 @@ public sealed class CaptureMonitorService : IAsyncDisposable
     public async Task EnsureStartedAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        await SyncExtremeCaptureExperimentAsync(cancellationToken).ConfigureAwait(false);
+
         WasapiLoopbackSource source;
         lock (_gate)
         {
@@ -95,6 +116,56 @@ public sealed class CaptureMonitorService : IAsyncDisposable
             await source.StartAsync(cancellationToken).ConfigureAwait(false);
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    /// <summary>
+    /// Recreates capture when Extreme's event-driven experiment should toggle.
+    /// Safe no-op when the desired mode already matches.
+    /// </summary>
+    public async Task SyncExtremeCaptureExperimentAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var wantEventDriven = WantsEventDrivenCapture(Settings);
+        WasapiLoopbackSource? existing;
+        lock (_gate)
+        {
+            existing = _source;
+            if (existing is null)
+            {
+                return;
+            }
+
+            if (existing.UseEventDrivenCapture == wantEventDriven)
+            {
+                return;
+            }
+        }
+
+        var wasCapturing = existing.IsCapturing;
+        await existing.StopAsync(cancellationToken).ConfigureAwait(false);
+        existing.DeviceInvalidated -= OnDeviceInvalidated;
+        existing.CaptureFailed -= OnCaptureFailed;
+        await existing.DisposeAsync().ConfigureAwait(false);
+
+        WasapiLoopbackSource replacement;
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                _source = null;
+                return;
+            }
+
+            replacement = CreateSource();
+            _source = replacement;
+        }
+
+        if (wasCapturing || Settings.MonitorCapture)
+        {
+            await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -143,12 +214,17 @@ public sealed class CaptureMonitorService : IAsyncDisposable
     {
         var source = new WasapiLoopbackSource
         {
-            PreferredEndpointId = Settings.SelectedRenderDeviceId
+            PreferredEndpointId = Settings.SelectedRenderDeviceId,
+            UseEventDrivenCapture = WantsEventDrivenCapture(Settings)
         };
         source.DeviceInvalidated += OnDeviceInvalidated;
         source.CaptureFailed += OnCaptureFailed;
         return source;
     }
+
+    private static bool WantsEventDrivenCapture(AppSettings settings) =>
+        settings.ExtremeEventDrivenCapture &&
+        settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket;
 
     private async void OnDeviceInvalidated(object? sender, EventArgs e)
     {

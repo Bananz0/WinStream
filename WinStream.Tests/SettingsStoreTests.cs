@@ -115,8 +115,21 @@ public class SettingsStoreTests
         Assert.False(loaded.MonitorCapture);
         Assert.Equal(CaptureMode.Loopback, loaded.CaptureMode);
         Assert.False(loaded.PreferVirtualDriver);
+        Assert.False(loaded.ExtremeEventDrivenCapture);
         Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
         Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
+    }
+
+    [Fact]
+    public void ExtremeEventDrivenCapture_round_trips_and_defaults_off()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+
+        Assert.False(store.Load().ExtremeEventDrivenCapture);
+
+        store.Save(new AppSettings { ExtremeEventDrivenCapture = true });
+        Assert.True(store.Load().ExtremeEventDrivenCapture);
     }
 
     [Fact]

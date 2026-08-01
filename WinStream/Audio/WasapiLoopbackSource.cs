@@ -9,6 +9,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
+using WinStream.Core.Streaming.Link;
 
 namespace WinStream.Audio;
 
@@ -22,9 +23,18 @@ public sealed class WasapiLoopbackSource : IAudioSource
     /// </summary>
     public const int CaptureBufferMilliseconds = 50;
 
+    /// <summary>
+    /// Requested client buffer when <see cref="UseEventDrivenCapture"/> is on. Shared-mode
+    /// event-driven loopback still wakes on the engine period (~10 ms typical); the measured
+    /// p95 is the evidence, not this request.
+    /// </summary>
+    public const int EventDrivenBufferMilliseconds = 10;
+
     private readonly object _gate = new();
     private readonly ConcurrentQueue<double> _recentRms = new();
     private readonly LogRateLimiter _gapLog = new(TimeSpan.FromSeconds(5));
+    private readonly LogRateLimiter _measureLog = new(TimeSpan.FromSeconds(5));
+    private readonly CaptureCallbackMeasurer _callbackMeasurer = new();
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
     private WasapiCapture? _capture;
@@ -48,6 +58,12 @@ public sealed class WasapiLoopbackSource : IAudioSource
     public event EventHandler? DeviceInvalidated;
 
     public bool IsCapturing { get; private set; }
+
+    /// <summary>
+    /// Extreme lab only: event-driven loopback. Must be set before <see cref="StartAsync"/>.
+    /// Default false keeps the frozen 50 ms poll for everyone else.
+    /// </summary>
+    public bool UseEventDrivenCapture { get; set; }
 
     public AudioFormat? Format
     {
@@ -89,6 +105,15 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     /// <summary>Most recent inter-callback interval in Stopwatch ticks.</summary>
     internal long LastInterCallbackTicks => Interlocked.Read(ref _lastInterCallbackTicks);
+
+    /// <summary>
+    /// Rolling p95 inter-callback ms once warmed up; 0 until then. Used for Extreme's
+    /// capture-too-coarse honesty gate when the event-driven experiment is on.
+    /// </summary>
+    public int MeasuredContributionMilliseconds =>
+        _callbackMeasurer.MeasuredContributionMilliseconds;
+
+    public bool HasMeasuredContribution => _callbackMeasurer.IsReady;
 
     public string? PreferredEndpointId
     {
@@ -196,7 +221,11 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _enumerator ??= new MMDeviceEnumerator();
         _device = ResolveDevice(_enumerator, PreferredEndpointId);
         _activeEndpointId = _device.ID;
-        _capture = new ShortBufferLoopbackCapture(_device, CaptureBufferMilliseconds);
+        _callbackMeasurer.Reset();
+        var bufferMs = UseEventDrivenCapture
+            ? EventDrivenBufferMilliseconds
+            : CaptureBufferMilliseconds;
+        _capture = new ShortBufferLoopbackCapture(_device, bufferMs, UseEventDrivenCapture);
         var waveFormat = _capture.WaveFormat;
         _sourceFormat = ResolveSampleFormat(waveFormat);
 
@@ -208,6 +237,14 @@ public sealed class WasapiLoopbackSource : IAudioSource
         IsCapturing = true;
         Interlocked.Exchange(ref _lastCallbackQpc, Stopwatch.GetTimestamp());
         Interlocked.Exchange(ref _inGap, 0);
+        if (UseEventDrivenCapture)
+        {
+            AppLog.Info(
+                "capture",
+                $"AirPlay event-driven loopback experiment on " +
+                $"requestedBufferMs={bufferMs} (measure p95 callbacks; not a latency claim)");
+        }
+
         _gapFillCts = new CancellationTokenSource();
         var token = _gapFillCts.Token;
         _gapFillLoop = Task.Run(() => RunGapFillLoopAsync(token), token);
@@ -243,6 +280,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
         _currentRms = 0;
         _format = null;
         _activeEndpointId = null;
+        _callbackMeasurer.Reset();
         Interlocked.Exchange(ref _lastCallbackQpc, 0);
         Interlocked.Exchange(ref _inGap, 0);
         while (_recentRms.TryDequeue(out _))
@@ -279,7 +317,13 @@ public sealed class WasapiLoopbackSource : IAudioSource
         CaptureGapFiller.EndGap(ref _inGap);
         if (previous != 0)
         {
-            Interlocked.Exchange(ref _lastInterCallbackTicks, now - previous);
+            var delta = now - previous;
+            Interlocked.Exchange(ref _lastInterCallbackTicks, delta);
+            if (UseEventDrivenCapture)
+            {
+                _callbackMeasurer.RecordInterval(delta);
+                MaybeLogMeasuredContribution();
+            }
         }
 
         var copy = Pcm16Converter.ToPcm16(e.Buffer.AsSpan(0, e.BytesRecorded), _sourceFormat);
@@ -343,6 +387,19 @@ public sealed class WasapiLoopbackSource : IAudioSource
             EmitSilence(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
             Interlocked.Exchange(ref _lastCallbackQpc, now);
         }
+    }
+
+    private void MaybeLogMeasuredContribution()
+    {
+        if (!_callbackMeasurer.IsReady || !_measureLog.ShouldLog(out _))
+        {
+            return;
+        }
+
+        AppLog.Info(
+            "capture",
+            $"Extreme event-driven capture p95≈{_callbackMeasurer.MeasuredContributionMilliseconds} ms " +
+            "(callback spacing; not PC-to-speaker delay)");
     }
 
     private void MaybeLogGap()
@@ -444,8 +501,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
     /// </summary>
     private sealed class ShortBufferLoopbackCapture : WasapiCapture
     {
-        public ShortBufferLoopbackCapture(MMDevice device, int bufferMilliseconds)
-            : base(device, useEventSync: false, audioBufferMillisecondsLength: bufferMilliseconds)
+        public ShortBufferLoopbackCapture(MMDevice device, int bufferMilliseconds, bool useEventSync)
+            : base(device, useEventSync, audioBufferMillisecondsLength: bufferMilliseconds)
         {
         }
 
