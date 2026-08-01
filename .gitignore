@@ -7,6 +7,9 @@
 .env
 .env.local
 
+# Working docs (plans, research, review reports) stay local
+docs/
+
 # User-specific files
 *.rsuser
 *.suo

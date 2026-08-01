@@ -53,7 +53,7 @@ function Get-WinStreamPackagingConfig {
 
     $secretsDir = $env:WINSTREAM_SECRETS_DIR
     if ([string]::IsNullOrWhiteSpace($secretsDir)) {
-        $secretsDir = 'C:\path\to\your\.secrets'
+        throw "WINSTREAM_SECRETS_DIR is not set - copy .env.example to .env and point it at your secrets directory."
     }
 
     $windowsDir = Join-Path $secretsDir 'windows'
