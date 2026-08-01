@@ -22,13 +22,69 @@ public class PairingOptionsWiringTests
     private static PairingOptions Build(
         IPairingCredentialStore store,
         string receiverKey,
-        Func<CancellationToken, Task<string?>>? requestPin = null) => new()
+        Func<CancellationToken, Task<string?>>? requestPin = null,
+        FakeSessionMap? sessions = null) => new()
     {
         StoredCredentials = store.TryGet(receiverKey, out var stored) ? stored : null,
         RequestPinAsync = requestPin,
         OnPaired = credentials => store.Save(receiverKey, credentials),
-        OnStoredCredentialsRejected = () => store.Remove(receiverKey)
+        OnStoredCredentialsRejected = () => store.Remove(receiverKey),
+        OnTransientPairing = () => sessions?.MarkTransient(receiverKey)
     };
+
+    [Fact]
+    public void OnTransientPairing_marks_only_the_live_session_for_that_receiver()
+    {
+        var store = new FakePairingCredentialStore();
+        var sessions = new FakeSessionMap();
+        sessions.Add("receiver-a");
+        sessions.Add("receiver-b");
+
+        Build(store, "receiver-a", sessions: sessions).OnTransientPairing!();
+
+        Assert.True(sessions.UsesTransientPairing("receiver-a"));
+        Assert.False(sessions.UsesTransientPairing("receiver-b"));
+    }
+
+    [Fact]
+    public void Removing_the_session_drops_its_transient_mark()
+    {
+        var store = new FakePairingCredentialStore();
+        var sessions = new FakeSessionMap();
+        sessions.Add("receiver-a");
+        Build(store, "receiver-a", sessions: sessions).OnTransientPairing!();
+
+        sessions.Remove("receiver-a");
+
+        Assert.False(sessions.UsesTransientPairing("receiver-a"));
+    }
+
+    [Fact]
+    public void A_reconnect_that_trusts_the_PC_no_longer_reports_transient()
+    {
+        var store = new FakePairingCredentialStore();
+        var sessions = new FakeSessionMap();
+        sessions.Add("receiver-a");
+        Build(store, "receiver-a", sessions: sessions).OnTransientPairing!();
+        sessions.Remove("receiver-a");
+
+        // Fresh attempt: the session is new, and persistent pairing never fires the
+        // transient callback, so nothing carries over from the temporary session.
+        sessions.Add("receiver-a");
+
+        Assert.False(sessions.UsesTransientPairing("receiver-a"));
+    }
+
+    [Fact]
+    public void A_transient_report_without_a_live_session_marks_nothing()
+    {
+        var store = new FakePairingCredentialStore();
+        var sessions = new FakeSessionMap();
+
+        Build(store, "receiver-a", sessions: sessions).OnTransientPairing!();
+
+        Assert.False(sessions.UsesTransientPairing("receiver-a"));
+    }
 
     [Fact]
     public void Options_carry_the_stored_identity_for_a_known_receiver()
@@ -95,6 +151,30 @@ public class PairingOptionsWiringTests
 
         Assert.Equal(receiverKey, session.ReceiverId);
         Assert.Equal(SessionState.Disconnected, session.State);
+    }
+
+    /// <summary>
+    /// Mirrors the orchestrator's session map: the transient flag lives on the session
+    /// entry, so it appears when the callback fires and disappears with the session.
+    /// </summary>
+    private sealed class FakeSessionMap
+    {
+        private readonly Dictionary<string, bool> _sessions = new(StringComparer.Ordinal);
+
+        public void Add(string receiverKey) => _sessions[receiverKey] = false;
+
+        public void Remove(string receiverKey) => _sessions.Remove(receiverKey);
+
+        public void MarkTransient(string receiverKey)
+        {
+            if (_sessions.ContainsKey(receiverKey))
+            {
+                _sessions[receiverKey] = true;
+            }
+        }
+
+        public bool UsesTransientPairing(string receiverKey) =>
+            _sessions.TryGetValue(receiverKey, out var transient) && transient;
     }
 
     private sealed class FakePairingCredentialStore : IPairingCredentialStore

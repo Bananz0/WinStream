@@ -213,6 +213,7 @@ public class PairingKeyNegotiatorTests
             CancellationToken.None);
 
         Assert.Equal(["transient"], recorder.Steps);
+        Assert.Equal(1, recorder.TransientReports);
         Assert.Equal(1, recorder.Resets);
         Assert.Equal(0, recorder.Rejections);
     }
@@ -274,6 +275,7 @@ public class PairingKeyNegotiatorTests
         // Setup never handed an identity to the store, so there is nothing stale to
         // clear — signalling a rejection here would drop an earlier good pairing.
         Assert.Equal(["transient"], recorder.Steps);
+        Assert.Equal(1, recorder.TransientReports);
         Assert.Equal(0, recorder.Rejections);
         Assert.Equal(1, recorder.Resets);
     }
@@ -311,5 +313,26 @@ public class PairingKeyNegotiatorTests
             CancellationToken.None);
 
         Assert.Equal(["transient"], recorder.Steps);
+        Assert.Equal(1, recorder.TransientReports);
+    }
+
+    [Fact]
+    public async Task A_failed_transient_fallback_is_never_reported_as_paired()
+    {
+        var recorder = new Recorder();
+        var negotiator = new PairingKeyNegotiator(
+            recorder.Options(stored: null, requestPin: null),
+            recorder.Reset);
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            negotiator.NegotiateAsync(
+                (_, _) => throw new InvalidOperationException("verify must not run"),
+                (_, _) => throw new InvalidOperationException("setup must not run"),
+                _ => throw new IOException("receiver closed the socket"),
+                CancellationToken.None));
+
+        // The connect died before any pairing existed, so nothing may claim the
+        // session is running on transient keys.
+        Assert.Equal(0, recorder.TransientReports);
     }
 }

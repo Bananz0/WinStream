@@ -12,15 +12,6 @@ public static class StreamingQualityCopy
         "wake spacing). Under load Extreme may climb toward ~80 ms then ~250 ms. " +
         "One speaker. Speaker buffer ask only — not a measured PC-to-speaker delay.";
 
-    public static string TransientPairingTitle => "Approve needed on every connect";
-
-    public static string TransientPairingBody =>
-        "WinStream connected with temporary pairing, so the receiver asks you to " +
-        "approve each session. To trust this PC once, disconnect and connect again, " +
-        "then type the AirPlay code the receiver shows instead of skipping it.";
-
-    public static string TransientPairingStatus => "Temporary pairing";
-
     public static string LabEscapeBody =>
         "The receiver did not accept Extreme (~50 ms). " +
         "Switch to Experimental (~250 ms) and reconnect now?";
@@ -28,18 +19,6 @@ public static class StreamingQualityCopy
     public static string ExtremeCaptureWarningTitle => "Extreme has almost no capture margin";
 
     public static string ExtremeCaptureWarningBody => LabSessionPolicy.CaptureTooCoarseWarning;
-
-    /// <summary>
-    /// Shown when a receiver asks for the persistent-pairing secret. Covers both forms
-    /// the same SRP exchange accepts: the on-screen code, or the AirPlay Receiver
-    /// password when one is configured.
-    /// </summary>
-    public static string PairingPromptBody =>
-        "Look at the Mac for a 4-digit AirPlay code and type it here. " +
-        "That trusts this PC so later connects can skip Accept.\n\n" +
-        "If you set a password under System Settings → General → AirDrop & Handoff → " +
-        "AirPlay Receiver, enter that password instead.\n\n" +
-        "If nothing appears, click Skip — you'll keep getting the Accept prompt.";
 
     public static string AutoConnectOnDescription(string receiverName) =>
         $"On launch (or when you turn this on), connect once to {receiverName} when it appears.";

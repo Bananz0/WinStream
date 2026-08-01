@@ -170,6 +170,8 @@ public class AutoConnectTests
     [InlineData(SessionState.Streaming, SessionState.Disconnected)]
     [InlineData(SessionState.Streaming, SessionState.Failed)]
     [InlineData(SessionState.Degraded, SessionState.Disconnected)]
+    [InlineData(SessionState.Degraded, SessionState.Failed)]
+    [InlineData(SessionState.Reconnecting, SessionState.Disconnected)]
     [InlineData(SessionState.Reconnecting, SessionState.Failed)]
     public void An_established_session_that_drops_re_arms(SessionState previous, SessionState current)
     {
@@ -186,6 +188,25 @@ public class AutoConnectTests
             SessionState.Streaming,
             SessionState.Disconnected,
             userInitiated: true));
+    }
+
+    [Fact]
+    public void A_user_disconnect_leaves_the_success_latch_off()
+    {
+        var tracker = new AutoConnectAttemptTracker();
+        tracker.RecordSuccess();
+
+        var reArms = AutoConnectPolicy.ReArmsAfterSessionEnd(
+            SessionState.Streaming,
+            SessionState.Disconnected,
+            userInitiated: true);
+        if (reArms)
+        {
+            tracker.RecordSessionLost();
+        }
+
+        Assert.False(reArms);
+        Assert.False(tracker.AttemptsAvailable);
     }
 
     [Theory]

@@ -46,7 +46,7 @@ namespace WinStream
         private readonly LinkCredentialStore _linkCredentials = new();
         private readonly LinkConnectionCoordinator _link;
         private readonly DeviceDiscoveryCoordinator _discovery = new();
-        private readonly AutoConnectAttemptTracker _autoConnectAttempts = new();
+        private readonly AutoConnectCoordinator _autoConnect = new();
         private readonly DispatcherTimer _scanTimer;
         private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
@@ -60,12 +60,6 @@ namespace WinStream
         private bool _suppressLaunchAtStartupEvents;
         private bool _suppressStreamingQualityEvents;
         private bool _suppressSinkModeEvents;
-
-        /// <summary>
-        /// Latches while the last session ended because the user pressed Disconnect,
-        /// so the auto-connect re-arm does not pull that receiver straight back.
-        /// </summary>
-        private bool _userInitiatedDisconnect;
         private bool _suppressLinkDiscoveryEvents;
         private long _linkUnderruns;
         private readonly QualityApplyGate _qualityApplyGate = new();
@@ -1188,14 +1182,14 @@ namespace WinStream
                                 {
                                     new TextBlock
                                     {
-                                        Text = StreamingQualityCopy.PairingPromptBody,
+                                        Text = PairingCopy.PromptBody,
                                         TextWrapping = TextWrapping.WrapWholeWords
                                     },
                                     pinBox
                                 }
                             },
-                            PrimaryButtonText = "Trust this PC",
-                            CloseButtonText = "Skip (approve every time)",
+                            PrimaryButtonText = PairingCopy.TrustButton,
+                            CloseButtonText = PairingCopy.SkipButton,
                             DefaultButton = ContentDialogButton.Primary,
                             XamlRoot = Content.XamlRoot
                         };
@@ -1387,7 +1381,7 @@ namespace WinStream
 
             var enabled = autoConnectToggle.IsOn;
             _settings.Update(settings => settings.AutoConnectLastReceiver = enabled);
-            _autoConnectAttempts.Reset();
+            _autoConnect.Reset();
             RefreshAutoConnectDescription();
 
             if (enabled)
@@ -1597,7 +1591,6 @@ namespace WinStream
             }
 
             _connectionInFlight = true;
-            _userInitiatedDisconnect = !connect;
             messageBar.IsOpen = false;
             device.ClearStatus();
             if (connect && isAutomatic)
@@ -1632,38 +1625,23 @@ namespace WinStream
                 await _streamingOrchestrator.ConnectAsync(device.Device, source);
                 await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
                 RememberReceiver(device);
-                _autoConnectAttempts.RecordSuccess();
+                _autoConnect.RecordSuccess();
 
-                if (_streamingOrchestrator.State == SessionState.Degraded)
+                // Row status is painted by RefreshConnectedDeviceHealth once IsBusy
+                // clears; only the one-shot pairing warning belongs to this path.
+                if (_streamingOrchestrator.UsesTransientPairing(device.Device))
                 {
-                    device.SetStatus(
-                        "Stream degraded",
-                        DeviceStatusKind.Caution,
-                        string.IsNullOrWhiteSpace(_streamingStatusDetail)
-                            ? "The stream is connected but one or more health checks are failing."
-                            : _streamingStatusDetail);
-                }
-                else if (_streamingOrchestrator.UsesTransientPairing(device.Device))
-                {
-                    device.SetStatus(
-                        StreamingQualityCopy.TransientPairingStatus,
-                        DeviceStatusKind.Caution,
-                        StreamingQualityCopy.TransientPairingBody);
                     ShowMessage(
                         InfoBarSeverity.Warning,
-                        StreamingQualityCopy.TransientPairingTitle,
-                        StreamingQualityCopy.TransientPairingBody);
-                }
-                else
-                {
-                    device.SetStatus("Streaming.", DeviceStatusKind.Success);
+                        PairingCopy.TransientTitle,
+                        PairingCopy.TransientBody);
                 }
             }
             catch (Exception ex)
             {
                 if (isAutomatic)
                 {
-                    _autoConnectAttempts.RecordFailure();
+                    _autoConnect.RecordFailure();
                 }
 
                 device.SetStatus(
@@ -1696,6 +1674,7 @@ namespace WinStream
                 device.IsBusy = false;
                 UpdateUI(true);
                 SyncConnectionState();
+                RefreshConnectedDeviceHealth();
                 RefreshSessionStatus();
             }
 
@@ -1724,7 +1703,7 @@ namespace WinStream
 
             if (changed)
             {
-                _autoConnectAttempts.Reset();
+                _autoConnect.Reset();
             }
 
             RefreshAutoConnectDescription();
@@ -1793,26 +1772,11 @@ namespace WinStream
 
         private async Task TryAutoConnectToLastReceiverAsync()
         {
-            var settings = _settings.Settings;
-            if (!SinkModeSwitchPolicy.AllowsAirPlayAutoConnect(settings.SinkMode))
-            {
-                return;
-            }
-
-            if (!AutoConnectPolicy.ShouldAttempt(
-                    settings.AutoConnectLastReceiver,
-                    settings.LastReceiverKey,
-                    _streamingOrchestrator.State,
-                    _connectionInFlight,
-                    _autoConnectAttempts.AttemptsAvailable,
-                    settings.PlaybackResponsiveness))
-            {
-                return;
-            }
-
-            var target = AutoConnectPolicy.FindTarget(
+            var target = _autoConnect.ResolveTarget(
+                _settings.Settings,
                 _allDevices.Select(device => device.Device),
-                settings.LastReceiverKey);
+                _streamingOrchestrator.State,
+                _connectionInFlight);
             if (target is null)
             {
                 return;
@@ -1947,14 +1911,9 @@ namespace WinStream
                 ? change.Reason ?? string.Empty
                 : string.Empty;
 
-            if (AutoConnectPolicy.ReArmsAfterSessionEnd(
-                    change.Previous,
-                    change.Current,
-                    _userInitiatedDisconnect))
-            {
-                _autoConnectAttempts.RecordSessionLost();
-                AppLog.Info("ui", $"Session ended ({change.Current}); auto-connect re-armed.");
-            }
+            _autoConnect.NoteStateChange(
+                change,
+                _streamingOrchestrator.LastDisconnectWasUserRequested);
 
             SyncConnectionState();
             RefreshConnectedDeviceHealth();
@@ -1999,9 +1958,9 @@ namespace WinStream
                         if (_streamingOrchestrator.UsesTransientPairing(device.Device))
                         {
                             device.SetStatus(
-                                StreamingQualityCopy.TransientPairingStatus,
+                                PairingCopy.TransientStatus,
                                 DeviceStatusKind.Caution,
-                                StreamingQualityCopy.TransientPairingBody);
+                                PairingCopy.TransientBody);
                         }
                         else
                         {

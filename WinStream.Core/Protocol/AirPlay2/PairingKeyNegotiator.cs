@@ -93,8 +93,12 @@ public sealed class PairingKeyNegotiator
             }
         }
 
+        // Reported only once transient actually produced keys: a failed fallback ends
+        // the connect attempt, and marking the receiver then would claim a temporary
+        // pairing that never existed.
+        var keys = await transient(cancellationToken).ConfigureAwait(false);
         _options?.OnTransientPairing?.Invoke();
-        return await transient(cancellationToken).ConfigureAwait(false);
+        return keys;
     }
 
     /// <summary>

@@ -40,11 +40,9 @@ public static class AutoConnectPolicy
         IEnumerable<DeviceInfo> discovered,
         string? lastReceiverKey)
     {
-        if (discovered is null || string.IsNullOrWhiteSpace(lastReceiverKey))
-        {
-            return null;
-        }
-
-        return discovered.FirstOrDefault(device => ReceiverKey.Matches(lastReceiverKey, device));
+        ArgumentNullException.ThrowIfNull(discovered);
+        return string.IsNullOrWhiteSpace(lastReceiverKey)
+            ? null
+            : discovered.FirstOrDefault(device => ReceiverKey.Matches(lastReceiverKey, device));
     }
 }

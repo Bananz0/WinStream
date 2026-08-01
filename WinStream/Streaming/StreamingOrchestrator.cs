@@ -27,7 +27,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private Func<CancellationToken, Task<string?>>? _requestPairingPinAsync;
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _transientPairings = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
     private readonly ReconnectBudget _reconnectBudget = new();
     private readonly object _sessionsGate = new();
@@ -46,6 +45,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private long _slowAtWindowStart;
     private DateTimeOffset _signalWindowStart = DateTimeOffset.UtcNow;
     private bool _audioStartedMarked;
+    private bool _userRequestedDisconnect;
     private bool _disposed;
 
     /// <param name="senderDeviceId">
@@ -90,17 +90,25 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         _sessions.Values.Select(entry => entry.Receiver).ToList();
 
     /// <summary>
-    /// True when the last connect to this receiver fell back to transient pairing, so
-    /// the receiver will keep asking the user to approve every session.
+    /// True when the live session for this receiver fell back to transient pairing, so
+    /// the receiver will keep asking the user to approve every session. The flag lives
+    /// on the session, so a failed connect or a disconnect clears it with the session.
     /// </summary>
     public bool UsesTransientPairing(DeviceInfo receiver)
     {
         var receiverKey = ReceiverKey.For(receiver);
         lock (_sessionsGate)
         {
-            return _transientPairings.Contains(receiverKey);
+            return _sessions.TryGetValue(receiverKey, out var entry) && entry.UsesTransientPairing;
         }
     }
+
+    /// <summary>
+    /// Whether the current teardown was asked for by the user rather than forced by a
+    /// dropped receiver. Auto-connect reads this so a deliberate Disconnect stays
+    /// disconnected while a lost session becomes eligible again.
+    /// </summary>
+    public bool LastDisconnectWasUserRequested => _userRequestedDisconnect;
 
     /// <summary>
     /// Stores quality prefs for the next connect. Live preset changes go through
@@ -139,6 +147,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(receiver);
         ArgumentNullException.ThrowIfNull(audioSource);
+        _userRequestedDisconnect = false;
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -312,6 +321,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         DeviceInfo? receiver = null,
         CancellationToken cancellationToken = default)
     {
+        _userRequestedDisconnect = true;
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -599,8 +609,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             {
                 return;
             }
-
-            _transientPairings.Remove(key);
         }
 
         entry.Session.StateChanged -= OnSessionStateChanged;
@@ -799,25 +807,23 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private PairingOptions CreatePairingOptions(DeviceInfo receiver)
     {
         var receiverKey = ReceiverKey.For(receiver);
-
-        // Each attempt re-decides its pairing mode, so a retry that finally trusts the
-        // PC must not keep reporting the previous transient session.
-        lock (_sessionsGate)
-        {
-            _transientPairings.Remove(receiverKey);
-        }
-
         return new PairingOptions
         {
             StoredCredentials = _pairingStore.TryGet(receiverKey, out var stored) ? stored : null,
             RequestPinAsync = _requestPairingPinAsync,
             OnPaired = credentials => _pairingStore.Save(receiverKey, credentials),
             OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey),
+
+            // Marks the live session, so each attempt re-decides its pairing mode and a
+            // failed connect cannot leave a stale temporary-pairing claim behind.
             OnTransientPairing = () =>
             {
                 lock (_sessionsGate)
                 {
-                    _transientPairings.Add(receiverKey);
+                    if (_sessions.TryGetValue(receiverKey, out var live))
+                    {
+                        live.UsesTransientPairing = true;
+                    }
                 }
             }
         };
@@ -854,20 +860,26 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         await _lifecycle.WaitAsync().ConfigureAwait(false);
         try
         {
-            CancelReconnectLoop();
-            _reconnectBudget.Clear();
-            foreach (var key in _sessions.Keys.ToList())
-            {
-                await RemoveSessionAsync(key, CancellationToken.None).ConfigureAwait(false);
-            }
-
-            await DetachAudioSourceAsync().ConfigureAwait(false);
-            SetAggregate(SessionState.Disconnected, reason);
+            await TearDownAllSessionsAsync(reason).ConfigureAwait(false);
         }
         finally
         {
             _lifecycle.Release();
         }
+    }
+
+    /// <summary>Caller must hold <see cref="_lifecycle"/>.</summary>
+    private async Task TearDownAllSessionsAsync(string reason)
+    {
+        CancelReconnectLoop();
+        _reconnectBudget.Clear();
+        foreach (var key in _sessions.Keys.ToList())
+        {
+            await RemoveSessionAsync(key, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await DetachAudioSourceAsync().ConfigureAwait(false);
+        SetAggregate(SessionState.Disconnected, reason);
     }
 
     private void CancelReconnectLoop()
@@ -917,6 +929,53 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             AppLog.Info("stream", $"State={state}; {reason}");
         }
+
+        if (state == SessionState.Failed)
+        {
+            ReleaseFailedSessions();
+        }
+    }
+
+    /// <summary>
+    /// Failed is terminal: every session is dead but still registered, which would
+    /// pin the aggregate away from Disconnected and leave auto-connect unable to
+    /// redial. Dropping the corpses settles the app back at Disconnected.
+    /// </summary>
+    private void ReleaseFailedSessions()
+    {
+        if (_disposed || _reconnectCts is not null)
+        {
+            return;
+        }
+
+        _ = ReleaseFailedSessionsAsync();
+    }
+
+    private async Task ReleaseFailedSessionsAsync()
+    {
+        try
+        {
+            await _lifecycle.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Re-checked under the lock: a quality rebuild can pass through Failed
+                // and recover while this release is still queued behind it.
+                if (_disposed || _aggregateState != SessionState.Failed)
+                {
+                    return;
+                }
+
+                await TearDownAllSessionsAsync("Receiver ended the session.").ConfigureAwait(false);
+            }
+            finally
+            {
+                _lifecycle.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn("stream", $"Failed-session release error: {ex.GetType().Name}");
+        }
     }
 
     private sealed class SessionEntry(
@@ -929,5 +988,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         public IAirPlaySession Session { get; set; } = session;
 
         public AirPlayProtocolKind Protocol { get; } = protocol;
+
+        /// <summary>Set when this session settled on transient (approve-every-time) pairing.</summary>
+        public bool UsesTransientPairing { get; set; }
     }
 }
