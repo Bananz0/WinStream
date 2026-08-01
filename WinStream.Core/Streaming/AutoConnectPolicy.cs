@@ -22,6 +22,20 @@ public static class AutoConnectPolicy
         sessionState == SessionState.Disconnected &&
         responsiveness != PlaybackResponsiveness.LabPacket;
 
+    /// <summary>
+    /// True when a session ended on its own and auto-connect should become eligible
+    /// again. A disconnect the user asked for must stay disconnected, and a connect
+    /// that never established (failed dial, refused pairing) is left to the retry
+    /// budget rather than re-armed here.
+    /// </summary>
+    public static bool ReArmsAfterSessionEnd(
+        SessionState previous,
+        SessionState current,
+        bool userInitiated) =>
+        !userInitiated &&
+        current is SessionState.Disconnected or SessionState.Failed &&
+        previous is SessionState.Streaming or SessionState.Degraded or SessionState.Reconnecting;
+
     public static DeviceInfo? FindTarget(
         IEnumerable<DeviceInfo> discovered,
         string? lastReceiverKey)

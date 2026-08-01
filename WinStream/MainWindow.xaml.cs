@@ -60,6 +60,12 @@ namespace WinStream
         private bool _suppressLaunchAtStartupEvents;
         private bool _suppressStreamingQualityEvents;
         private bool _suppressSinkModeEvents;
+
+        /// <summary>
+        /// Latches while the last session ended because the user pressed Disconnect,
+        /// so the auto-connect re-arm does not pull that receiver straight back.
+        /// </summary>
+        private bool _userInitiatedDisconnect;
         private bool _suppressLinkDiscoveryEvents;
         private long _linkUnderruns;
         private readonly QualityApplyGate _qualityApplyGate = new();
@@ -1188,8 +1194,8 @@ namespace WinStream
                                     pinBox
                                 }
                             },
-                            PrimaryButtonText = "Pair",
-                            CloseButtonText = "Skip",
+                            PrimaryButtonText = "Trust this PC",
+                            CloseButtonText = "Skip (approve every time)",
                             DefaultButton = ContentDialogButton.Primary,
                             XamlRoot = Content.XamlRoot
                         };
@@ -1591,6 +1597,7 @@ namespace WinStream
             }
 
             _connectionInFlight = true;
+            _userInitiatedDisconnect = !connect;
             messageBar.IsOpen = false;
             device.ClearStatus();
             if (connect && isAutomatic)
@@ -1635,6 +1642,17 @@ namespace WinStream
                         string.IsNullOrWhiteSpace(_streamingStatusDetail)
                             ? "The stream is connected but one or more health checks are failing."
                             : _streamingStatusDetail);
+                }
+                else if (_streamingOrchestrator.UsesTransientPairing(device.Device))
+                {
+                    device.SetStatus(
+                        StreamingQualityCopy.TransientPairingStatus,
+                        DeviceStatusKind.Caution,
+                        StreamingQualityCopy.TransientPairingBody);
+                    ShowMessage(
+                        InfoBarSeverity.Warning,
+                        StreamingQualityCopy.TransientPairingTitle,
+                        StreamingQualityCopy.TransientPairingBody);
                 }
                 else
                 {
@@ -1928,6 +1946,16 @@ namespace WinStream
                 SessionState.Degraded or SessionState.Reconnecting or SessionState.Failed
                 ? change.Reason ?? string.Empty
                 : string.Empty;
+
+            if (AutoConnectPolicy.ReArmsAfterSessionEnd(
+                    change.Previous,
+                    change.Current,
+                    _userInitiatedDisconnect))
+            {
+                _autoConnectAttempts.RecordSessionLost();
+                AppLog.Info("ui", $"Session ended ({change.Current}); auto-connect re-armed.");
+            }
+
             SyncConnectionState();
             RefreshConnectedDeviceHealth();
             RefreshSessionStatus();
@@ -1968,7 +1996,18 @@ namespace WinStream
                                 : _streamingStatusDetail);
                         break;
                     case SessionState.Streaming:
-                        device.SetStatus("Streaming.", DeviceStatusKind.Success);
+                        if (_streamingOrchestrator.UsesTransientPairing(device.Device))
+                        {
+                            device.SetStatus(
+                                StreamingQualityCopy.TransientPairingStatus,
+                                DeviceStatusKind.Caution,
+                                StreamingQualityCopy.TransientPairingBody);
+                        }
+                        else
+                        {
+                            device.SetStatus("Streaming.", DeviceStatusKind.Success);
+                        }
+
                         break;
                     case SessionState.Reconnecting:
                         device.SetStatus(

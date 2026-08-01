@@ -12,6 +12,15 @@ public static class StreamingQualityCopy
         "wake spacing). Under load Extreme may climb toward ~80 ms then ~250 ms. " +
         "One speaker. Speaker buffer ask only — not a measured PC-to-speaker delay.";
 
+    public static string TransientPairingTitle => "Approve needed on every connect";
+
+    public static string TransientPairingBody =>
+        "WinStream connected with temporary pairing, so the receiver asks you to " +
+        "approve each session. To trust this PC once, disconnect and connect again, " +
+        "then type the AirPlay code the receiver shows instead of skipping it.";
+
+    public static string TransientPairingStatus => "Temporary pairing";
+
     public static string LabEscapeBody =>
         "The receiver did not accept Extreme (~50 ms). " +
         "Switch to Experimental (~250 ms) and reconnect now?";

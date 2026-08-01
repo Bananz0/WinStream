@@ -133,6 +133,74 @@ public class AutoConnectTests
     }
 
     [Fact]
+    public void A_lost_session_re_arms_auto_connect_after_the_cooldown()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
+        var tracker = new AutoConnectAttemptTracker(
+            maxAttempts: 3,
+            cooldown: TimeSpan.FromSeconds(15),
+            timeProvider: time);
+        tracker.RecordSuccess();
+
+        tracker.RecordSessionLost();
+        Assert.False(tracker.AttemptsAvailable);
+
+        time.Advance(TimeSpan.FromSeconds(15));
+        Assert.True(tracker.AttemptsAvailable);
+    }
+
+    [Fact]
+    public void A_lost_session_also_clears_earlier_failures()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
+        var tracker = new AutoConnectAttemptTracker(
+            maxAttempts: 2,
+            cooldown: TimeSpan.FromSeconds(15),
+            timeProvider: time);
+        tracker.RecordFailure();
+        tracker.RecordFailure();
+
+        tracker.RecordSessionLost();
+        time.Advance(TimeSpan.FromSeconds(15));
+
+        Assert.True(tracker.AttemptsAvailable);
+    }
+
+    [Theory]
+    [InlineData(SessionState.Streaming, SessionState.Disconnected)]
+    [InlineData(SessionState.Streaming, SessionState.Failed)]
+    [InlineData(SessionState.Degraded, SessionState.Disconnected)]
+    [InlineData(SessionState.Reconnecting, SessionState.Failed)]
+    public void An_established_session_that_drops_re_arms(SessionState previous, SessionState current)
+    {
+        Assert.True(AutoConnectPolicy.ReArmsAfterSessionEnd(
+            previous,
+            current,
+            userInitiated: false));
+    }
+
+    [Fact]
+    public void A_disconnect_the_user_asked_for_does_not_re_arm()
+    {
+        Assert.False(AutoConnectPolicy.ReArmsAfterSessionEnd(
+            SessionState.Streaming,
+            SessionState.Disconnected,
+            userInitiated: true));
+    }
+
+    [Theory]
+    [InlineData(SessionState.Connecting, SessionState.Failed)] // dial never established
+    [InlineData(SessionState.Streaming, SessionState.Reconnecting)] // still recovering
+    [InlineData(SessionState.Disconnected, SessionState.Connecting)] // ordinary connect
+    public void Only_a_lost_session_re_arms(SessionState previous, SessionState current)
+    {
+        Assert.False(AutoConnectPolicy.ReArmsAfterSessionEnd(
+            previous,
+            current,
+            userInitiated: false));
+    }
+
+    [Fact]
     public void Reset_clears_an_exhausted_budget()
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));

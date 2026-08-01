@@ -42,6 +42,19 @@ public sealed class AutoConnectAttemptTracker
         _retryNotBefore = _timeProvider.GetUtcNow() + _cooldown;
     }
 
+    /// <summary>
+    /// A session WinStream did not end itself (receiver teardown, capture loss, an
+    /// exhausted reconnect budget). The success latch has to lift or auto-connect
+    /// stays disabled for the rest of the app's lifetime; the cooldown keeps a
+    /// flapping receiver from being retried on every discovery pass.
+    /// </summary>
+    public void RecordSessionLost()
+    {
+        _connected = false;
+        _failures = 0;
+        _retryNotBefore = _timeProvider.GetUtcNow() + _cooldown;
+    }
+
     /// <summary>Re-arms after the user toggles auto-connect or remembers a new receiver.</summary>
     public void Reset()
     {

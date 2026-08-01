@@ -27,6 +27,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private Func<CancellationToken, Task<string?>>? _requestPairingPinAsync;
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _transientPairings = new(StringComparer.Ordinal);
     private readonly PcmFanoutClock _fanoutClock = new();
     private readonly ReconnectBudget _reconnectBudget = new();
     private readonly object _sessionsGate = new();
@@ -87,6 +88,19 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
     public IReadOnlyList<DeviceInfo> ConnectedReceivers =>
         _sessions.Values.Select(entry => entry.Receiver).ToList();
+
+    /// <summary>
+    /// True when the last connect to this receiver fell back to transient pairing, so
+    /// the receiver will keep asking the user to approve every session.
+    /// </summary>
+    public bool UsesTransientPairing(DeviceInfo receiver)
+    {
+        var receiverKey = ReceiverKey.For(receiver);
+        lock (_sessionsGate)
+        {
+            return _transientPairings.Contains(receiverKey);
+        }
+    }
 
     /// <summary>
     /// Stores quality prefs for the next connect. Live preset changes go through
@@ -585,6 +599,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             {
                 return;
             }
+
+            _transientPairings.Remove(key);
         }
 
         entry.Session.StateChanged -= OnSessionStateChanged;
@@ -783,12 +799,27 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private PairingOptions CreatePairingOptions(DeviceInfo receiver)
     {
         var receiverKey = ReceiverKey.For(receiver);
+
+        // Each attempt re-decides its pairing mode, so a retry that finally trusts the
+        // PC must not keep reporting the previous transient session.
+        lock (_sessionsGate)
+        {
+            _transientPairings.Remove(receiverKey);
+        }
+
         return new PairingOptions
         {
             StoredCredentials = _pairingStore.TryGet(receiverKey, out var stored) ? stored : null,
             RequestPinAsync = _requestPairingPinAsync,
             OnPaired = credentials => _pairingStore.Save(receiverKey, credentials),
-            OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey)
+            OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey),
+            OnTransientPairing = () =>
+            {
+                lock (_sessionsGate)
+                {
+                    _transientPairings.Add(receiverKey);
+                }
+            }
         };
     }
 

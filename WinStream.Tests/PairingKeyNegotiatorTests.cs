@@ -29,6 +29,7 @@ public class PairingKeyNegotiatorTests
         public PairingCredentials? Paired { get; private set; }
         public int Rejections { get; private set; }
         public int Resets { get; private set; }
+        public int TransientReports { get; private set; }
 
         public void Reset() => Resets++;
 
@@ -47,8 +48,48 @@ public class PairingKeyNegotiatorTests
             {
                 Steps.Add("rejected");
                 Rejections++;
-            }
+            },
+            OnTransientPairing = () => TransientReports++
         };
+    }
+
+    [Fact]
+    public async Task Falling_back_to_transient_is_reported_to_the_caller()
+    {
+        var recorder = new Recorder();
+        var negotiator = new PairingKeyNegotiator(
+            recorder.Options(stored: null, requestPin: _ => Task.FromResult<string?>(null)),
+            recorder.Reset);
+
+        using var keys = await negotiator.NegotiateAsync(
+            (_, _) => throw new InvalidOperationException("verify must not run"),
+            (_, _) => throw new PairingPinSkippedException(),
+            _ =>
+            {
+                recorder.Steps.Add("transient-keys");
+                return Task.FromResult(Keys(0x11));
+            },
+            CancellationToken.None);
+
+        Assert.Equal(["transient-keys"], recorder.Steps);
+        Assert.Equal(1, recorder.TransientReports);
+    }
+
+    [Fact]
+    public async Task A_verified_pairing_never_reports_transient()
+    {
+        var recorder = new Recorder();
+        var negotiator = new PairingKeyNegotiator(
+            recorder.Options(Complete(), Pin),
+            recorder.Reset);
+
+        using var keys = await negotiator.NegotiateAsync(
+            (_, _) => Task.FromResult(Keys(0x22)),
+            (_, _) => throw new InvalidOperationException("setup must not run"),
+            _ => throw new InvalidOperationException("transient must not run"),
+            CancellationToken.None);
+
+        Assert.Equal(0, recorder.TransientReports);
     }
 
     [Fact]

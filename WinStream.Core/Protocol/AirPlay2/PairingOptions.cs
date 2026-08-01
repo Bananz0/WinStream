@@ -21,4 +21,11 @@ public sealed class PairingOptions
 
     /// <summary>Invoked when <see cref="StoredCredentials"/> no longer verify.</summary>
     public Action? OnStoredCredentialsRejected { get; init; }
+
+    /// <summary>
+    /// Invoked when the session settles on transient pairing, which the receiver
+    /// re-approves on every connect. The caller surfaces that so the user knows why
+    /// the Accept prompt keeps coming back.
+    /// </summary>
+    public Action? OnTransientPairing { get; init; }
 }

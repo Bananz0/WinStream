@@ -93,6 +93,7 @@ public sealed class PairingKeyNegotiator
             }
         }
 
+        _options?.OnTransientPairing?.Invoke();
         return await transient(cancellationToken).ConfigureAwait(false);
     }
 
