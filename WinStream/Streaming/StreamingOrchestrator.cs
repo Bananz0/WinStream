@@ -807,15 +807,24 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private PairingOptions CreatePairingOptions(DeviceInfo receiver)
     {
         var receiverKey = ReceiverKey.For(receiver);
+
+        // Each attempt re-decides its pairing mode. Clearing first matters on a quality
+        // rebuild that reuses the SessionEntry: a previous temporary pairing must not
+        // keep claiming Accept-every-time after a successful pair-verify.
+        lock (_sessionsGate)
+        {
+            if (_sessions.TryGetValue(receiverKey, out var existing))
+            {
+                existing.UsesTransientPairing = false;
+            }
+        }
+
         return new PairingOptions
         {
             StoredCredentials = _pairingStore.TryGet(receiverKey, out var stored) ? stored : null,
             RequestPinAsync = _requestPairingPinAsync,
             OnPaired = credentials => _pairingStore.Save(receiverKey, credentials),
             OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey),
-
-            // Marks the live session, so each attempt re-decides its pairing mode and a
-            // failed connect cannot leave a stale temporary-pairing claim behind.
             OnTransientPairing = () =>
             {
                 lock (_sessionsGate)

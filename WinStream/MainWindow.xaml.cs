@@ -1918,6 +1918,13 @@ namespace WinStream
             SyncConnectionState();
             RefreshConnectedDeviceHealth();
             RefreshSessionStatus();
+
+            // A lost session settles at Disconnected after the orchestrator releases it.
+            // Don't wait for the next discovery tick — try as soon as the gates allow.
+            if (change.Current == SessionState.Disconnected)
+            {
+                _ = TryAutoConnectToLastReceiverAsync();
+            }
         }
 
         private void SyncConnectionState()

@@ -139,13 +139,33 @@ public class AutoConnectTests
         var tracker = new AutoConnectAttemptTracker(
             maxAttempts: 3,
             cooldown: TimeSpan.FromSeconds(15),
+            sessionLostCooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
         tracker.RecordSuccess();
 
         tracker.RecordSessionLost();
         Assert.False(tracker.AttemptsAvailable);
 
-        time.Advance(TimeSpan.FromSeconds(15));
+        time.Advance(TimeSpan.FromSeconds(4));
+        Assert.False(tracker.AttemptsAvailable);
+
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(tracker.AttemptsAvailable);
+    }
+
+    [Fact]
+    public void A_lost_session_uses_a_shorter_cooldown_than_a_dial_failure()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
+        var tracker = new AutoConnectAttemptTracker(
+            maxAttempts: 3,
+            cooldown: TimeSpan.FromSeconds(15),
+            sessionLostCooldown: TimeSpan.FromSeconds(5),
+            timeProvider: time);
+        tracker.RecordSuccess();
+        tracker.RecordSessionLost();
+
+        time.Advance(TimeSpan.FromSeconds(5));
         Assert.True(tracker.AttemptsAvailable);
     }
 
@@ -156,12 +176,13 @@ public class AutoConnectTests
         var tracker = new AutoConnectAttemptTracker(
             maxAttempts: 2,
             cooldown: TimeSpan.FromSeconds(15),
+            sessionLostCooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
         tracker.RecordFailure();
         tracker.RecordFailure();
 
         tracker.RecordSessionLost();
-        time.Advance(TimeSpan.FromSeconds(15));
+        time.Advance(TimeSpan.FromSeconds(5));
 
         Assert.True(tracker.AttemptsAvailable);
     }

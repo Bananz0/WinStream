@@ -1,23 +1,23 @@
-#nullable enable
-
-using System.Collections.Generic;
-using WinStream.Core;
 using WinStream.Core.Logging;
 using WinStream.Core.Network;
 using WinStream.Core.Persistence;
-using WinStream.Core.Streaming;
 using WinStream.Core.Streaming.Link;
 
-namespace WinStream.Streaming;
+namespace WinStream.Core.Streaming;
 
 /// <summary>
 /// Owns automatic reconnection to the remembered receiver: the retry budget, the
-/// re-arm after a lost session, and the gates a discovery pass has to clear. The
-/// window only reports events and acts on the target this returns.
+/// re-arm after a lost session, and the gates a discovery pass has to clear. Kept
+/// free of WinUI so the composition of policy + tracker is unit-testable.
 /// </summary>
 public sealed class AutoConnectCoordinator
 {
-    private readonly AutoConnectAttemptTracker _attempts = new();
+    private readonly AutoConnectAttemptTracker _attempts;
+
+    public AutoConnectCoordinator(AutoConnectAttemptTracker? attempts = null)
+    {
+        _attempts = attempts ?? new AutoConnectAttemptTracker();
+    }
 
     /// <summary>Re-arms after the user toggles auto-connect or remembers a new receiver.</summary>
     public void Reset() => _attempts.Reset();
@@ -54,6 +54,9 @@ public sealed class AutoConnectCoordinator
         SessionState sessionState,
         bool connectionInFlight)
     {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(discovered);
+
         if (!SinkModeSwitchPolicy.AllowsAirPlayAutoConnect(settings.SinkMode))
         {
             return null;

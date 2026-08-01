@@ -23,14 +23,21 @@ public class PairingOptionsWiringTests
         IPairingCredentialStore store,
         string receiverKey,
         Func<CancellationToken, Task<string?>>? requestPin = null,
-        FakeSessionMap? sessions = null) => new()
+        FakeSessionMap? sessions = null)
     {
-        StoredCredentials = store.TryGet(receiverKey, out var stored) ? stored : null,
-        RequestPinAsync = requestPin,
-        OnPaired = credentials => store.Save(receiverKey, credentials),
-        OnStoredCredentialsRejected = () => store.Remove(receiverKey),
-        OnTransientPairing = () => sessions?.MarkTransient(receiverKey)
-    };
+        // Mirrors StreamingOrchestrator.CreatePairingOptions: clear before each attempt
+        // so a quality rebuild that trusts the PC no longer reports temporary pairing.
+        sessions?.ClearTransient(receiverKey);
+
+        return new PairingOptions
+        {
+            StoredCredentials = store.TryGet(receiverKey, out var stored) ? stored : null,
+            RequestPinAsync = requestPin,
+            OnPaired = credentials => store.Save(receiverKey, credentials),
+            OnStoredCredentialsRejected = () => store.Remove(receiverKey),
+            OnTransientPairing = () => sessions?.MarkTransient(receiverKey)
+        };
+    }
 
     [Fact]
     public void OnTransientPairing_marks_only_the_live_session_for_that_receiver()
@@ -66,11 +73,10 @@ public class PairingOptionsWiringTests
         var sessions = new FakeSessionMap();
         sessions.Add("receiver-a");
         Build(store, "receiver-a", sessions: sessions).OnTransientPairing!();
-        sessions.Remove("receiver-a");
 
-        // Fresh attempt: the session is new, and persistent pairing never fires the
-        // transient callback, so nothing carries over from the temporary session.
-        sessions.Add("receiver-a");
+        // Fresh attempt on the same SessionEntry (quality rebuild): clear-before-attempt
+        // drops the temporary mark, and pair-verify never fires OnTransientPairing.
+        Build(store, "receiver-a", sessions: sessions);
 
         Assert.False(sessions.UsesTransientPairing("receiver-a"));
     }
@@ -164,6 +170,14 @@ public class PairingOptionsWiringTests
         public void Add(string receiverKey) => _sessions[receiverKey] = false;
 
         public void Remove(string receiverKey) => _sessions.Remove(receiverKey);
+
+        public void ClearTransient(string receiverKey)
+        {
+            if (_sessions.ContainsKey(receiverKey))
+            {
+                _sessions[receiverKey] = false;
+            }
+        }
 
         public void MarkTransient(string receiverKey)
         {

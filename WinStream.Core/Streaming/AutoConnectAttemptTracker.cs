@@ -9,6 +9,7 @@ public sealed class AutoConnectAttemptTracker
 {
     private readonly int _maxAttempts;
     private readonly TimeSpan _cooldown;
+    private readonly TimeSpan _sessionLostCooldown;
     private readonly TimeProvider _timeProvider;
     private int _failures;
     private DateTimeOffset? _retryNotBefore;
@@ -17,11 +18,15 @@ public sealed class AutoConnectAttemptTracker
     public AutoConnectAttemptTracker(
         int maxAttempts = 3,
         TimeSpan? cooldown = null,
+        TimeSpan? sessionLostCooldown = null,
         TimeProvider? timeProvider = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxAttempts, 1);
         _maxAttempts = maxAttempts;
         _cooldown = cooldown ?? TimeSpan.FromSeconds(15);
+        // A lost session already waited through the reconnect budget; a short pause is
+        // enough to avoid a flap without making the user wait another full 15 seconds.
+        _sessionLostCooldown = sessionLostCooldown ?? TimeSpan.FromSeconds(5);
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -45,14 +50,14 @@ public sealed class AutoConnectAttemptTracker
     /// <summary>
     /// A session WinStream did not end itself (receiver teardown, capture loss, an
     /// exhausted reconnect budget). The success latch has to lift or auto-connect
-    /// stays disabled for the rest of the app's lifetime; the cooldown keeps a
+    /// stays disabled for the rest of the app's lifetime; the short cooldown keeps a
     /// flapping receiver from being retried on every discovery pass.
     /// </summary>
     public void RecordSessionLost()
     {
         _connected = false;
         _failures = 0;
-        _retryNotBefore = _timeProvider.GetUtcNow() + _cooldown;
+        _retryNotBefore = _timeProvider.GetUtcNow() + _sessionLostCooldown;
     }
 
     /// <summary>Re-arms after the user toggles auto-connect or remembers a new receiver.</summary>
