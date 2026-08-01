@@ -33,11 +33,9 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private readonly ResilienceMonitor _resilience = new();
     private readonly LatencyAutoController _latency = new();
     private readonly ExtremePressureHysteresis _extremePressure = new();
-    private readonly TimeSpan _silenceDegradeAfter = TimeSpan.FromSeconds(2.5);
     private AudioFrameSendPump? _sendPump;
     private HighResolutionWaiter? _waiter;
     private IAudioSource? _audioSource;
-    private DateTimeOffset? _silentSince;
     private CancellationTokenSource? _reconnectCts;
     private SessionState _aggregateState = SessionState.Disconnected;
     private PlaybackResponsiveness _responsiveness = PlaybackResponsiveness.Auto;
@@ -372,7 +370,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         _audioSource.DeviceInvalidated -= OnDeviceInvalidated;
         _audioSource.CaptureFailed -= OnCaptureFailed;
         _audioSource = null;
-        _silentSince = null;
 
         var pump = _sendPump;
         _sendPump = null;
@@ -390,7 +387,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     {
         // Capture thread: enqueue only. Encode/encrypt runs on the send pump.
         _sendPump?.Enqueue(frame);
-        UpdateSilenceWatchdog();
     }
 
     private void DispatchQueuedFrame(AudioFrame frame)
@@ -602,35 +598,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
 
         await entry.Session.DisposeAsync().ConfigureAwait(false);
-    }
-
-    private void UpdateSilenceWatchdog()
-    {
-        if (_audioSource is null || _sessions.Count == 0)
-        {
-            return;
-        }
-
-        if (_audioSource.IsSilent)
-        {
-            _silentSince ??= DateTimeOffset.UtcNow;
-            if (DateTimeOffset.UtcNow - _silentSince >= _silenceDegradeAfter &&
-                State == SessionState.Streaming)
-            {
-                SetAggregate(
-                    SessionState.Degraded,
-                    "Capture is silent (possible DRM or muted output).");
-            }
-        }
-        else
-        {
-            _silentSince = null;
-            if (State == SessionState.Degraded &&
-                _sessions.Values.All(entry => entry.Session.State == SessionState.Streaming))
-            {
-                SetAggregate(SessionState.Streaming, "Capture audio restored.");
-            }
-        }
     }
 
     private void OnDeviceInvalidated(object? sender, EventArgs e)
@@ -895,16 +862,13 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private void RefreshAggregate(string? reason = null)
     {
         var states = _sessions.Values.Select(entry => entry.Session.State).ToList();
-        var silentTooLong = _silentSince is not null &&
-                            DateTimeOffset.UtcNow - _silentSince >= _silenceDegradeAfter;
         var next = SessionAggregate.Calculate(
             states,
-            reconnectInProgress: _reconnectBudget.IsActive && !_reconnectBudget.IsExpired,
-            captureSilentTooLong: silentTooLong);
+            reconnectInProgress: _reconnectBudget.IsActive && !_reconnectBudget.IsExpired);
         SetAggregate(
             next,
             reason ?? (next == SessionState.Degraded
-                ? "One or more receivers failed or capture is silent."
+                ? "One or more receivers failed."
                 : null));
     }
 

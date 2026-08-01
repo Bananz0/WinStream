@@ -2,10 +2,13 @@ namespace WinStream.Core.Streaming;
 
 public static class SessionAggregate
 {
+    /// <summary>
+    /// Silent capture is a normal desktop state (nothing playing, muted app), so it
+    /// never enters this calculation — only receiver session health does.
+    /// </summary>
     public static SessionState Calculate(
         IReadOnlyCollection<SessionState> sessionStates,
-        bool reconnectInProgress = false,
-        bool captureSilentTooLong = false)
+        bool reconnectInProgress = false)
     {
         if (sessionStates.Count == 0)
         {
@@ -32,7 +35,7 @@ public static class SessionAggregate
 
         if (streaming == sessionStates.Count)
         {
-            return captureSilentTooLong ? SessionState.Degraded : SessionState.Streaming;
+            return SessionState.Streaming;
         }
 
         if (sessionStates.All(state => state == SessionState.Failed))

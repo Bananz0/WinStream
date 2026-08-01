@@ -23,13 +23,13 @@ public class SessionAggregateTests
     }
 
     [Fact]
-    public void Silence_degrades_healthy_group()
+    public void Silent_capture_is_not_part_of_session_health()
     {
+        // A quiet desktop keeps streaming: only receiver session states can degrade.
         var state = SessionAggregate.Calculate(
-            [SessionState.Streaming, SessionState.Streaming],
-            captureSilentTooLong: true);
+            [SessionState.Streaming, SessionState.Streaming]);
 
-        Assert.Equal(SessionState.Degraded, state);
+        Assert.Equal(SessionState.Streaming, state);
     }
 
     [Fact]
