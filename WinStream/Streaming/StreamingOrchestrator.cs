@@ -611,14 +611,20 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         SetAggregate(
             SessionState.Disconnecting,
             "Disconnecting all receivers",
-            userRequested: true);
+            userRequested: SessionEndIntent.UserRequested(
+                userDisconnectApi: true,
+                sessionsRemain: false));
         foreach (var key in _sessions.Keys.ToList())
         {
             await RemoveSessionAsync(key, cancellationToken).ConfigureAwait(false);
         }
 
         await DetachAudioSourceAsync().ConfigureAwait(false);
-        SetAggregate(SessionState.Disconnected, userRequested: true);
+        SetAggregate(
+            SessionState.Disconnected,
+            userRequested: SessionEndIntent.UserRequested(
+                userDisconnectApi: true,
+                sessionsRemain: false));
     }
 
     private async Task RemoveSessionAsync(string key, CancellationToken cancellationToken)

@@ -106,6 +106,17 @@ public class PairingOptionsWiringTests
     }
 
     [Fact]
+    public void Options_carry_the_pin_callback_unchanged()
+    {
+        var store = new FakePairingCredentialStore();
+        Func<CancellationToken, Task<string?>> pin = _ => Task.FromResult<string?>("1234");
+
+        var options = Build(store, "receiver-a", requestPin: pin);
+
+        Assert.Same(pin, options.RequestPinAsync);
+    }
+
+    [Fact]
     public void OnPaired_writes_through_to_the_store()
     {
         var store = new FakePairingCredentialStore();

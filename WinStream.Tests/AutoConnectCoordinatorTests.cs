@@ -16,12 +16,12 @@ public class AutoConnectCoordinatorTests
         string? lastKey = "AA:BB",
         SinkMode sink = SinkMode.AirPlay,
         PlaybackResponsiveness responsiveness = PlaybackResponsiveness.Auto) => new()
-    {
-        AutoConnectLastReceiver = enabled,
-        LastReceiverKey = lastKey,
-        SinkMode = sink,
-        PlaybackResponsiveness = responsiveness
-    };
+        {
+            AutoConnectLastReceiver = enabled,
+            LastReceiverKey = lastKey,
+            SinkMode = sink,
+            PlaybackResponsiveness = responsiveness
+        };
 
     private static DeviceInfo Device(string id = "AA:BB") => new()
     {
@@ -124,19 +124,30 @@ public class AutoConnectCoordinatorTests
         var target = Device();
         coordinator.RecordSuccess();
 
+        var partialIntent = SessionEndIntent.UserRequested(
+            userDisconnectApi: true,
+            sessionsRemain: true);
+        Assert.False(partialIntent);
         coordinator.NoteStateChange(
             new SessionStateChanged(
                 SessionState.Streaming,
                 SessionState.Streaming,
                 "removed",
-                UserRequested: false));
+                UserRequested: partialIntent));
+        Assert.Null(coordinator.ResolveTarget(
+            Settings(),
+            [target],
+            SessionState.Disconnected,
+            connectionInFlight: false));
 
         coordinator.NoteStateChange(
             new SessionStateChanged(
                 SessionState.Streaming,
                 SessionState.Disconnected,
                 "Receiver ended the session.",
-                UserRequested: false));
+                UserRequested: SessionEndIntent.UserRequested(
+                    userDisconnectApi: false,
+                    sessionsRemain: false)));
 
         Assert.Null(coordinator.ResolveTarget(
             Settings(),
