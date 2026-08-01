@@ -507,12 +507,12 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         DateTimeOffset now)
     {
         // Mid-ladder raises are silent. The banner only arms at the Extreme ceiling.
-        var eligible =
-            Responsiveness == PlaybackResponsiveness.LabPacket &&
-            _latency.IsExtremeLadderExhausted &&
-            isStreaming &&
-            !isSilent &&
-            _latency.IsPastStartupGrace(now);
+        var eligible = ExtremeCaptureExperiment.ArmsExhaustedPressureBanner(
+            Responsiveness,
+            _latency.IsExtremeLadderExhausted,
+            isStreaming,
+            isSilent,
+            _latency.IsPastStartupGrace(now));
 
         var pressure = eligible && LatencyAutoController.HasPressure(dropDelta, slowDelta);
         var wasVisible = _extremePressure.IsWarningVisible;

@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using WinStream.Core.Drivers;
+using WinStream.Core.Audio;
 using WinStream.Core.Streaming.Link;
 
 namespace WinStream.Tools.VadProbe;

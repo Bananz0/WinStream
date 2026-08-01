@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace WinStream.Core.Streaming.Link;
+namespace WinStream.Core.Audio;
 
 /// <summary>
 /// Measures the rolling p95 interval between capture callbacks. Requested client-buffer

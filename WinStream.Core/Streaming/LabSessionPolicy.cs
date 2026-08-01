@@ -25,9 +25,10 @@ public static class LabSessionPolicy
     /// Extreme remains available; this is the honesty gate, not a hard block.
     /// </summary>
     public const string CaptureTooCoarseWarning =
-        "System capture is still ~50 ms loopback, so Extreme's ~50 ms speaker buffer " +
-        "has almost no margin — expect it to climb toward ~80 ms or ~250 ms under load. " +
-        "Continue anyway, or switch to Experimental (~250 ms)?";
+        "System capture often contributes ~50 ms (classic loopback poll; the Extreme " +
+        "event-driven experiment logs measured p95 when enabled). Extreme's ~50 ms " +
+        "speaker buffer has almost no margin — expect it to climb toward ~80 ms or " +
+        "~250 ms under load. Continue anyway, or switch to Experimental (~250 ms)?";
 
     /// <summary>
     /// Shown only after Extreme's raise ladder is exhausted (live L already ~250 ms)

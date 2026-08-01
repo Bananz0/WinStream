@@ -1,3 +1,4 @@
+using WinStream.Core.Audio;
 using WinStream.Core.Streaming.Link;
 
 namespace WinStream.Tests;

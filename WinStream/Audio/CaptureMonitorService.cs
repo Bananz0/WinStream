@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using WinStream.Core;
 using WinStream.Core.Audio;
 using WinStream.Core.Persistence;
+using WinStream.Core.Streaming;
 
 namespace WinStream.Audio;
 
@@ -55,12 +56,11 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         get
         {
             var source = _source;
-            if (source is { UseEventDrivenCapture: true, HasMeasuredContribution: true })
-            {
-                return source.MeasuredContributionMilliseconds;
-            }
-
-            return WasapiLoopbackSource.CaptureBufferMilliseconds;
+            return ExtremeCaptureExperiment.ResolveContributionMilliseconds(
+                useEventDrivenCapture: source?.UseEventDrivenCapture == true,
+                hasMeasuredContribution: source?.HasMeasuredContribution == true,
+                measuredContributionMilliseconds: source?.MeasuredContributionMilliseconds ?? 0,
+                frozenPollMilliseconds: WasapiLoopbackSource.CaptureBufferMilliseconds);
         }
     }
 
@@ -119,50 +119,38 @@ public sealed class CaptureMonitorService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Recreates capture when Extreme's event-driven experiment should toggle.
-    /// Safe no-op when the desired mode already matches.
+    /// Flips Extreme's event-driven experiment on the existing loopback instance.
+    /// Keeps the same <see cref="IAudioSource"/> reference so a live orchestrator
+    /// subscription is not left pointing at a disposed capture.
     /// </summary>
     public async Task SyncExtremeCaptureExperimentAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var wantEventDriven = WantsEventDrivenCapture(Settings);
-        WasapiLoopbackSource? existing;
+        var wantEventDriven = ExtremeCaptureExperiment.WantsEventDriven(
+            Settings.ExtremeEventDrivenCapture,
+            Settings.PlaybackResponsiveness);
+        WasapiLoopbackSource existing;
         lock (_gate)
         {
-            existing = _source;
-            if (existing is null)
+            if (_source is null)
             {
                 return;
             }
 
-            if (existing.UseEventDrivenCapture == wantEventDriven)
+            if (_source.UseEventDrivenCapture == wantEventDriven)
             {
                 return;
             }
+
+            existing = _source;
         }
 
         var wasCapturing = existing.IsCapturing;
         await existing.StopAsync(cancellationToken).ConfigureAwait(false);
-        existing.DeviceInvalidated -= OnDeviceInvalidated;
-        existing.CaptureFailed -= OnCaptureFailed;
-        await existing.DisposeAsync().ConfigureAwait(false);
-
-        WasapiLoopbackSource replacement;
-        lock (_gate)
-        {
-            if (_disposed)
-            {
-                _source = null;
-                return;
-            }
-
-            replacement = CreateSource();
-            _source = replacement;
-        }
-
+        existing.UseEventDrivenCapture = wantEventDriven;
         if (wasCapturing || Settings.MonitorCapture)
         {
-            await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
+            await existing.StartAsync(cancellationToken).ConfigureAwait(false);
         }
 
         StateChanged?.Invoke(this, EventArgs.Empty);
@@ -215,16 +203,14 @@ public sealed class CaptureMonitorService : IAsyncDisposable
         var source = new WasapiLoopbackSource
         {
             PreferredEndpointId = Settings.SelectedRenderDeviceId,
-            UseEventDrivenCapture = WantsEventDrivenCapture(Settings)
+            UseEventDrivenCapture = ExtremeCaptureExperiment.WantsEventDriven(
+                Settings.ExtremeEventDrivenCapture,
+                Settings.PlaybackResponsiveness)
         };
         source.DeviceInvalidated += OnDeviceInvalidated;
         source.CaptureFailed += OnCaptureFailed;
         return source;
     }
-
-    private static bool WantsEventDrivenCapture(AppSettings settings) =>
-        settings.ExtremeEventDrivenCapture &&
-        settings.PlaybackResponsiveness == PlaybackResponsiveness.LabPacket;
 
     private async void OnDeviceInvalidated(object? sender, EventArgs e)
     {

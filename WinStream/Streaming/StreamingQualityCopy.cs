@@ -7,8 +7,9 @@ public static class StreamingQualityCopy
 {
     public const string ExtremeLabel = "Extreme (~50 ms)";
     public const string ExtremeHint =
-        "Asks ~50 ms of speaker buffer (six ALAC packets). Capture is still ~50 ms " +
-        "loopback, so under load Extreme may climb toward ~80 ms then ~250 ms. " +
+        "Asks ~50 ms of speaker buffer (six ALAC packets). Default capture is still " +
+        "~50 ms loopback poll (optional Extreme event-driven experiment measures finer " +
+        "wake spacing). Under load Extreme may climb toward ~80 ms then ~250 ms. " +
         "One speaker. Speaker buffer ask only — not a measured PC-to-speaker delay.";
 
     public static string LabEscapeBody =>

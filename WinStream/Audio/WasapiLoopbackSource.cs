@@ -9,7 +9,6 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
-using WinStream.Core.Streaming.Link;
 
 namespace WinStream.Audio;
 

@@ -1056,11 +1056,10 @@ namespace WinStream
                 return;
             }
 
-                if (LabSessionPolicy.WarnsCaptureTooCoarse(
-                        mode,
-                        _captureMonitor.CaptureContributionMilliseconds))
-            {
-                var warn = new ContentDialog
+            if (LabSessionPolicy.WarnsCaptureTooCoarse(
+                    mode,
+                    _captureMonitor.CaptureContributionMilliseconds))
+            {                var warn = new ContentDialog
                 {
                     Title = StreamingQualityCopy.ExtremeCaptureWarningTitle,
                     Content = StreamingQualityCopy.ExtremeCaptureWarningBody,
