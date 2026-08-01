@@ -51,6 +51,7 @@ namespace WinStream
         private readonly DispatcherTimer _captureLevelTimer;
         private readonly AppWindow _appWindow;
         private string _filterText = string.Empty;
+        private string _streamingStatusDetail = string.Empty;
         private bool _allowClose;
         private bool _connectionInFlight;
         private bool _driverReadyPromptShown;
@@ -98,8 +99,8 @@ namespace WinStream
             _captureMonitor.StateChanged += (_, _) =>
                 DispatcherQueue.TryEnqueue(RefreshCaptureStatus);
             _driverLifecycle.StateChanged += OnDriverLifecycleStateChanged;
-            _streamingOrchestrator.StateChanged += (_, _) =>
-                DispatcherQueue.TryEnqueue(OnStreamingStateChanged);
+            _streamingOrchestrator.StateChanged += (_, change) =>
+                DispatcherQueue.TryEnqueue(() => OnStreamingStateChanged(change));
             _streamingOrchestrator.ExtremePressureChanged += (_, visible) =>
                 DispatcherQueue.TryEnqueue(() => ShowExtremePressure(visible));
 
@@ -1628,7 +1629,12 @@ namespace WinStream
 
                 if (_streamingOrchestrator.State == SessionState.Degraded)
                 {
-                    device.SetStatus("Connected, but the stream is degraded.", DeviceStatusKind.Caution);
+                    device.SetStatus(
+                        "Stream degraded",
+                        DeviceStatusKind.Caution,
+                        string.IsNullOrWhiteSpace(_streamingStatusDetail)
+                            ? "The stream is connected but one or more health checks are failing."
+                            : _streamingStatusDetail);
                 }
                 else
                 {
@@ -1916,9 +1922,14 @@ namespace WinStream
             AppLog.Info("ui", "AirPlay receiver hint dismissed.");
         }
 
-        private void OnStreamingStateChanged()
+        private void OnStreamingStateChanged(SessionStateChanged change)
         {
+            _streamingStatusDetail = change.Current is
+                SessionState.Degraded or SessionState.Reconnecting or SessionState.Failed
+                ? change.Reason ?? string.Empty
+                : string.Empty;
             SyncConnectionState();
+            RefreshConnectedDeviceHealth();
             RefreshSessionStatus();
         }
 
@@ -1932,6 +1943,53 @@ namespace WinStream
             }
         }
 
+        /// <summary>
+        /// Puts the aggregate health reason on each connected row. The top-right pill
+        /// stays short ("Streaming (degraded)"); the device warning container carries
+        /// the explanation.
+        /// </summary>
+        private void RefreshConnectedDeviceHealth()
+        {
+            foreach (var device in _allDevices)
+            {
+                if (!device.IsConnected || device.IsBusy)
+                {
+                    continue;
+                }
+
+                switch (_streamingOrchestrator.State)
+                {
+                    case SessionState.Degraded:
+                        device.SetStatus(
+                            "Stream degraded",
+                            DeviceStatusKind.Caution,
+                            string.IsNullOrWhiteSpace(_streamingStatusDetail)
+                                ? "The stream is connected but one or more health checks are failing."
+                                : _streamingStatusDetail);
+                        break;
+                    case SessionState.Streaming:
+                        device.SetStatus("Streaming.", DeviceStatusKind.Success);
+                        break;
+                    case SessionState.Reconnecting:
+                        device.SetStatus(
+                            "Reconnecting",
+                            DeviceStatusKind.Caution,
+                            string.IsNullOrWhiteSpace(_streamingStatusDetail)
+                                ? "WinStream is trying to restore the session."
+                                : _streamingStatusDetail);
+                        break;
+                    case SessionState.Failed:
+                        device.SetStatus(
+                            "Stream failed",
+                            DeviceStatusKind.Error,
+                            string.IsNullOrWhiteSpace(_streamingStatusDetail)
+                                ? "The session could not stay connected."
+                                : _streamingStatusDetail);
+                        break;
+                }
+            }
+        }
+
         private void RefreshSessionStatus()
         {
             if (_settings.Settings.SinkMode == SinkMode.Link)
@@ -1939,6 +1997,7 @@ namespace WinStream
                 var message = LinkStatusCopy.For(BuildLinkUiContext());
                 statusPillText.Text = message.Pill;
                 statusDot.Fill = ThemeBrush(ToneBrushKey(message.Tone));
+                ToolTipService.SetToolTip(statusPill, message.Detail);
                 return;
             }
 
@@ -1958,6 +2017,13 @@ namespace WinStream
 
             statusPillText.Text = text;
             statusDot.Fill = ThemeBrush(brushKey);
+            ToolTipService.SetToolTip(
+                statusPill,
+                _streamingOrchestrator.State == SessionState.Degraded
+                    ? string.IsNullOrWhiteSpace(_streamingStatusDetail)
+                        ? "The stream is connected but one or more health checks are failing."
+                        : _streamingStatusDetail
+                    : text);
         }
 
         private void ShowMessage(InfoBarSeverity severity, string title, string message)

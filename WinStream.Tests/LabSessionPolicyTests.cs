@@ -34,9 +34,10 @@ public class LabSessionPolicyTests
     [Fact]
     public void Refusal_message_uses_the_name_the_dropdown_shows()
     {
-        // The user picked "Extreme (~8 ms)"; telling them "Lab latency mode" was
+        // The user picked "Extreme (~50 ms)"; telling them "Lab latency mode" was
         // refused names a preset that is not in the list.
         Assert.Contains("Extreme", LabSessionPolicy.MultiRoomBlockedMessage, StringComparison.Ordinal);
+        Assert.Contains("~50 ms", LabSessionPolicy.MultiRoomBlockedMessage, StringComparison.Ordinal);
         Assert.DoesNotContain("Lab", LabSessionPolicy.MultiRoomBlockedMessage, StringComparison.Ordinal);
     }
 
@@ -68,6 +69,10 @@ public class LabSessionPolicyTests
         // Switching restarts the stream; a warning that hides that is not honest.
         Assert.Contains(
             "restarts",
+            LabSessionPolicy.RuntimePressureWarning,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "250",
             LabSessionPolicy.RuntimePressureWarning,
             StringComparison.Ordinal);
     }

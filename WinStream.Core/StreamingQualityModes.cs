@@ -11,7 +11,7 @@ public enum PlaybackResponsiveness
     VeryLow = 4,
     /// <summary>~250 ms fixed buffer (Experimental).</summary>
     Experimental = 5,
-    /// <summary>One ALAC packet (~8 ms) Lab probe — gated UI only.</summary>
+    /// <summary>Extreme ~50 ms RealTime ask (six ALAC packets); may climb under pressure.</summary>
     LabPacket = 6
 }
 

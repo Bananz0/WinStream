@@ -30,6 +30,7 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
     private bool _isConnected;
     private bool _isBusy;
     private string _statusMessage = string.Empty;
+    private string _statusDetail = string.Empty;
     private DeviceStatusKind _statusKind = DeviceStatusKind.Neutral;
 
     public DeviceViewModel(DeviceInfo device) => _device = device;
@@ -86,18 +87,53 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
 
     public string StatusMessage => _statusMessage;
 
+    public string StatusDetail => _statusDetail;
+
+    public DeviceStatusKind StatusKind => _statusKind;
+
+    /// <summary>
+    /// Caution/Error get a warning container so the reason is readable. Success and
+    /// neutral stay as a single caption line under the device subtitle.
+    /// </summary>
+    public bool ShowsStatusBanner =>
+        _statusKind is DeviceStatusKind.Caution or DeviceStatusKind.Error &&
+        !string.IsNullOrWhiteSpace(_statusMessage);
+
     public Visibility StatusVisibility =>
         string.IsNullOrWhiteSpace(_statusMessage) ? Visibility.Collapsed : Visibility.Visible;
 
+    public Visibility StatusBannerVisibility =>
+        ShowsStatusBanner ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility StatusCaptionVisibility =>
+        !string.IsNullOrWhiteSpace(_statusMessage) && !ShowsStatusBanner
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    public Visibility StatusDetailVisibility =>
+        ShowsStatusBanner && !string.IsNullOrWhiteSpace(_statusDetail)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
     public Brush StatusBrush => ResolveBrush(_statusKind);
 
-    public void SetStatus(string message, DeviceStatusKind kind)
+    public Brush StatusBannerBackground => ResolveBackground(_statusKind);
+
+    public void SetStatus(string message, DeviceStatusKind kind, string? detail = null)
     {
         _statusMessage = message ?? string.Empty;
+        _statusDetail = detail ?? string.Empty;
         _statusKind = kind;
         Notify(nameof(StatusMessage));
+        Notify(nameof(StatusDetail));
+        Notify(nameof(StatusKind));
+        Notify(nameof(ShowsStatusBanner));
         Notify(nameof(StatusVisibility));
+        Notify(nameof(StatusBannerVisibility));
+        Notify(nameof(StatusCaptionVisibility));
+        Notify(nameof(StatusDetailVisibility));
         Notify(nameof(StatusBrush));
+        Notify(nameof(StatusBannerBackground));
     }
 
     public void ClearStatus() => SetStatus(string.Empty, DeviceStatusKind.Neutral);
@@ -189,10 +225,25 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
             _ => "TextFillColorSecondaryBrush"
         };
 
-        return Application.Current.Resources.TryGetValue(key, out var value) && value is Brush brush
-            ? brush
-            : new SolidColorBrush(Microsoft.UI.Colors.Gray);
+        return LookupBrush(key) ?? new SolidColorBrush(Microsoft.UI.Colors.Gray);
     }
+
+    private static Brush ResolveBackground(DeviceStatusKind kind)
+    {
+        var key = kind switch
+        {
+            DeviceStatusKind.Error => "SystemFillColorCriticalBackgroundBrush",
+            DeviceStatusKind.Caution => "SystemFillColorCautionBackgroundBrush",
+            _ => "ControlFillColorSecondaryBrush"
+        };
+
+        return LookupBrush(key) ?? new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+    }
+
+    private static Brush? LookupBrush(string key) =>
+        Application.Current.Resources.TryGetValue(key, out var value) && value is Brush brush
+            ? brush
+            : null;
 
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

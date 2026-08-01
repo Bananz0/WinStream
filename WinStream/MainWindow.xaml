@@ -84,16 +84,6 @@
                          IsClosable="True"
                          Severity="Error"/>
 
-                <InfoBar x:Name="extremePressureBar"
-                         IsOpen="False"
-                         IsClosable="False"
-                         Severity="Warning">
-                    <InfoBar.ActionButton>
-                        <Button Content="Use Experimental"
-                                Click="ExtremePressureBar_UseExperimentalClick"/>
-                    </InfoBar.ActionButton>
-                </InfoBar>
-
                 <InfoBar x:Name="macHintBar"
                          IsOpen="False"
                          IsClosable="True"
@@ -473,11 +463,35 @@
                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                        TextTrimming="CharacterEllipsis"/>
                                             <TextBlock Text="{x:Bind StatusMessage, Mode=OneWay}"
-                                                       Visibility="{x:Bind StatusVisibility, Mode=OneWay}"
+                                                       Visibility="{x:Bind StatusCaptionVisibility, Mode=OneWay}"
                                                        Foreground="{x:Bind StatusBrush, Mode=OneWay}"
                                                        Style="{StaticResource CaptionTextBlockStyle}"
                                                        TextWrapping="Wrap"
                                                        Margin="0,4,0,0"/>
+                                            <Border Visibility="{x:Bind StatusBannerVisibility, Mode=OneWay}"
+                                                    Background="{x:Bind StatusBannerBackground, Mode=OneWay}"
+                                                    CornerRadius="6"
+                                                    Padding="10,8"
+                                                    Margin="0,6,0,0">
+                                                <StackPanel Spacing="2">
+                                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                                        <FontIcon Glyph="&#xE7BA;"
+                                                                  FontSize="12"
+                                                                  Foreground="{x:Bind StatusBrush, Mode=OneWay}"
+                                                                  VerticalAlignment="Center"/>
+                                                        <TextBlock Text="{x:Bind StatusMessage, Mode=OneWay}"
+                                                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                                                   FontWeight="SemiBold"
+                                                                   Foreground="{x:Bind StatusBrush, Mode=OneWay}"
+                                                                   TextWrapping="Wrap"/>
+                                                    </StackPanel>
+                                                    <TextBlock Text="{x:Bind StatusDetail, Mode=OneWay}"
+                                                               Visibility="{x:Bind StatusDetailVisibility, Mode=OneWay}"
+                                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                                               TextWrapping="Wrap"/>
+                                                </StackPanel>
+                                            </Border>
                                         </StackPanel>
 
                                         <StackPanel Grid.Column="2"
@@ -613,6 +627,15 @@
                                       AutomationProperties.Name="Playback responsiveness"/>
                             <TextBlock x:Name="playbackResponsivenessHintText"
                                        Style="{StaticResource HintTextStyle}"/>
+                            <InfoBar x:Name="extremePressureBar"
+                                     IsOpen="False"
+                                     IsClosable="False"
+                                     Severity="Error">
+                                <InfoBar.ActionButton>
+                                    <Button Content="Use Experimental"
+                                            Click="ExtremePressureBar_UseExperimentalClick"/>
+                                </InfoBar.ActionButton>
+                            </InfoBar>
                         </StackPanel>
 
                         <StackPanel Spacing="8">

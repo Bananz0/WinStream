@@ -441,8 +441,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Closes one signal window and routes its pressure: Auto climbs the ladder,
-    /// Extreme cannot, so it raises a warning instead.
+    /// Closes one signal window and routes its pressure: Auto and Extreme climb
+    /// their ladders; Extreme only surfaces the InfoBar once that ladder is exhausted.
     /// </summary>
     private void EvaluatePressureWindow(AudioFrameSendPump? pump)
     {
@@ -471,19 +471,27 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         var isStreaming =
             State is SessionState.Streaming or SessionState.Degraded;
 
-        if (_latency.IsAutoEnabled)
+        if (_latency.IsAutoEnabled || _latency.IsExtremeRaiseEnabled)
         {
             if (_latency.TryRaise(dropDelta, slowDelta, isStreaming, isSilent, now))
             {
                 ApplyLatencyToAllSessions(_latency.EffectiveFrames);
+                var kind = _latency.IsExtremeRaiseEnabled ? "Extreme" : "Auto";
                 AppLog.Info(
                     "stream",
-                    $"Auto latency raised to {_latency.EffectiveFrames} frames " +
+                    $"{kind} latency raised to {_latency.EffectiveFrames} frames " +
                     $"(~{_latency.EffectiveFrames / 44.1:0} ms) " +
                     $"drops={dropDelta} slowSends={slowDelta}");
+
+                // A successful mid-ladder raise clears any stale exhausted banner.
+                if (_latency.IsExtremeRaiseEnabled && !_latency.IsExtremeLadderExhausted)
+                {
+                    ClearExtremePressure();
+                }
             }
         }
-        else
+
+        if (_latency.IsExtremeRaiseEnabled)
         {
             UpdateExtremePressure(dropDelta, slowDelta, isStreaming, isSilent, now);
         }
@@ -498,8 +506,10 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         bool isSilent,
         DateTimeOffset now)
     {
+        // Mid-ladder raises are silent. The banner only arms at the Extreme ceiling.
         var eligible =
             Responsiveness == PlaybackResponsiveness.LabPacket &&
+            _latency.IsExtremeLadderExhausted &&
             isStreaming &&
             !isSilent &&
             _latency.IsPastStartupGrace(now);
@@ -516,7 +526,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             AppLog.Warn(
                 "stream",
-                $"Extreme under sustained pressure drops={dropDelta} slowSends={slowDelta}");
+                $"Extreme ladder exhausted under pressure drops={dropDelta} slowSends={slowDelta}");
         }
 
         ExtremePressureChanged?.Invoke(this, visible);

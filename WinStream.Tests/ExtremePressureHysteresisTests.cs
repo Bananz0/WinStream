@@ -35,14 +35,47 @@ public class ExtremePressureHysteresisTests
     }
 
     [Fact]
-    public void A_clean_window_clears_a_visible_warning()
+    public void A_clean_window_keeps_a_visible_warning_readable()
     {
         var hysteresis = new ExtremePressureHysteresis();
         hysteresis.ObserveWindow(pressureThisWindow: true);
         hysteresis.ObserveWindow(pressureThisWindow: true);
 
+        Assert.True(hysteresis.ObserveWindow(pressureThisWindow: false));
+        Assert.True(hysteresis.IsWarningVisible);
+    }
+
+    [Fact]
+    public void Enough_clean_windows_clear_a_visible_warning()
+    {
+        var hysteresis = new ExtremePressureHysteresis();
+        hysteresis.ObserveWindow(pressureThisWindow: true);
+        hysteresis.ObserveWindow(pressureThisWindow: true);
+
+        for (var i = 1; i < ExtremePressureHysteresis.ConsecutiveCleanWindowsToClear; i++)
+        {
+            Assert.True(hysteresis.ObserveWindow(pressureThisWindow: false));
+        }
+
         Assert.False(hysteresis.ObserveWindow(pressureThisWindow: false));
         Assert.False(hysteresis.IsWarningVisible);
+    }
+
+    [Fact]
+    public void New_pressure_resets_the_clean_window_count()
+    {
+        var hysteresis = new ExtremePressureHysteresis();
+        hysteresis.ObserveWindow(pressureThisWindow: true);
+        hysteresis.ObserveWindow(pressureThisWindow: true);
+
+        for (var i = 0; i < ExtremePressureHysteresis.ConsecutiveCleanWindowsToClear - 1; i++)
+        {
+            hysteresis.ObserveWindow(pressureThisWindow: false);
+        }
+
+        hysteresis.ObserveWindow(pressureThisWindow: true);
+
+        Assert.True(hysteresis.ObserveWindow(pressureThisWindow: false));
     }
 
     [Fact]

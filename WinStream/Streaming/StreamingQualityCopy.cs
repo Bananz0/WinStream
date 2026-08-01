@@ -5,16 +5,17 @@ namespace WinStream.Streaming;
 /// <summary>Honest UI strings for playback responsiveness / fidelity (testable without WinUI).</summary>
 public static class StreamingQualityCopy
 {
-    public const string ExtremeLabel = "Extreme (~8 ms)";
+    public const string ExtremeLabel = "Extreme (~50 ms)";
     public const string ExtremeHint =
-        "Speaker buffer ≈ one ALAC packet. Capture is still ~50 ms loopback, so this is a " +
-        "wire probe — expect stutter. One speaker. Not end-to-end 8 ms.";
+        "Asks ~50 ms of speaker buffer (six ALAC packets). Capture is still ~50 ms " +
+        "loopback, so under load Extreme may climb toward ~80 ms then ~250 ms. " +
+        "One speaker. Speaker buffer ask only — not a measured PC-to-speaker delay.";
 
     public static string LabEscapeBody =>
-        "The receiver did not accept Extreme (~8 ms). " +
+        "The receiver did not accept Extreme (~50 ms). " +
         "Switch to Experimental (~250 ms) and reconnect now?";
 
-    public static string ExtremeCaptureWarningTitle => "Extreme is a probe";
+    public static string ExtremeCaptureWarningTitle => "Extreme has almost no capture margin";
 
     public static string ExtremeCaptureWarningBody => LabSessionPolicy.CaptureTooCoarseWarning;
 
@@ -42,8 +43,9 @@ public static class StreamingQualityCopy
     public static string ResponsivenessInfoBody =>
         "This setting changes playback delay, not sound fidelity. Lower delay = less buffer against Wi‑Fi glitches.\n\n" +
         "• Auto — Starts near ~250 ms and may climb toward ~2 s if delivery pressure is detected.\n" +
-        "• Extreme (~8 ms) — Probe only: shrinks the speaker buffer to one packet. " +
-        "Capture is still ~50 ms, so this is not end-to-end 8 ms. Often stutters. One speaker.\n" +
+        "• Extreme (~50 ms) — Asks ~50 ms of speaker buffer; may climb to ~80 ms then ~250 ms under " +
+        "pressure (TuneBlade-style). Capture is still ~50 ms loopback. One speaker. " +
+        "Speaker buffer ask only — not a measured PC-to-speaker delay.\n" +
         "• Experimental (~250 ms) — Fixed short buffer; expect stutter on some receivers.\n" +
         "• Very low (~500 ms) — Fixed half-second buffer.\n" +
         "• Low delay (~1 s) — Snappier than Balanced; more stutter risk.\n" +

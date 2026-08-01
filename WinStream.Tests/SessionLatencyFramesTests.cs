@@ -21,7 +21,7 @@ public class SessionLatencyFramesTests
         Assert.Equal(88200u, session.EffectiveLatencyFrames);
 
         session.SetEffectiveLatencyFrames(LatencyAutoController.LabPacketFrames);
-        Assert.Equal(352u, session.EffectiveLatencyFrames);
+        Assert.Equal(2112u, session.EffectiveLatencyFrames);
 
         session.SetEffectiveLatencyFrames(100);
         Assert.Equal(352u, session.EffectiveLatencyFrames);
@@ -64,10 +64,10 @@ public class SessionLatencyFramesTests
 public class StreamSetupLatencyMinTests
 {
     [Fact]
-    public void SetupLatencyMin_for_LabPacket_is_352()
+    public void SetupLatencyMin_for_LabPacket_is_2112()
     {
         var l = LatencyAutoController.LabPacketFrames;
-        Assert.Equal(352u, LatencyAutoController.SetupLatencyMin(l));
+        Assert.Equal(2112u, LatencyAutoController.SetupLatencyMin(l));
         Assert.Equal(88200u, LatencyAutoController.SetupLatencyMax(l));
     }
 

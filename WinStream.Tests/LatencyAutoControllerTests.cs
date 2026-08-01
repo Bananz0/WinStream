@@ -28,8 +28,10 @@ public class LatencyAutoControllerTests
         Assert.False(controller.IsAutoEnabled);
 
         controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+        Assert.Equal(2112u, controller.EffectiveFrames);
         Assert.Equal(LatencyAutoController.LabPacketFrames, controller.EffectiveFrames);
         Assert.False(controller.IsAutoEnabled);
+        Assert.True(controller.IsExtremeRaiseEnabled);
 
         controller.ResetForConnect(PlaybackResponsiveness.LowDelay);
         Assert.Equal(LatencyAutoController.LowDelayFrames, controller.EffectiveFrames);
@@ -65,7 +67,68 @@ public class LatencyAutoControllerTests
         Assert.Equal(
             LatencyAutoController.MostStableFrames,
             LatencyAutoController.ResolveFixedFrames(PlaybackResponsiveness.MostStable));
+        Assert.Equal(2112u, LatencyAutoController.LabPacketFrames);
         Assert.True(LatencyAutoController.LabPacketFrames >= LatencyAutoController.PacketFloorFrames);
+        Assert.Equal(3520u, LatencyAutoController.ExtremeMidFrames);
+        Assert.Equal(11025u, LatencyAutoController.ExtremeCeilingFrames);
+    }
+
+    [Fact]
+    public void Extreme_starts_at_2112_and_raises_through_3520_then_11025()
+    {
+        var controller = new LatencyAutoController();
+        var t0 = DateTimeOffset.Parse("2026-07-31T12:00:00Z");
+        controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+        controller.MarkAudioStarted(t0);
+
+        Assert.Equal(2112u, controller.EffectiveFrames);
+        Assert.False(controller.IsExtremeLadderExhausted);
+
+        Assert.True(controller.TryRaise(3, 0, true, false, t0.AddSeconds(6)));
+        Assert.Equal(3520u, controller.EffectiveFrames);
+        Assert.False(controller.IsExtremeLadderExhausted);
+
+        Assert.False(controller.TryRaise(10, 10, true, false, t0.AddSeconds(10))); // cool-down
+
+        Assert.True(controller.TryRaise(0, 5, true, false, t0.AddSeconds(20)));
+        Assert.Equal(11025u, controller.EffectiveFrames);
+        Assert.True(controller.IsExtremeLadderExhausted);
+
+        Assert.False(controller.TryRaise(10, 10, true, false, t0.AddSeconds(40)));
+        Assert.Equal(11025u, controller.EffectiveFrames);
+    }
+
+    [Fact]
+    public void Extreme_ResetForConnect_returns_to_2112_after_a_climb()
+    {
+        var controller = new LatencyAutoController();
+        var t0 = DateTimeOffset.Parse("2026-07-31T12:00:00Z");
+        controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+        controller.MarkAudioStarted(t0);
+        controller.TryRaise(3, 0, true, false, t0.AddSeconds(6));
+        controller.TryRaise(3, 0, true, false, t0.AddSeconds(20));
+        Assert.Equal(11025u, controller.EffectiveFrames);
+
+        controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+        Assert.Equal(2112u, controller.EffectiveFrames);
+        Assert.False(controller.IsExtremeLadderExhausted);
+    }
+
+    [Fact]
+    public void Extreme_TryRaise_ignores_silence_startup_and_subthreshold()
+    {
+        var controller = new LatencyAutoController();
+        var t0 = DateTimeOffset.Parse("2026-07-31T12:00:00Z");
+        controller.ResetForConnect(PlaybackResponsiveness.LabPacket);
+
+        Assert.False(controller.TryRaise(10, 10, true, false, t0.AddSeconds(10))); // unmarked
+
+        controller.MarkAudioStarted(t0);
+        Assert.False(controller.TryRaise(10, 10, true, false, t0.AddSeconds(2))); // grace
+        Assert.False(controller.TryRaise(10, 10, true, true, t0.AddSeconds(10))); // silent
+        Assert.False(controller.TryRaise(10, 10, false, false, t0.AddSeconds(10))); // not streaming
+        Assert.False(controller.TryRaise(2, 4, true, false, t0.AddSeconds(10))); // below thresholds
+        Assert.Equal(2112u, controller.EffectiveFrames);
     }
 
     [Fact]

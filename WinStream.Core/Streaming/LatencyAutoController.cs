@@ -6,6 +6,11 @@ using WinStream.Core.Protocol.Raop;
 /// Raise-only AirPlay latency ladder driven by sender-side delivery pressure.
 /// Pure Core logic — no WASAPI or UI dependencies.
 /// </summary>
+/// <remarks>
+/// Auto climbs by <see cref="StepFrames"/> toward <see cref="CeilingFrames"/>.
+/// Extreme (LabPacket) climbs a short TuneBlade-style ladder
+/// 2112 → 3520 → 11025, then stops so the UI can offer Experimental.
+/// </remarks>
 public sealed class LatencyAutoController
 {
     /// <summary>Auto starts at the folklore SETUP min (~250 ms) and may climb.</summary>
@@ -22,13 +27,28 @@ public sealed class LatencyAutoController
     /// <summary>Absolute minimum frames for SetEffectiveLatencyFrames (packet floor).</summary>
     public const uint PacketFloorFrames = AlacEncoder.FramesPerPacket;
 
-    /// <summary>One ALAC packet — absolute Lab probe floor.</summary>
-    public const uint LabPacketFrames = PacketFloorFrames;
+    /// <summary>
+    /// Extreme RealTime ask: six ALAC packets ≈ 47.9 ms (UI: Extreme ~50 ms).
+    /// </summary>
+    public const uint LabPacketFrames = 2112;
+
+    /// <summary>Extreme mid rung ≈ 80 ms (10 packets) after the first raise.</summary>
+    public const uint ExtremeMidFrames = 3520;
+
+    /// <summary>Extreme ladder top — Experimental folklore floor.</summary>
+    public const uint ExtremeCeilingFrames = ExperimentalFrames;
 
     /// <summary>Apple SETUP folklore min (~250 ms). Used when L ≥ this value.</summary>
     public const uint LatencyMinFrames = 11025;
 
     public static readonly TimeSpan CoolDown = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Extreme only has two raise steps; a 30 s Auto cool-down would stall recovery
+    /// during continuous underrun under today's 50 ms capture.
+    /// </summary>
+    public static readonly TimeSpan ExtremeCoolDown = TimeSpan.FromSeconds(10);
+
     public static readonly TimeSpan StartupGrace = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan SignalWindow = TimeSpan.FromSeconds(2);
 
@@ -39,19 +59,31 @@ public sealed class LatencyAutoController
     private DateTimeOffset _lastRaiseUtc = DateTimeOffset.MinValue;
     private DateTimeOffset _audioStartedUtc = DateTimeOffset.MinValue;
     private bool _autoEnabled = true;
+    private bool _extremeRaiseEnabled;
 
     public uint EffectiveFrames => _effectiveFrames;
 
     public bool IsAutoEnabled => _autoEnabled;
 
+    /// <summary>True while Extreme may still climb its short ladder.</summary>
+    public bool IsExtremeRaiseEnabled => _extremeRaiseEnabled;
+
+    /// <summary>
+    /// True once Extreme has reached 11025. The InfoBar should only arm here —
+    /// mid-ladder raises stay silent (AppLog only).
+    /// </summary>
+    public bool IsExtremeLadderExhausted =>
+        _extremeRaiseEnabled && _effectiveFrames >= ExtremeCeilingFrames;
+
     /// <summary>
     /// Resets for a new user connect / first session. Auto always restarts at the floor.
-    /// A resilience reconnect rebuilds the session with the current effective frames and
-    /// does not call this method, so a climbed Auto step survives the reconnect.
+    /// Extreme restarts at 2112. A resilience reconnect rebuilds the session with the
+    /// current effective frames and does not call this method, so a climbed step survives.
     /// </summary>
     public void ResetForConnect(PlaybackResponsiveness mode)
     {
         _autoEnabled = mode == PlaybackResponsiveness.Auto;
+        _extremeRaiseEnabled = mode == PlaybackResponsiveness.LabPacket;
         _effectiveFrames = ResolveFixedFrames(mode);
         _lastRaiseUtc = DateTimeOffset.MinValue;
         _audioStartedUtc = DateTimeOffset.MinValue;
@@ -74,7 +106,8 @@ public sealed class LatencyAutoController
         slowSendsInWindow >= SlowSendRaiseThreshold;
 
     /// <summary>
-    /// Attempts a raise when Auto is enabled and pressure signals cross thresholds.
+    /// Attempts a raise when Auto or Extreme raise mode is enabled and pressure
+    /// signals cross thresholds.
     /// </summary>
     public bool TryRaise(
         long queueDropsInWindow,
@@ -83,6 +116,16 @@ public sealed class LatencyAutoController
         bool isSilent,
         DateTimeOffset utcNow)
     {
+        if (_extremeRaiseEnabled)
+        {
+            return TryRaiseExtreme(
+                queueDropsInWindow,
+                slowSendsInWindow,
+                isStreaming,
+                isSilent,
+                utcNow);
+        }
+
         if (!_autoEnabled || !isStreaming || isSilent)
         {
             return false;
@@ -110,6 +153,46 @@ public sealed class LatencyAutoController
         }
 
         _effectiveFrames = Math.Min(CeilingFrames, _effectiveFrames + StepFrames);
+        _lastRaiseUtc = utcNow;
+        return true;
+    }
+
+    private bool TryRaiseExtreme(
+        long queueDropsInWindow,
+        long slowSendsInWindow,
+        bool isStreaming,
+        bool isSilent,
+        DateTimeOffset utcNow)
+    {
+        if (!isStreaming || isSilent)
+        {
+            return false;
+        }
+
+        if (!IsPastStartupGrace(utcNow))
+        {
+            return false;
+        }
+
+        if (_effectiveFrames >= ExtremeCeilingFrames)
+        {
+            return false;
+        }
+
+        if (_lastRaiseUtc != DateTimeOffset.MinValue &&
+            utcNow - _lastRaiseUtc < ExtremeCoolDown)
+        {
+            return false;
+        }
+
+        if (!HasPressure(queueDropsInWindow, slowSendsInWindow))
+        {
+            return false;
+        }
+
+        _effectiveFrames = _effectiveFrames < ExtremeMidFrames
+            ? ExtremeMidFrames
+            : ExtremeCeilingFrames;
         _lastRaiseUtc = utcNow;
         return true;
     }
