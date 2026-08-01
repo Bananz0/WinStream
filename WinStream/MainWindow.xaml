@@ -353,10 +353,10 @@
                                 <StackPanel Grid.Column="1"
                                             Spacing="2"
                                             VerticalAlignment="Center">
-                                    <TextBlock Text="Connect when WinStream starts"
+                                    <TextBlock Text="Auto-connect"
                                                Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                     <TextBlock x:Name="autoConnectDescriptionText"
-                                               Text="Connect to your last device as soon as it is found."
+                                               Text="Pick a preferred device with the star, or connect once to set it."
                                                Style="{StaticResource HintTextStyle}"/>
                                 </StackPanel>
 
@@ -366,7 +366,7 @@
                                               OnContent="On"
                                               OffContent="Off"
                                               Toggled="AutoConnectToggle_Toggled"
-                                              AutomationProperties.Name="Connect to the last device when WinStream starts"/>
+                                              AutomationProperties.Name="Auto-connect to the preferred device"/>
                             </Grid>
                         </Border>
 
@@ -448,6 +448,15 @@
                                                 <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}"
                                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                                            TextTrimming="CharacterEllipsis"/>
+                                                <Border Visibility="{x:Bind PreferredBadgeVisibility, Mode=OneWay}"
+                                                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                                        CornerRadius="4"
+                                                        Padding="6,1"
+                                                        VerticalAlignment="Center">
+                                                    <TextBlock Text="Preferred"
+                                                               FontSize="11"
+                                                               Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
+                                                </Border>
                                                 <Border Visibility="{x:Bind ConnectedBadgeVisibility, Mode=OneWay}"
                                                         Background="{ThemeResource SystemFillColorSuccessBackgroundBrush}"
                                                         CornerRadius="4"
@@ -502,14 +511,20 @@
                                                           Height="18"
                                                           IsActive="{x:Bind IsBusy, Mode=OneWay}"
                                                           Visibility="{x:Bind BusyVisibility, Mode=OneWay}"/>
+                                            <Button Click="PreferButton_Click"
+                                                    ToolTipService.ToolTip="{x:Bind PreferToolTip, Mode=OneWay}"
+                                                    AutomationProperties.Name="{x:Bind PreferAutomationName, Mode=OneWay}"
+                                                    IsEnabled="{x:Bind IsActionEnabled, Mode=OneWay}">
+                                                <FontIcon Glyph="{x:Bind PreferGlyph, Mode=OneWay}" FontSize="14"/>
+                                            </Button>
                                             <Button Content="{x:Bind ActionLabel, Mode=OneWay}"
                                                     Style="{x:Bind ActionButtonStyle, Mode=OneWay}"
                                                     IsEnabled="{x:Bind IsActionEnabled, Mode=OneWay}"
                                                     MinWidth="96"
                                                     Click="ConnectButton_Click"/>
                                             <Button Click="InfoButton_Click"
-                                                    ToolTipService.ToolTip="Device details"
-                                                    AutomationProperties.Name="Device details">
+                                                    ToolTipService.ToolTip="Device details and forget pairing"
+                                                    AutomationProperties.Name="Device details and forget pairing">
                                                 <FontIcon Glyph="&#xE946;" FontSize="14"/>
                                             </Button>
                                         </StackPanel>

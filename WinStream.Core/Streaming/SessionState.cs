@@ -14,4 +14,5 @@ public enum SessionState
 public sealed record SessionStateChanged(
     SessionState Previous,
     SessionState Current,
-    string? Reason = null);
+    string? Reason = null,
+    bool UserRequested = false);

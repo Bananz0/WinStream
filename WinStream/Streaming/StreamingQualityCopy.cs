@@ -20,9 +20,6 @@ public static class StreamingQualityCopy
 
     public static string ExtremeCaptureWarningBody => LabSessionPolicy.CaptureTooCoarseWarning;
 
-    public static string AutoConnectOnDescription(string receiverName) =>
-        $"On launch (or when you turn this on), connect once to {receiverName} when it appears.";
-
     public static string StandardFidelityHint =>
         "Same conversion as Auto today (linear when the mix rate differs). Reserved for a lighter path later.";
 

@@ -45,7 +45,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private long _slowAtWindowStart;
     private DateTimeOffset _signalWindowStart = DateTimeOffset.UtcNow;
     private bool _audioStartedMarked;
-    private bool _userRequestedDisconnect;
     private bool _disposed;
 
     /// <param name="senderDeviceId">
@@ -104,11 +103,26 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether the current teardown was asked for by the user rather than forced by a
-    /// dropped receiver. Auto-connect reads this so a deliberate Disconnect stays
-    /// disconnected while a lost session becomes eligible again.
+    /// True when this PC already holds a complete HomeKit identity for the receiver,
+    /// so the next connect can try <c>pair-verify</c> without prompting.
     /// </summary>
-    public bool LastDisconnectWasUserRequested => _userRequestedDisconnect;
+    public bool HasStoredPairing(DeviceInfo receiver)
+    {
+        ArgumentNullException.ThrowIfNull(receiver);
+        return PairingForget.HasStored(_pairingStore, ReceiverKey.For(receiver));
+    }
+
+    /// <summary>
+    /// Drops the stored HomeKit identity for this receiver so the next connect re-runs
+    /// pair-setup (AirPlay code or password). Does not tear down a live session —
+    /// disconnect first when a clean re-pair is required.
+    /// </summary>
+    /// <returns><c>true</c> when credentials were removed.</returns>
+    public bool ForgetPairing(DeviceInfo receiver)
+    {
+        ArgumentNullException.ThrowIfNull(receiver);
+        return PairingForget.Forget(_pairingStore, ReceiverKey.For(receiver));
+    }
 
     /// <summary>
     /// Stores quality prefs for the next connect. Live preset changes go through
@@ -147,7 +161,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(receiver);
         ArgumentNullException.ThrowIfNull(audioSource);
-        _userRequestedDisconnect = false;
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -321,7 +334,6 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         DeviceInfo? receiver = null,
         CancellationToken cancellationToken = default)
     {
-        _userRequestedDisconnect = true;
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -333,7 +345,13 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             {
                 await RemoveSessionAsync(Core.Network.ReceiverKey.For(receiver), cancellationToken)
                     .ConfigureAwait(false);
-                RefreshAggregate("removed");
+                // Partial remove keeps streaming elsewhere — UserRequested stays false so a
+                // later lost-session end can re-arm. Last remaining empties the map → true.
+                RefreshAggregate(
+                    "removed",
+                    userRequested: SessionEndIntent.UserRequested(
+                        userDisconnectApi: true,
+                        sessionsRemain: _sessions.Count > 0));
             }
         }
         finally
@@ -590,14 +608,17 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         CancelReconnectLoop();
         _reconnectBudget.Clear();
         ClearExtremePressure();
-        SetAggregate(SessionState.Disconnecting, "Disconnecting all receivers");
+        SetAggregate(
+            SessionState.Disconnecting,
+            "Disconnecting all receivers",
+            userRequested: true);
         foreach (var key in _sessions.Keys.ToList())
         {
             await RemoveSessionAsync(key, cancellationToken).ConfigureAwait(false);
         }
 
         await DetachAudioSourceAsync().ConfigureAwait(false);
-        SetAggregate(SessionState.Disconnected);
+        SetAggregate(SessionState.Disconnected, userRequested: true);
     }
 
     private async Task RemoveSessionAsync(string key, CancellationToken cancellationToken)
@@ -807,25 +828,21 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private PairingOptions CreatePairingOptions(DeviceInfo receiver)
     {
         var receiverKey = ReceiverKey.For(receiver);
-
-        // Each attempt re-decides its pairing mode. Clearing first matters on a quality
-        // rebuild that reuses the SessionEntry: a previous temporary pairing must not
-        // keep claiming Accept-every-time after a successful pair-verify.
-        lock (_sessionsGate)
-        {
-            if (_sessions.TryGetValue(receiverKey, out var existing))
+        return PairingOptionsFactory.Create(
+            _pairingStore,
+            receiverKey,
+            _requestPairingPinAsync,
+            clearTransient: () =>
             {
-                existing.UsesTransientPairing = false;
-            }
-        }
-
-        return new PairingOptions
-        {
-            StoredCredentials = _pairingStore.TryGet(receiverKey, out var stored) ? stored : null,
-            RequestPinAsync = _requestPairingPinAsync,
-            OnPaired = credentials => _pairingStore.Save(receiverKey, credentials),
-            OnStoredCredentialsRejected = () => _pairingStore.Remove(receiverKey),
-            OnTransientPairing = () =>
+                lock (_sessionsGate)
+                {
+                    if (_sessions.TryGetValue(receiverKey, out var existing))
+                    {
+                        existing.UsesTransientPairing = false;
+                    }
+                }
+            },
+            markTransient: () =>
             {
                 lock (_sessionsGate)
                 {
@@ -834,8 +851,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                         live.UsesTransientPairing = true;
                     }
                 }
-            }
-        };
+            });
     }
 
     private void EnsureHomogeneousWithExisting(AirPlayProtocolKind incoming)
@@ -911,7 +927,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         RefreshAggregate(change.Reason);
     }
 
-    private void RefreshAggregate(string? reason = null)
+    private void RefreshAggregate(string? reason = null, bool userRequested = false)
     {
         var states = _sessions.Values.Select(entry => entry.Session.State).ToList();
         var next = SessionAggregate.Calculate(
@@ -921,10 +937,14 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             next,
             reason ?? (next == SessionState.Degraded
                 ? "One or more receivers failed."
-                : null));
+                : null),
+            userRequested);
     }
 
-    private void SetAggregate(SessionState state, string? reason = null)
+    private void SetAggregate(
+        SessionState state,
+        string? reason = null,
+        bool userRequested = false)
     {
         if (_aggregateState == state)
         {
@@ -933,7 +953,9 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
 
         var previous = _aggregateState;
         _aggregateState = state;
-        StateChanged?.Invoke(this, new SessionStateChanged(previous, state, reason));
+        StateChanged?.Invoke(
+            this,
+            new SessionStateChanged(previous, state, reason, userRequested));
         if (!string.IsNullOrWhiteSpace(reason))
         {
             AppLog.Info("stream", $"State={state}; {reason}");

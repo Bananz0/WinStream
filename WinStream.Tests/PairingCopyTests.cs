@@ -43,4 +43,12 @@ public class PairingCopyTests
         Assert.Equal("Temporary pairing", PairingCopy.TransientStatus);
         Assert.False(string.IsNullOrWhiteSpace(PairingCopy.TransientTitle));
     }
+
+    [Fact]
+    public void Forget_copy_names_the_action_and_the_re_prompt()
+    {
+        Assert.Equal("Forget pairing", PairingCopy.ForgetButton);
+        Assert.Contains("AirPlay code or password", PairingCopy.ForgetDoneBody);
+        Assert.Contains("No saved pairing", PairingCopy.ForgetNothingBody);
+    }
 }

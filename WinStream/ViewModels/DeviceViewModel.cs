@@ -29,6 +29,7 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
     private DeviceInfo _device;
     private bool _isConnected;
     private bool _isBusy;
+    private bool _isPreferred;
     private string _statusMessage = string.Empty;
     private string _statusDetail = string.Empty;
     private DeviceStatusKind _statusKind = DeviceStatusKind.Neutral;
@@ -59,6 +60,25 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// The receiver auto-connect will dial when the feature is on. Independent of
+    /// the live connection so the user can pick a preferred speaker without connecting.
+    /// </summary>
+    public bool IsPreferred
+    {
+        get => _isPreferred;
+        set
+        {
+            if (Set(ref _isPreferred, value))
+            {
+                Notify(nameof(PreferredBadgeVisibility));
+                Notify(nameof(PreferGlyph));
+                Notify(nameof(PreferToolTip));
+                Notify(nameof(PreferAutomationName));
+            }
+        }
+    }
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -84,6 +104,22 @@ public sealed class DeviceViewModel : INotifyPropertyChanged
 
     public Visibility ConnectedBadgeVisibility =>
         _isConnected ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility PreferredBadgeVisibility =>
+        _isPreferred ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Filled star when preferred; outline otherwise (Segoe Fluent Icons).</summary>
+    public string PreferGlyph => _isPreferred ? "\uE735" : "\uE734";
+
+    public string PreferToolTip =>
+        _isPreferred
+            ? AutoConnectCopy.PreferredToolTip
+            : AutoConnectCopy.PreferToolTip;
+
+    public string PreferAutomationName =>
+        _isPreferred
+            ? AutoConnectCopy.PreferredAutomationName
+            : AutoConnectCopy.PreferAutomationName;
 
     public string StatusMessage => _statusMessage;
 

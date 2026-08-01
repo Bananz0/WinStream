@@ -6,8 +6,8 @@ using WinStream.Core.Streaming;
 namespace WinStream.Tests;
 
 /// <summary>
-/// The orchestrator builds <see cref="PairingOptions"/> from a store; these cover the
-/// same shape without WinUI so the callbacks cannot silently stop reaching the store.
+/// Covers <see cref="PairingOptionsFactory"/> — the same builder the orchestrator
+/// calls — so clear-before-attempt and store callbacks cannot silently drift.
 /// </summary>
 public class PairingOptionsWiringTests
 {
@@ -23,21 +23,14 @@ public class PairingOptionsWiringTests
         IPairingCredentialStore store,
         string receiverKey,
         Func<CancellationToken, Task<string?>>? requestPin = null,
-        FakeSessionMap? sessions = null)
-    {
-        // Mirrors StreamingOrchestrator.CreatePairingOptions: clear before each attempt
-        // so a quality rebuild that trusts the PC no longer reports temporary pairing.
-        sessions?.ClearTransient(receiverKey);
+        FakeSessionMap? sessions = null) =>
+        PairingOptionsFactory.Create(
+            store,
+            receiverKey,
+            requestPin,
+            clearTransient: () => sessions?.ClearTransient(receiverKey),
+            markTransient: () => sessions?.MarkTransient(receiverKey));
 
-        return new PairingOptions
-        {
-            StoredCredentials = store.TryGet(receiverKey, out var stored) ? stored : null,
-            RequestPinAsync = requestPin,
-            OnPaired = credentials => store.Save(receiverKey, credentials),
-            OnStoredCredentialsRejected = () => store.Remove(receiverKey),
-            OnTransientPairing = () => sessions?.MarkTransient(receiverKey)
-        };
-    }
 
     [Fact]
     public void OnTransientPairing_marks_only_the_live_session_for_that_receiver()

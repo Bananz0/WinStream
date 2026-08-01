@@ -64,8 +64,11 @@ public class AutoConnectCoordinatorTests
             connectionInFlight: false));
 
         coordinator.NoteStateChange(
-            new SessionStateChanged(SessionState.Streaming, SessionState.Failed, "keep-alive"),
-            userRequestedDisconnect: false);
+            new SessionStateChanged(
+                SessionState.Streaming,
+                SessionState.Failed,
+                "keep-alive",
+                UserRequested: false));
         Assert.Null(coordinator.ResolveTarget(
             Settings(),
             [target],
@@ -94,8 +97,11 @@ public class AutoConnectCoordinatorTests
         coordinator.RecordSuccess();
 
         coordinator.NoteStateChange(
-            new SessionStateChanged(SessionState.Streaming, SessionState.Disconnected, null),
-            userRequestedDisconnect: true);
+            new SessionStateChanged(
+                SessionState.Streaming,
+                SessionState.Disconnected,
+                Reason: null,
+                UserRequested: true));
         time.Advance(TimeSpan.FromSeconds(30));
 
         Assert.Null(coordinator.ResolveTarget(
@@ -103,6 +109,49 @@ public class AutoConnectCoordinatorTests
             [target],
             SessionState.Disconnected,
             connectionInFlight: false));
+    }
+
+    [Fact]
+    public void Partial_user_remove_then_lost_session_re_arms_after_cooldown()
+    {
+        // Multi-room: user removes room A (no terminal UserRequested). Later room B dies
+        // with UserRequested=false — must re-arm, not inherit a sticky suppress latch.
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-08-01T12:00:00Z"));
+        var coordinator = new AutoConnectCoordinator(
+            new AutoConnectAttemptTracker(
+                sessionLostCooldown: TimeSpan.FromSeconds(5),
+                timeProvider: time));
+        var target = Device();
+        coordinator.RecordSuccess();
+
+        coordinator.NoteStateChange(
+            new SessionStateChanged(
+                SessionState.Streaming,
+                SessionState.Streaming,
+                "removed",
+                UserRequested: false));
+
+        coordinator.NoteStateChange(
+            new SessionStateChanged(
+                SessionState.Streaming,
+                SessionState.Disconnected,
+                "Receiver ended the session.",
+                UserRequested: false));
+
+        Assert.Null(coordinator.ResolveTarget(
+            Settings(),
+            [target],
+            SessionState.Disconnected,
+            connectionInFlight: false));
+
+        time.Advance(TimeSpan.FromSeconds(5));
+        Assert.Same(
+            target,
+            coordinator.ResolveTarget(
+                Settings(),
+                [target],
+                SessionState.Disconnected,
+                connectionInFlight: false));
     }
 
     [Fact]

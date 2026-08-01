@@ -29,19 +29,21 @@ public sealed class AutoConnectCoordinator
     /// <summary>
     /// Reports an aggregate state change. A session that ended on its own makes
     /// auto-connect eligible again; a disconnect the user asked for does not.
+    /// Intent is read from <see cref="SessionStateChanged.UserRequested"/> on this
+    /// transition — never from a process-wide sticky latch.
     /// </summary>
-    public void NoteStateChange(SessionStateChanged change, bool userRequestedDisconnect)
+    public void NoteStateChange(SessionStateChanged change)
     {
         if (!AutoConnectPolicy.ReArmsAfterSessionEnd(
                 change.Previous,
                 change.Current,
-                userRequestedDisconnect))
+                change.UserRequested))
         {
             return;
         }
 
         _attempts.RecordSessionLost();
-        AppLog.Info("ui", $"Session ended ({change.Current}); auto-connect re-armed.");
+        AppLog.Info("auto-connect", $"Session ended ({change.Current}); auto-connect re-armed.");
     }
 
     /// <summary>

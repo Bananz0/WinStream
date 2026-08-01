@@ -32,4 +32,15 @@ public static class PairingCopy
         "then type the AirPlay code the receiver shows instead of skipping it.";
 
     public const string TransientStatus = "Temporary pairing";
+
+    public const string ForgetButton = "Forget pairing";
+
+    public const string ForgetDoneTitle = "Pairing cleared";
+
+    public const string ForgetDoneBody =
+        "Saved trust for this receiver is gone. The next connect will ask for the " +
+        "AirPlay code or password again.";
+
+    public const string ForgetNothingBody =
+        "No saved pairing for this receiver. Connect again when you want to trust it.";
 }

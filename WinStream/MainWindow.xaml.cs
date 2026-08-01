@@ -1395,14 +1395,44 @@ namespace WinStream
             var receiverName = _settings.Settings.LastReceiverName;
             if (string.IsNullOrWhiteSpace(receiverName))
             {
-                autoConnectDescriptionText.Text =
-                    "Your next successful connection will become the startup device.";
+                autoConnectDescriptionText.Text = AutoConnectCopy.NoPreferredDescription;
                 return;
             }
 
             autoConnectDescriptionText.Text = autoConnectToggle.IsOn
-                ? StreamingQualityCopy.AutoConnectOnDescription(receiverName)
-                : $"Your last device was {receiverName}. Turn this on to reconnect to it automatically.";
+                ? AutoConnectCopy.OnDescription(receiverName)
+                : AutoConnectCopy.OffDescription(receiverName);
+        }
+
+        /// <summary>
+        /// Marks exactly one discovered row as preferred so the star and badge match
+        /// <see cref="AppSettings.LastReceiverKey"/>.
+        /// </summary>
+        private void RefreshPreferredBadges()
+        {
+            var preferredKey = _settings.Settings.LastReceiverKey;
+            foreach (var row in _allDevices)
+            {
+                row.IsPreferred = !string.IsNullOrWhiteSpace(preferredKey) &&
+                    string.Equals(row.Key, preferredKey, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private void PreferButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { DataContext: DeviceViewModel device })
+            {
+                return;
+            }
+
+            // Already preferred: leave it. Clearing would leave auto-connect with no
+            // target; pick another star or Forget pairing when starting over.
+            if (device.IsPreferred)
+            {
+                return;
+            }
+
+            RememberReceiver(device);
         }
 
         private async Task RestoreLaunchAtStartupSettingAsync()
@@ -1693,7 +1723,7 @@ namespace WinStream
             var changed = !string.Equals(
                 _settings.Settings.LastReceiverKey,
                 key,
-                StringComparison.Ordinal);
+                StringComparison.OrdinalIgnoreCase);
 
             _settings.Update(settings =>
             {
@@ -1706,6 +1736,7 @@ namespace WinStream
                 _autoConnect.Reset();
             }
 
+            RefreshPreferredBadges();
             RefreshAutoConnectDescription();
         }
 
@@ -1822,6 +1853,7 @@ namespace WinStream
             _allDevices.RemoveAll(row => !seen.Contains(row.Key));
             _allDevices.Sort((left, right) =>
                 string.Compare(left.DisplayName, right.DisplayName, StringComparison.CurrentCultureIgnoreCase));
+            RefreshPreferredBadges();
         }
 
         /// <summary>
@@ -1911,9 +1943,7 @@ namespace WinStream
                 ? change.Reason ?? string.Empty
                 : string.Empty;
 
-            _autoConnect.NoteStateChange(
-                change,
-                _streamingOrchestrator.LastDisconnectWasUserRequested);
+            _autoConnect.NoteStateChange(change);
 
             SyncConnectionState();
             RefreshConnectedDeviceHealth();
@@ -2046,6 +2076,7 @@ namespace WinStream
                 return;
             }
 
+            var hasPairing = _streamingOrchestrator.HasStoredPairing(device.Device);
             var dialog = new ContentDialog
             {
                 Title = device.DisplayName,
@@ -2053,21 +2084,66 @@ namespace WinStream
                 {
                     Content = new TextBlock
                     {
-                        Text = CreateDeviceSummary(device.Device),
+                        Text = CreateDeviceSummary(device.Device, hasPairing),
                         TextWrapping = TextWrapping.Wrap,
                         IsTextSelectionEnabled = true
                     },
                     VerticalScrollMode = ScrollMode.Auto,
                     HorizontalScrollMode = ScrollMode.Disabled
                 },
+                PrimaryButtonText = PairingCopy.ForgetButton,
                 CloseButtonText = "Close",
+                DefaultButton = ContentDialogButton.Close,
                 XamlRoot = Content.XamlRoot
             };
 
-            await dialog.ShowAsync();
+            var result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            await ForgetDevicePairingAsync(device);
         }
 
-        private static string CreateDeviceSummary(DeviceInfo device)
+        /// <summary>
+        /// Clears this PC's saved trust for the receiver so the next connect re-prompts
+        /// for the AirPlay code or password. Also drops the remembered auto-connect
+        /// target when it was this device.
+        /// </summary>
+        private async Task ForgetDevicePairingAsync(DeviceViewModel device)
+        {
+            if (device.IsConnected)
+            {
+                await SetDeviceConnectionAsync(device, connect: false);
+            }
+
+            var cleared = _streamingOrchestrator.ForgetPairing(device.Device);
+            var wasRemembered = string.Equals(
+                _settings.Settings.LastReceiverKey,
+                device.Key,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (wasRemembered)
+            {
+                _settings.Update(settings =>
+                {
+                    settings.LastReceiverKey = null;
+                    settings.LastReceiverName = null;
+                });
+                _autoConnect.Reset();
+                RefreshPreferredBadges();
+                RefreshAutoConnectDescription();
+            }
+
+            device.ClearStatus();
+            ShowMessage(
+                InfoBarSeverity.Informational,
+                PairingCopy.ForgetDoneTitle,
+                cleared ? PairingCopy.ForgetDoneBody : PairingCopy.ForgetNothingBody);
+        }
+
+        private static string CreateDeviceSummary(DeviceInfo device, bool hasStoredPairing)
         {
             var protocol = AirPlayCapability.DescribePreferred(device);
 
@@ -2075,7 +2151,8 @@ namespace WinStream
                    $"Manufacturer: {Fallback(device.Manufacturer)}\n" +
                    $"Address: {Fallback(device.IPAddress)}:{device.Port}\n" +
                    $"Protocol: {protocol}\n" +
-                   $"Encryption: {Fallback(device.EncryptionTypes)}";
+                   $"Encryption: {Fallback(device.EncryptionTypes)}\n" +
+                   $"Saved pairing: {(hasStoredPairing ? "Yes" : "No")}";
         }
 
         private static string Fallback(string value) =>
