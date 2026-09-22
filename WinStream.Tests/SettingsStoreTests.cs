@@ -1,0 +1,182 @@
+using WinStream.Core;
+using WinStream.Core.Persistence;
+
+namespace WinStream.Tests;
+
+public class SettingsStoreTests
+{
+    [Fact]
+    public void SaveAndLoad_RoundTripsSelectedDevice()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+        store.Save(new AppSettings
+        {
+            SelectedRenderDeviceId = "endpoint-123",
+            MonitorCapture = true,
+            AutoConnectLastReceiver = true,
+            LaunchAtStartup = true,
+            LastReceiverKey = "AA:BB:CC:DD:EE:FF",
+            LastReceiverName = "Living Room",
+            PreferVirtualDriver = true
+        });
+
+        var loaded = store.Load();
+
+        Assert.Equal("endpoint-123", loaded.SelectedRenderDeviceId);
+        Assert.True(loaded.MonitorCapture);
+        Assert.True(loaded.AutoConnectLastReceiver);
+        Assert.True(loaded.LaunchAtStartup);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", loaded.LastReceiverKey);
+        Assert.Equal("Living Room", loaded.LastReceiverName);
+        Assert.True(loaded.PreferVirtualDriver);
+        Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
+        Assert.False(loaded.LinkFeatureEnabled);
+        Assert.Equal(SinkMode.AirPlay, loaded.SinkMode);
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsLinkSettings()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+        store.Save(new AppSettings
+        {
+            LinkFeatureEnabled = true,
+            SinkMode = SinkMode.Link,
+            LastLinkReceiverKey = "192.168.1.8:47200",
+            LastLinkReceiverName = "Desk Pi"
+        });
+
+        var loaded = store.Load();
+        Assert.True(loaded.LinkFeatureEnabled);
+        Assert.Equal(SinkMode.Link, loaded.SinkMode);
+        Assert.Equal("192.168.1.8:47200", loaded.LastLinkReceiverKey);
+        Assert.Equal("Desk Pi", loaded.LastLinkReceiverName);
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsLatencyAndFidelityEnums()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+        store.Save(new AppSettings
+        {
+            PlaybackResponsiveness = PlaybackResponsiveness.LowDelay,
+            AudioFidelity = AudioFidelity.HighFidelity
+        });
+
+        var loaded = store.Load();
+        Assert.Equal(PlaybackResponsiveness.LowDelay, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.HighFidelity, loaded.AudioFidelity);
+    }
+
+    [Fact]
+    public void RoundTrips_ultralow_responsiveness_presets()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+
+        store.Save(new AppSettings
+        {
+            PlaybackResponsiveness = PlaybackResponsiveness.VeryLow,
+            AudioFidelity = AudioFidelity.Standard
+        });
+        Assert.Equal(PlaybackResponsiveness.VeryLow, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.Experimental });
+        Assert.Equal(PlaybackResponsiveness.Experimental, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.LabPacket });
+        Assert.Equal(PlaybackResponsiveness.LabPacket, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.Balanced });
+        Assert.Equal(PlaybackResponsiveness.Balanced, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { PlaybackResponsiveness = PlaybackResponsiveness.MostStable });
+        Assert.Equal(PlaybackResponsiveness.MostStable, store.Load().PlaybackResponsiveness);
+
+        store.Save(new AppSettings { LastReceiverKey = "  " });
+        Assert.Equal("  ", store.Load().LastReceiverKey);
+    }
+
+    [Fact]
+    public void Load_without_a_settings_file_returns_safe_defaults()
+    {
+        using var directory = new TempDirectory();
+
+        var loaded = new SettingsStore(directory.Path).Load();
+
+        Assert.False(loaded.AutoConnectLastReceiver);
+        Assert.False(loaded.LaunchAtStartup);
+        Assert.Null(loaded.LastReceiverKey);
+        Assert.Null(loaded.LastReceiverName);
+        Assert.False(loaded.MonitorCapture);
+        Assert.Equal(CaptureMode.Loopback, loaded.CaptureMode);
+        Assert.False(loaded.PreferVirtualDriver);
+        Assert.False(loaded.ExtremeEventDrivenCapture);
+        Assert.Equal(PlaybackResponsiveness.Auto, loaded.PlaybackResponsiveness);
+        Assert.Equal(AudioFidelity.Auto, loaded.AudioFidelity);
+    }
+
+    [Fact]
+    public void ExtremeEventDrivenCapture_round_trips_and_defaults_off()
+    {
+        using var directory = new TempDirectory();
+        var store = new SettingsStore(directory.Path);
+
+        Assert.False(store.Load().ExtremeEventDrivenCapture);
+
+        store.Save(new AppSettings { ExtremeEventDrivenCapture = true });
+        Assert.True(store.Load().ExtremeEventDrivenCapture);
+    }
+
+    [Fact]
+    public void Load_with_corrupt_json_returns_safe_defaults()
+    {
+        using var directory = new TempDirectory();
+        File.WriteAllText(Path.Combine(directory.Path, "settings.json"), "{ not json");
+
+        var loaded = new SettingsStore(directory.Path).Load();
+
+        Assert.False(loaded.AutoConnectLastReceiver);
+        Assert.Null(loaded.LastReceiverKey);
+        Assert.Null(loaded.SenderDeviceId);
+    }
+
+    [Fact]
+    public void Update_reloads_before_saving_so_concurrent_writers_do_not_clobber()
+    {
+        using var directory = new TempDirectory();
+        var service = new AppSettingsService(new SettingsStore(directory.Path));
+
+        // A second writer persists a field while the first holds a stale snapshot.
+        var senderId = service.EnsureSenderDeviceId();
+        new SettingsStore(directory.Path).Save(new AppSettings
+        {
+            SenderDeviceId = senderId,
+            SelectedRenderDeviceId = "written-elsewhere"
+        });
+
+        service.Update(settings => settings.LastReceiverKey = "kitchen");
+
+        var loaded = new SettingsStore(directory.Path).Load();
+        Assert.Equal("kitchen", loaded.LastReceiverKey);
+        Assert.Equal("written-elsewhere", loaded.SelectedRenderDeviceId);
+        Assert.Equal(senderId, loaded.SenderDeviceId);
+    }
+
+    [Fact]
+    public void EnsureSenderDeviceId_persists_one_id_across_services()
+    {
+        using var directory = new TempDirectory();
+
+        var first = new AppSettingsService(new SettingsStore(directory.Path)).EnsureSenderDeviceId();
+        var second = new AppSettingsService(new SettingsStore(directory.Path)).EnsureSenderDeviceId();
+
+        Assert.Equal(first, second);
+        Assert.True(SenderIdentity.LooksLikeMac(first));
+    }
+
+}

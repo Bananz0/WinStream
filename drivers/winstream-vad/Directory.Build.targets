@@ -1,0 +1,16 @@
+<Project>
+  <!-- INF targets Windows 11+ (NTamd64.10.0...22000). Default 10_X64 fails Inf2Cat. -->
+  <PropertyGroup>
+    <Inf2CatWindowsVersionList Condition="'$(Inf2CatWindowsVersionList)' == ''">10_CO_X64,10_NI_X64,10_GE_X64</Inf2CatWindowsVersionList>
+  </PropertyGroup>
+
+  <Target Name="EnsureInfUtf16Bom"
+          BeforeTargets="Inf2Cat"
+          Condition="'$(DriverType)' == 'Package' and '$(Inf2CatSource)' != '' and Exists('$(MSBuildThisFileDirectory)ensure-inf-bom.ps1')">
+    <!-- Trim trailing slash so PowerShell -Path "dir\" does not swallow the closing quote. -->
+    <PropertyGroup>
+      <_InfBomDir>$([System.String]::Copy('$(Inf2CatSource)').TrimEnd('\'))</_InfBomDir>
+    </PropertyGroup>
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)ensure-inf-bom.ps1&quot; -Path &quot;$(_InfBomDir)&quot;" />
+  </Target>
+</Project>

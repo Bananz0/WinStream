@@ -1,101 +1,155 @@
 # WinStream
 
-## AirPlay Audio Sender for Windows
+Tray-first **AirPlay audio sender** for Windows (WinUI 3 / .NET 8 / MSIX).
 
-Stream audio seamlessly from your Windows PC to a wide range of AirPlay-compatible devices, including HomePod, Bose speakers, Sonos systems, Airport Express, iMacs, and more.
+Stream system audio from a Windows PC to classic AirPlay / RAOP receivers (HomePod, Apple TV, AirPort Express, and many third-party speakers). The Store SKU uses **WASAPI loopback** — no kernel driver in the MSIX.
 
-### Key Features
+## Features
 
-* **Effortless AirPlay Integration:** Send audio directly from your Windows applications to AirPlay receivers on your network.
-* **Virtual Audio Device:** Capture system-wide audio using the dedicated WinStream virtual audio device for comprehensive streaming capabilities.
-* **Broad Receiver Compatibility:** Stream to various AirPlay-enabled devices, enhancing your audio experience across diverse ecosystems.
-* **Simplified Setup:** User-friendly installation and intuitive configuration options prioritize ease of use.
-* **Volume Control:** Adjust audio levels directly from Windows, seamlessly integrating with your system's audio controls.
-* **Low Latency:** Optimized for minimal delay, ensuring your audio stays in sync.
+- Single-instance tray app (settings close hides; Quit exits)
+- WASAPI loopback capture with render-endpoint picker + level meter
+- Classic RAOP: RTSP handshake, ALAC, AES, RTP, sync/timing, volume
+- Multi-room fan-out with Degraded / Reconnecting resilience
+- Settings persistence; optional experimental AirPlay 2 **gate** (media path not production-ready)
+- Optional virtual audio driver track **outside** Store (`drivers/winstream-vad/`)
+- Off-by-default **WinStream Link** companion path (`tools/LinkRx`, `tools/LinkRx.Pi`) — not AirPlay, see below
 
-### How It Works
 
-WinStream creates a virtual audio device on your Windows system, acting as a bridge to capture system audio and transmit it to AirPlay receivers on your network. The captured audio stream is then played back on the chosen AirPlay device in real-time.
 
-### Installation
+## Requirements
 
-1. Download the latest release from the [Releases](https://github.com/bananz0/WinStream/releases) page.
-2. Run the installer and follow the on-screen instructions.
-3. Restart your computer to ensure all components are properly initialized.
+- Windows 10 1809+ (x64 recommended)
+- .NET 8 Windows Desktop / Windows App SDK (for building from source)
+- Speakers/receivers that accept classic RAOP audio
 
-### Usage
 
-1. **Selecting WinStream Audio Device:**
-   * Open Windows Sound settings (right-click the speaker icon in the system tray).
-   * Under "Choose your output device," select "WinStream Virtual Audio Device."
 
-2. **Connecting to AirPlay Receivers:**
-   * Open the WinStream application from your Start menu or desktop.
-   * Click "Scan for Devices" to discover available AirPlay receivers.
-   * Select your desired AirPlay device from the list.
-   * Click "Connect" to start streaming.
+## Build
 
-3. **Adjusting Volume:**
-   * Use Windows volume controls as normal - WinStream will respect these settings.
-   * Fine-tune volume within the WinStream application if needed.
+```powershell
+dotnet build WinStream.sln -c Release -p:Platform=x64
+dotnet test WinStream.Tests -c Release
+```
 
-### Requirements
 
-* Windows 10 (64-bit) or later
-* .NET Framework 4.7.2 or higher
 
-### Building from Source
+### VS Code / Cursor
 
-1. Clone the repository: `git clone https://github.com/bananz0/WinStream.git`
-2. Open the solution in Visual Studio 2019 or later.
-3. Build the solution in Release mode.
-4. The driver components require the Windows Driver Kit (WDK) to compile.
+Use the Run and Debug configs (`.vscode/launch.json`):
 
-### Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for more information on how to get involved.
+| Config                              | What it does                                                |
+| ----------------------------------- | ----------------------------------------------------------- |
+| **WinStream: Debug (Unpackaged)**   | Builds Debug x64 unpackaged and launches under the debugger |
+| **WinStream: Release (Unpackaged)** | Same for Release                                            |
+| **WinStream: Attach**               | Attach to a running `WinStream.exe`                         |
 
-#### Completed:
-- [x] Basic UI setup
-- [x] AirPlay device discovery implementation
 
-#### In Progress:
-- [ ] AirPlay connection authentication
-- [ ] Audio streaming to AirPlay devices
+Tasks (Terminal → Run Task):
 
-#### TODO:
-- [ ] Develop Windows audio driver for virtual audio device
-- [ ] Implement volume control integration with Windows
-- [ ] Add error handling and recovery mechanisms
-- [ ] Optimize for low latency streaming
-- [ ] Implement RTP packet creation and sending
-- [ ] Handle RTCP (RTP Control Protocol) for quality control
-- [ ] Add support for multiple simultaneous AirPlay receivers
-- [ ] Create installer for easy deployment
-- [ ] Write comprehensive documentation and user guide
-- [ ] Implement automatic updates mechanism
-- [ ] Add logging system for troubleshooting
-- [ ] Conduct thorough testing across various Windows versions and AirPlay devices
-- [ ] Optimize UI for better user experience
-- [ ] Implement settings persistence between sessions
 
-### Contributing
+| Task                            | What it does                                            |
+| ------------------------------- | ------------------------------------------------------- |
+| `build-debug` / `build-release` | Unpackaged builds                                       |
+| `build-and-install-release`     | Signed Release MSIX → trust cert → install (Start Menu) |
+| `build-release-msix`            | Build/sign only (no install)                            |
+| `ensure-package-certificate`    | Create/reuse PFX under secrets                          |
 
-We welcome contributions! If you'd like to help with any of the TODO items or have other improvements in mind, please see our [Contributing Guidelines](CONTRIBUTING.md) for more information on how to get involved.
 
-### Acknowledgements
 
-WinStream's development was greatly aided by these valuable resources:
 
-* [Zeroconf](https://github.com/novotnyllc/Zeroconf): Bonjour support for .NET, enabling AirPlay service discovery.
-* [AirPlay Protocol Documentation](https://nto.github.io/AirPlay.html): Comprehensive explanation of the AirPlay protocol.
-* [Airtunes2 Protocol Documentation](https://git.zx2c4.com/Airtunes2): Details on AirPlay conventions and message formats.
-* [Emanuel Cozzi's AirPlay2 Documentation](https://emanuelecozzi.net/docs/airplay2/): Inspiration for AirPlay development efforts.
+### Release install (signed, like a normal Windows app)
 
-### License
+1. Copy `.env.example` → `.env` and set `WINSTREAM_SECRETS_DIR` to your local secrets directory.
+2. Run:
 
-WinStream is released under The Unlicense. This means you can do whatever you want with this software. For more information, please see the [LICENSE](LICENSE) file or visit [unlicense.org](https://unlicense.org).
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-and-install-release.ps1
+```
 
-### Disclaimer
+This creates `WINSTREAM_SECRETS_DIR\windows\winstream-package.pfx` (once), builds a self-contained signed MSIX under `artifacts/msix/`, trusts the public CER (LocalMachine Root via one UAC prompt), and installs via `Add-AppxPackage`. Launch **WinStream** from the Start Menu afterward.
 
-WinStream is an independent project and is not affiliated with, authorized, maintained, sponsored, or endorsed by Apple Inc. or any of its affiliates. The use of the AirPlay protocol is entirely at your own discretion and responsibility.
+Signing password lives only in `.env` (`WINSTREAM_PACKAGE_CERTIFICATE_PASSWORD`) — never commit `.env` or `*.pfx`.
+
+## Usage (short)
+
+1. Run the app → tray icon appears.
+2. Open settings → pick capture device → Discover → Connect.
+3. Play audio on Windows; adjust stream volume in the app.
+4. Quit from the tray menu when finished.
+
+Full steps: [docs/user-guide.md](docs/user-guide.md)
+
+## WinStream Link (experimental companion)
+
+A separate companion path to a receiver you run yourself — **not** AirPlay, and it cannot reach a HomePod. Disabled unless `LinkFeatureEnabled` is set; when enabled it is mutually exclusive with AirPlay output. Run `tools/LinkRx` (Windows) or `tools/LinkRx.Pi` (Raspberry Pi + ALSA), then Scan or type the IP in the app. The UI only shows **8–10 ms** after a recorded Ethernet lab measurement; ordinary loopback and Wi‑Fi still stream without that claim.
+
+The 8–10 ms average target is **not** validated: it requires the test-signed virtual audio driver and a wired-lab measurement per [docs/testing/link-e2e-measurement.md](docs/testing/link-e2e-measurement.md).
+
+## Packaging / Store
+
+- Manifest: `WinStream/Package.appxmanifest`
+- Local signed sideload: `scripts/build-and-install-release.ps1` (uses `.env` + `WINSTREAM_SECRETS_DIR\windows\*.pfx`)
+- Capability justifications: [docs/store/capability-justifications.md](docs/store/capability-justifications.md)
+- Device test matrix: [docs/testing/device-matrix.md](docs/testing/device-matrix.md)
+
+**Do not** ship `.sys` drivers in the Store package. Store submission still needs Partner Center publisher identity (separate from the local sideload cert).
+
+## Project layout
+
+
+| Path                     | Role                                    |
+| ------------------------ | --------------------------------------- |
+| `WinStream/`             | WinUI app, tray, WASAPI, RAOP session   |
+| `WinStream.Core/`        | Testable protocol/audio/settings        |
+| `WinStream.Tests/`       | xUnit tests                             |
+| `docs/`                  | Plan, research, user guide, Store notes |
+| `drivers/winstream-vad/` | Optional non-Store driver scaffold      |
+| `tools/LinkRx*/`         | WinStream Link companion receivers      |
+
+
+
+
+## Status
+
+This branch (`feat/winstream-full-product`) is a **full-product integration** PR against [`bananz0/WinStream`](https://github.com/bananz0/WinStream) `master`. It turns the original RAOP discovery prototype into a tray-first Windows sender with classic multi-room AirPlay, an experimental AirPlay 2 path, optional virtual-driver work, and signed sideload packaging.
+
+### What this PR delivers
+
+| Area | Delivered |
+| --- | --- |
+| **Application shell** | Single-instance WinUI 3 tray app, settings persistence, branded MSIX packaging |
+| **Capture** | WASAPI loopback with endpoint picker and level meter; optional event-driven capture for low-latency presets |
+| **Classic RAOP** | RTSP, ALAC, AES, RTP, sync/timing, volume, multi-room fan-out with Degraded / Reconnecting states |
+| **AirPlay 2 (gated)** | HKP pairing, encrypted RTSP, RECORD / ALAC RTP, PTP slave, prefer-AP2 routing when capable |
+| **Pairing & passwords** | Persistent pairing store, AirPlay Receiver password prompts, RTSP Digest auth, keyed single-flight dialogs |
+| **Discovery** | mDNS merge/retention so streaming receivers and password badges stay stable across passes |
+| **Latency control** | **Auto** starts near ~50 ms and adjusts up/down under delivery pressure; **Extreme** is raise-only through a short ladder |
+| **Live quality UI** | Exact buffer + measured send rate in the status pill; detailed metrics flyout while streaming |
+| **Send path** | Absolute packet pacing, shared MMCSS Pro Audio elevation, pressure-window auto-latency |
+| **Auto-connect** | Remember and reconnect the last receiver; honest failure copy for auth and network errors |
+| **WinStream Link (off by default)** | Companion receiver tools (`tools/LinkRx`, `tools/LinkRx.Pi`); mutually exclusive with AirPlay output |
+| **Virtual driver scaffold** | Non-Store driver source, installer UI, and release docs under `drivers/winstream-vad/` |
+| **Local release install** | `scripts/build-and-install-release.ps1` — self-signed MSIX, cert trust, Start Menu install |
+| **Tests** | **695** xUnit tests covering protocol, pacing, pairing, discovery, and UI copy helpers |
+
+### Still pending (not blocking merge review)
+
+| Item | Notes |
+| --- | --- |
+| **Device-matrix sign-off** | Manual validation on real Mac / HomePod / third-party RAOP targets ([device matrix checklist](docs/testing/device-matrix.md)) |
+| **Microsoft Store submission** | Partner Center publisher identity and production signing — separate from local sideload cert |
+| **AirPlay 2 production gate** | AP2 media path remains experimental until broader hardware soak passes |
+| **Virtual audio driver release** | Test-signed / attestation build, WHQL or equivalent, GitHub Releases pipeline for `.sys` + installer |
+| **WinStream Link SLA claim** | 8–10 ms UI claim requires wired-lab measurement with the virtual driver ([measurement gate](docs/testing/link-e2e-measurement.md)) |
+| **Sub-50 ms end-to-end proof** | Virtual-driver capture path and Extreme/Auto tuning need sustained soak on target hardware |
+
+### Branch hygiene
+
+- Working plans, research, and code-review reports live under local `docs/` (gitignored).
+- Secrets stay in `.env` + `WINSTREAM_SECRETS_DIR` — never committed.
+- Test fixtures use fictional RFC 5737 addresses and device IDs only.
+
+## License
+
+[LICENSE.txt](LICENSE.txt) (Unlicense).

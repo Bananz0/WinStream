@@ -3,6 +3,13 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Local env / packaging secrets (copy from .env.example)
+.env
+.env.local
+
+# Working docs (plans, research, review reports) stay local
+docs/
+
 # User-specific files
 *.rsuser
 *.suo
@@ -222,6 +229,10 @@ _pkginfo.txt
 *.appx
 *.appxbundle
 *.appxupload
+*.msix
+*.msixbundle
+artifacts/msix/
+artifacts/dev-cert-probe/
 
 # Visual Studio cache files
 # files ending in .cache can be ignored
@@ -239,6 +250,21 @@ ClientBin/
 *.pfx
 *.publishsettings
 orleans.codegen.cs
+
+# WinStream virtual driver generated/signing artifacts.
+# Keep driver/installer source (including authored .inf files) tracked.
+drivers/winstream-vad/**/*.sys
+drivers/winstream-vad/**/*.cat
+drivers/winstream-vad/**/*.cer
+drivers/winstream-vad/**/*.cab
+drivers/winstream-vad/**/*.hlkx
+drivers/winstream-vad/**/*-package.zip
+drivers/winstream-vad/package/
+drivers/winstream-vad/packages/
+drivers/winstream-vad/**/x64/
+drivers/winstream-vad/**/ARM64/
+drivers/winstream-vad/**/obj/
+tools/WinStream.DriverInstaller/publish/
 
 # Including strong name files can present a security risk
 # (https://github.com/github/gitignore/pull/2483#issue-259490424)

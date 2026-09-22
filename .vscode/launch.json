@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "WinStream: Debug (Unpackaged)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-debug",
+      "program": "${workspaceFolder}/WinStream/bin/x64/Debug/net8.0-windows10.0.19041.0/WinStream.exe",
+      "cwd": "${workspaceFolder}/WinStream",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+    {
+      "name": "WinStream: Release (Unpackaged)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-release",
+      "program": "${workspaceFolder}/WinStream/bin/x64/Release/net8.0-windows10.0.19041.0/WinStream.exe",
+      "cwd": "${workspaceFolder}/WinStream",
+      "console": "internalConsole",
+      "stopAtEntry": false,
+      "env": {
+        "DOTNET_ENVIRONMENT": "Production"
+      }
+    },
+    {
+      "name": "WinStream: Attach",
+      "type": "coreclr",
+      "request": "attach",
+      "processName": "WinStream.exe"
+    }
+  ]
+}

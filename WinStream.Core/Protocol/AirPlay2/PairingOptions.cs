@@ -1,0 +1,40 @@
+using WinStream.Core.Persistence;
+
+namespace WinStream.Core.Protocol.AirPlay2;
+
+/// <summary>
+/// Everything the control channel needs to prefer a stored HomeKit pairing over
+/// transient setup. The caller owns persistence: the protocol only reads
+/// <see cref="StoredCredentials"/> and reports outcomes back through the callbacks.
+/// </summary>
+public sealed class PairingOptions
+{
+    /// <summary>Identity from a previous pair-setup, or <c>null</c> to pair fresh.</summary>
+    public PairingCredentials? StoredCredentials { get; init; }
+
+    /// <summary>
+    /// Called after the receiver shows its AirPlay code. Return the digits, or
+    /// <c>null</c> to skip persistent pairing and fall back to transient.
+    /// </summary>
+    public Func<CancellationToken, Task<string?>>? RequestPinAsync { get; init; }
+
+    /// <summary>
+    /// AirPlay Receiver password. Used as the transient HKP SRP secret when that
+    /// path runs, and to answer RTSP Digest <c>WWW-Authenticate</c> after
+    /// persistent pair-verify (SETUP would otherwise 401).
+    /// </summary>
+    public string? ReceiverPassword { get; init; }
+
+    /// <summary>Invoked with a fresh identity so the caller can persist it.</summary>
+    public Action<PairingCredentials>? OnPaired { get; init; }
+
+    /// <summary>Invoked when <see cref="StoredCredentials"/> no longer verify.</summary>
+    public Action? OnStoredCredentialsRejected { get; init; }
+
+    /// <summary>
+    /// Invoked when the session settles on transient pairing, which the receiver
+    /// re-approves on every connect. The caller surfaces that so the user knows why
+    /// the Accept prompt keeps coming back.
+    /// </summary>
+    public Action? OnTransientPairing { get; init; }
+}
