@@ -67,7 +67,7 @@ Tasks (Terminal → Run Task):
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-and-install-release.ps1
 ```
 
-This creates `WINSTREAM_SECRETS_DIR\windows\winstream-package.pfx` (once), builds a self-contained signed MSIX under `artifacts/msix/`, trusts the public CER (LocalMachine Root via one UAC prompt), and installs via `Add-AppxPackage`. Launch **WinStream** from the Start Menu afterward.
+This creates `WINSTREAM_SECRETS_DIR\windows\winstream-package.pfx` (once), builds a signed MSIX under `artifacts/msix/` (framework-dependent on Windows App Runtime 1.5, installed alongside from `Dependencies`), trusts the public CER (LocalMachine Root via one UAC prompt), and installs via `Add-AppxPackage`. Launch **WinStream** from the Start Menu afterward.
 
 Signing password lives only in `.env` (`WINSTREAM_PACKAGE_CERTIFICATE_PASSWORD`) — never commit `.env` or `*.pfx`.
 

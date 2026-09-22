@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   Loads .env, ensures the package signing certificate under WINSTREAM_SECRETS_DIR/windows,
-  aligns Package.appxmanifest Publisher with the cert subject, produces a self-contained
-  sideload MSIX, trusts the public CER in CurrentUser\TrustedPeople, then Add-AppxPackage.
+  aligns Package.appxmanifest Publisher with the cert subject, produces a framework-dependent
+  sideload MSIX (plus the Windows App Runtime dependency), trusts the public CER in CurrentUser\TrustedPeople, then Add-AppxPackage.
 
 .PARAMETER SkipInstall
   Build and sign only; do not install.
@@ -109,7 +109,10 @@ $msbuildProps = @(
     "-p:PackageCertificateThumbprint=$thumbprint"
     '-p:AppxBundle=Never'
     '-p:UapAppxPackageBuildMode=SideloadOnly'
-    '-p:WindowsAppSDKSelfContained=true'
+    # Framework-dependent: a self-contained MSIX ships the WinUI binaries but no
+    # activatableClass registrations, so XamlControlsResources fails to activate (E_FAIL)
+    # and the app crashes at startup. The runtime package is installed alongside below.
+    '-p:WindowsAppSDKSelfContained=false'
     "-p:AppxPackageDir=$($config.PackageOutputDirectory)\"
 )
 
@@ -120,7 +123,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "dotnet build failed with exit code $LASTEXITCODE"
 }
 
+# Skip Dependencies\<arch>\Microsoft.WindowsAppRuntime.*.msix emitted next to the app package.
 $msix = Get-ChildItem -Path $config.PackageOutputDirectory -Filter '*.msix' -Recurse |
+    Where-Object { $_.FullName -notmatch '\\Dependencies\\' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
@@ -198,7 +203,16 @@ if ($SkipInstall) {
 function Install-WinStreamMsix {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    Add-AppxPackage -Path $Path -ForceApplicationShutdown -ErrorAction Stop
+    # Pass the Windows App Runtime framework package so machines without it can install.
+    $dependencyDir = Join-Path (Split-Path -Parent $Path) "Dependencies\$($config.Platform)"
+    $dependencies = @(Get-ChildItem -Path $dependencyDir -Filter '*.msix' -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName })
+
+    if ($dependencies.Count -gt 0) {
+        Add-AppxPackage -Path $Path -DependencyPath $dependencies -ForceApplicationShutdown -ErrorAction Stop
+    } else {
+        Add-AppxPackage -Path $Path -ForceApplicationShutdown -ErrorAction Stop
+    }
 }
 
 Write-Host 'Installing (Add-AppxPackage)...'
