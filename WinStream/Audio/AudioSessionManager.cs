@@ -16,10 +16,13 @@ namespace WinStream.Audio
         // Core components
         private AudioCaptureService _captureService;
         private Mp3TestAudioSource _mp3TestSource;
+        private GeneratedTestAudioSource _generatedTestSource;
         private AlacEncoder _alacEncoder;
+        private AacEldEncoder _aacEldEncoder;
         private RtpAudioStreamer _rtpStreamer;
         private TimingService _timingService;
         private ControlService _controlService;
+        private NodeAirTunesSender _nodeAirTunesSender;
 
         // Session configuration
         private readonly string _deviceIp;
@@ -28,12 +31,21 @@ namespace WinStream.Audio
         private readonly int _timingPort;
         private readonly int _audioLatency;
         private readonly AudioCodec _audioCodec;
+        private readonly byte[] _audioAesKey;
+        private readonly byte[] _audioAesIv;
+        private readonly int _sampleRate;
+        private readonly int _framesPerPacket;
+        private readonly int _bytesPerPacket;
+        private readonly bool _useNodeAirTunesBackend;
 
         // Audio configuration
-        private const int SAMPLE_RATE = 44100;
         private const int CHANNELS = 2;
         private const int BITS_PER_SAMPLE = 16;
-        private const int FRAMES_PER_PACKET = 352;
+        private const int LegacySampleRate = 44100;
+        private const int LegacyFramesPerPacket = 352;
+        private const int AirPlay2SampleRate = 44100;
+        private const int AirPlay2FramesPerPacket = 480;
+        private const int AirPlay2AacBitrate = 192000;
         
         // Streaming state
         private bool _isStreaming;
@@ -65,7 +77,15 @@ namespace WinStream.Audio
         /// <param name="controlPort">Control port from SETUP response</param>
         /// <param name="timingPort">Timing port from SETUP response</param>
         /// <param name="audioLatency">Audio latency in samples from RECORD response</param>
-        public AudioSessionManager(string deviceIp, int serverPort, int controlPort, int timingPort, int audioLatency, AudioCodec audioCodec = AudioCodec.AppleLossless)
+        public AudioSessionManager(
+            string deviceIp,
+            int serverPort,
+            int controlPort,
+            int timingPort,
+            int audioLatency,
+            AudioCodec audioCodec = AudioCodec.AppleLossless,
+            byte[] audioAesKey = null,
+            byte[] audioAesIv = null)
         {
             _deviceIp = deviceIp;
             _serverPort = serverPort;
@@ -73,13 +93,41 @@ namespace WinStream.Audio
             _timingPort = timingPort;
             _audioLatency = audioLatency;
             _audioCodec = audioCodec;
+            _audioAesKey = audioAesKey;
+            _audioAesIv = audioAesIv;
+            _sampleRate = audioCodec == AudioCodec.AirPlay2AacEld ? AirPlay2SampleRate : LegacySampleRate;
+            _framesPerPacket = audioCodec == AudioCodec.AirPlay2AacEld ? AirPlay2FramesPerPacket : LegacyFramesPerPacket;
+            _bytesPerPacket = _framesPerPacket * CHANNELS * (BITS_PER_SAMPLE / 8);
 
             _audioBuffer = new ConcurrentQueue<byte[]>();
 
             Logger.LogMessage($"Audio session manager created for {deviceIp}", "session");
             Logger.LogMessage($"  Server port: {serverPort}, Control port: {controlPort}, Timing port: {timingPort}", "session");
-            Logger.LogMessage($"  Audio latency: {audioLatency} samples ({(audioLatency * 1000.0 / SAMPLE_RATE):F1}ms)", "session");
+            Logger.LogMessage($"  Audio latency: {audioLatency} samples ({(audioLatency * 1000.0 / _sampleRate):F1}ms)", "session");
             Logger.LogMessage($"  Audio codec: {_audioCodec}", "session");
+            Logger.LogMessage($"  Audio encryption: {(_audioAesKey?.Length == 16 && _audioAesIv?.Length == 16 ? "enabled" : "disabled")}", "session");
+        }
+
+        public AudioSessionManager(DeviceInfo deviceInfo, bool requireNodeEnableFlag = true)
+        {
+            _deviceIp = deviceInfo.IPAddress;
+            _serverPort = deviceInfo.Port;
+            _controlPort = 0;
+            _timingPort = 0;
+            _audioLatency = 0;
+            _audioCodec = AudioCodec.AppleLossless;
+            _audioAesKey = null;
+            _audioAesIv = null;
+            _sampleRate = LegacySampleRate;
+            _framesPerPacket = LegacyFramesPerPacket;
+            _bytesPerPacket = _framesPerPacket * CHANNELS * (BITS_PER_SAMPLE / 8);
+            _audioBuffer = new ConcurrentQueue<byte[]>();
+            _useNodeAirTunesBackend = true;
+            _nodeAirTunesSender = new NodeAirTunesSender(deviceInfo, requireNodeEnableFlag);
+
+            Logger.LogMessage(
+                $"Audio session manager created for node_airtunes2 backend: {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}",
+                "session");
         }
 
         /// <summary>
@@ -91,28 +139,59 @@ namespace WinStream.Audio
             {
                 StatusChanged?.Invoke(this, "Initializing audio components...");
 
-                // Create ALAC encoder
-                if (_audioCodec == AudioCodec.AppleLossless)
+                if (_useNodeAirTunesBackend)
                 {
-                    _alacEncoder = new AlacEncoder(FRAMES_PER_PACKET, SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE);
+                    if (!await _nodeAirTunesSender.InitializeAsync())
+                    {
+                        StatusChanged?.Invoke(this, _nodeAirTunesSender.LastErrorMessage);
+                        return false;
+                    }
+
+                    Logger.LogMessage("node_airtunes2 sender backend initialized", "session");
+                }
+                else if (_audioCodec == AudioCodec.AppleLossless)
+                {
+                    _alacEncoder = new AlacEncoder(_framesPerPacket, _sampleRate, CHANNELS, BITS_PER_SAMPLE);
                     Logger.LogMessage("ALAC encoder created", "session");
+                }
+                else if (_audioCodec == AudioCodec.AirPlay2AacEld)
+                {
+                    try
+                    {
+                        _aacEldEncoder = new AacEldEncoder(_sampleRate, CHANNELS, AirPlay2AacBitrate);
+                        Logger.LogMessage("AAC-ELD encoder created", "session");
+                    }
+                    catch (Exception ex)
+                    {
+                        var message = AacEldEncoder.BuildMissingDependencyMessage(ex);
+                        Logger.LogMessage(message, "session");
+                        StatusChanged?.Invoke(this, message);
+                        return false;
+                    }
                 }
                 else
                 {
                     Logger.LogMessage("Using L16 mode - ALAC encoder disabled", "session");
                 }
 
-                // Create RTP streamer
-                _rtpStreamer = new RtpAudioStreamer(_deviceIp, _serverPort, FRAMES_PER_PACKET, SAMPLE_RATE, _audioCodec);
-                Logger.LogMessage("RTP streamer created", "session");
+                if (!_useNodeAirTunesBackend)
+                {
+                    _rtpStreamer = new RtpAudioStreamer(
+                        _deviceIp,
+                        _serverPort,
+                        _framesPerPacket,
+                        _sampleRate,
+                        _audioCodec,
+                        _audioAesKey,
+                        _audioAesIv);
+                    Logger.LogMessage("RTP streamer created", "session");
 
-                // Create timing service
-                _timingService = new TimingService(_deviceIp, _timingPort);
-                Logger.LogMessage("Timing service created", "session");
+                    _timingService = new TimingService(_deviceIp, _timingPort);
+                    Logger.LogMessage("Timing service created", "session");
 
-                // Create control service
-                _controlService = new ControlService(_deviceIp, _controlPort);
-                Logger.LogMessage("Control service created", "session");
+                    _controlService = new ControlService(_deviceIp, _controlPort);
+                    Logger.LogMessage("Control service created", "session");
+                }
 
                 // MP3 test mode can be forced with an environment variable for transport testing.
                 var configuredTestSource = Environment.GetEnvironmentVariable(TestMp3UrlEnvVar);
@@ -127,15 +206,19 @@ namespace WinStream.Audio
                 else
                 {
                     // Create and initialize audio capture
-                    _captureService = new AudioCaptureService(SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE, FRAMES_PER_PACKET);
+                    _captureService = new AudioCaptureService(_sampleRate, CHANNELS, BITS_PER_SAMPLE, _framesPerPacket);
                     
                     if (!await _captureService.InitializeAsync() || !await _captureService.CreateLoopbackCaptureAsync())
                     {
                         Logger.LogMessage("Audio capture init failed; falling back to MP3 test source", "session");
                         if (!await TryInitializeMp3TestSourceAsync(DefaultTestMp3Url))
                         {
-                            StatusChanged?.Invoke(this, "Failed to initialize audio capture and MP3 fallback");
-                            return false;
+                            Logger.LogMessage("MP3 fallback init failed; falling back to generated tone source", "session");
+                            if (!await TryInitializeGeneratedTestSourceAsync())
+                            {
+                                StatusChanged?.Invoke(this, "Failed to initialize audio capture and all fallback audio sources");
+                                return false;
+                            }
                         }
                     }
                     else
@@ -174,27 +257,34 @@ namespace WinStream.Audio
                 _isStreaming = true;
                 _streamingCts = new CancellationTokenSource();
 
-                // Start timing service first
-                _timingService.Start();
-                await Task.Delay(100); // Let timing sync establish
+                if (_useNodeAirTunesBackend)
+                {
+                    StatusChanged?.Invoke(this, "Starting node_airtunes2 sender...");
+                    await _nodeAirTunesSender.StartAsync(_streamingCts.Token);
+                }
+                else
+                {
+                    _timingService.Start();
+                    await Task.Delay(100); // Let timing sync establish
 
-                // Start control service
-                _controlService.Start();
+                    _controlService.Start();
+                    await _timingService.SendTimingRequest();
 
-                // Send initial timing sync
-                await _timingService.SendTimingRequest();
-
-                // Pre-buffer with silence to match audio latency
-                StatusChanged?.Invoke(this, "Pre-buffering...");
-                int prebufferPackets = _audioLatency / FRAMES_PER_PACKET;
-                Logger.LogMessage($"Pre-buffering {prebufferPackets} silence packets", "session");
-                
-                await _rtpStreamer.SendSilenceAsync(prebufferPackets);
+                    StatusChanged?.Invoke(this, "Pre-buffering...");
+                    int prebufferPackets = _audioLatency / _framesPerPacket;
+                    Logger.LogMessage($"Pre-buffering {prebufferPackets} silence packets", "session");
+                    
+                    await SendSilencePacketsAsync(prebufferPackets, _streamingCts.Token);
+                }
 
                 // Start active audio source
                 if (_useMp3TestSource)
                 {
                     _mp3TestSource.Start();
+                }
+                else if (_generatedTestSource != null)
+                {
+                    _generatedTestSource.Start();
                 }
                 else
                 {
@@ -241,6 +331,10 @@ namespace WinStream.Audio
             {
                 _mp3TestSource?.Stop();
             }
+            else if (_generatedTestSource != null)
+            {
+                _generatedTestSource?.Stop();
+            }
             else
             {
                 _captureService?.StopCapture();
@@ -248,6 +342,10 @@ namespace WinStream.Audio
             _controlService?.Stop();
             _timingService?.Stop();
             _rtpStreamer?.StopStreaming();
+            if (_useNodeAirTunesBackend)
+            {
+                await _nodeAirTunesSender.StopAsync();
+            }
 
             // Clear buffer
             while (_audioBuffer.TryDequeue(out _)) { }
@@ -278,7 +376,7 @@ namespace WinStream.Audio
         /// </summary>
         private async Task StreamingLoop(CancellationToken cancellationToken)
         {
-            var packetBuffer = new byte[FRAMES_PER_PACKET * CHANNELS * (BITS_PER_SAMPLE / 8)];
+            var packetBuffer = new byte[_bytesPerPacket];
             int packetBufferOffset = 0;
             int packetsSent = 0;
 
@@ -306,23 +404,14 @@ namespace WinStream.Audio
                                 continue;
                             }
 
-                            if (_audioCodec == AudioCodec.AppleLossless)
-                            {
-                                // Encode to ALAC
-                                var alacData = _alacEncoder.Encode(packetBuffer);
-                                await _rtpStreamer.SendAudioPacketAsync(alacData);
-                            }
-                            else
-                            {
-                                await _rtpStreamer.SendPcmPacketAsync(packetBuffer);
-                            }
+                            await SendEncodedPacketAsync(packetBuffer);
                             packetsSent++;
 
                             // Update control service with current timestamp
-                            _controlService.UpdateTimestamp(_rtpStreamer.CurrentTimestamp);
+                            _controlService?.UpdateTimestamp(_rtpStreamer.CurrentTimestamp);
 
                             // Timing control - maintain proper packet rate
-                            expectedTime += (FRAMES_PER_PACKET * 1000.0) / SAMPLE_RATE; // ~8ms per packet
+                            expectedTime += (_framesPerPacket * 1000.0) / _sampleRate;
                             var actualTime = stopwatch.Elapsed.TotalMilliseconds;
                             var sleepTime = expectedTime - actualTime;
                             
@@ -343,7 +432,7 @@ namespace WinStream.Audio
                             // Periodic logging
                             if (packetsSent % 500 == 0)
                             {
-                                Logger.LogMessage($"Streamed {packetsSent} packets ({packetsSent * FRAMES_PER_PACKET / SAMPLE_RATE:F1}s)", "session");
+                                Logger.LogMessage($"Streamed {packetsSent} packets ({packetsSent * _framesPerPacket / _sampleRate:F1}s)", "session");
                             }
                         }
                     }
@@ -352,8 +441,8 @@ namespace WinStream.Audio
                         // No data available, send silence to keep stream alive
                         if (packetBufferOffset == 0)
                         {
-                            await _rtpStreamer.SendSilenceAsync(1);
-                            expectedTime += (FRAMES_PER_PACKET * 1000.0) / SAMPLE_RATE;
+                            await SendSilencePacketsAsync(1, cancellationToken);
+                            expectedTime += (_framesPerPacket * 1000.0) / _sampleRate;
                         }
                         await Task.Delay(1, cancellationToken);
                     }
@@ -383,17 +472,17 @@ namespace WinStream.Audio
         {
             Logger.LogMessage($"Sending {frequencyHz}Hz test tone for {durationMs}ms", "session");
 
-            int totalSamples = (SAMPLE_RATE * durationMs) / 1000;
-            int totalPackets = totalSamples / FRAMES_PER_PACKET;
+            int totalSamples = (_sampleRate * durationMs) / 1000;
+            int totalPackets = totalSamples / _framesPerPacket;
             
             for (int packet = 0; packet < totalPackets; packet++)
             {
-                var pcmData = new byte[FRAMES_PER_PACKET * CHANNELS * (BITS_PER_SAMPLE / 8)];
+                var pcmData = new byte[_bytesPerPacket];
                 
-                for (int frame = 0; frame < FRAMES_PER_PACKET; frame++)
+                for (int frame = 0; frame < _framesPerPacket; frame++)
                 {
-                    int sampleIndex = packet * FRAMES_PER_PACKET + frame;
-                    double t = (double)sampleIndex / SAMPLE_RATE;
+                    int sampleIndex = packet * _framesPerPacket + frame;
+                    double t = (double)sampleIndex / _sampleRate;
                     short sample = (short)(Math.Sin(2 * Math.PI * frequencyHz * t) * 16000);
                     
                     int offset = frame * 4; // 2 channels * 2 bytes
@@ -405,19 +494,11 @@ namespace WinStream.Audio
                     pcmData[offset + 3] = (byte)((sample >> 8) & 0xFF);
                 }
 
-                if (_audioCodec == AudioCodec.AppleLossless)
-                {
-                    var alacData = _alacEncoder.Encode(pcmData);
-                    await _rtpStreamer.SendAudioPacketAsync(alacData);
-                }
-                else
-                {
-                    await _rtpStreamer.SendPcmPacketAsync(pcmData);
-                }
+                await SendEncodedPacketAsync(pcmData);
                 
-                _controlService.UpdateTimestamp(_rtpStreamer.CurrentTimestamp);
+                _controlService?.UpdateTimestamp(_rtpStreamer.CurrentTimestamp);
                 
-                await Task.Delay((FRAMES_PER_PACKET * 1000) / SAMPLE_RATE);
+                await Task.Delay((_framesPerPacket * 1000) / _sampleRate);
             }
 
             Logger.LogMessage("Test tone complete", "session");
@@ -425,7 +506,7 @@ namespace WinStream.Audio
 
         private async Task<bool> TryInitializeMp3TestSourceAsync(string source)
         {
-            _mp3TestSource = new Mp3TestAudioSource(SAMPLE_RATE, CHANNELS, BITS_PER_SAMPLE, FRAMES_PER_PACKET);
+            _mp3TestSource = new Mp3TestAudioSource(_sampleRate, CHANNELS, BITS_PER_SAMPLE, _framesPerPacket);
             if (!await _mp3TestSource.InitializeAsync(source))
             {
                 return false;
@@ -438,6 +519,62 @@ namespace WinStream.Audio
             return true;
         }
 
+        private async Task<bool> TryInitializeGeneratedTestSourceAsync()
+        {
+            _generatedTestSource = new GeneratedTestAudioSource(_sampleRate, CHANNELS, BITS_PER_SAMPLE, _framesPerPacket);
+            if (!await _generatedTestSource.InitializeAsync())
+            {
+                _generatedTestSource.Dispose();
+                _generatedTestSource = null;
+                return false;
+            }
+
+            _generatedTestSource.AudioDataAvailable += OnAudioDataAvailable;
+            _audioSourceName = _generatedTestSource.SourceDescription;
+            _useMp3TestSource = false;
+            Logger.LogMessage($"Using generated fallback audio source: {_audioSourceName}", "session");
+            return true;
+        }
+
+        private async Task SendSilencePacketsAsync(int packetCount, CancellationToken cancellationToken)
+        {
+            var silence = new byte[_bytesPerPacket];
+            for (var i = 0; i < packetCount && !cancellationToken.IsCancellationRequested; i++)
+            {
+                await SendEncodedPacketAsync(silence);
+
+                await Task.Delay((_framesPerPacket * 1000) / _sampleRate, cancellationToken);
+            }
+        }
+
+        private async Task SendEncodedPacketAsync(byte[] pcmData)
+        {
+            if (_useNodeAirTunesBackend)
+            {
+                await _nodeAirTunesSender.WriteAudioAsync(pcmData);
+                return;
+            }
+
+            if (_audioCodec == AudioCodec.AppleLossless)
+            {
+                var alacData = _alacEncoder.Encode(pcmData);
+                await _rtpStreamer.SendAudioPacketAsync(alacData);
+                return;
+            }
+
+            if (_audioCodec == AudioCodec.AirPlay2AacEld)
+            {
+                var aacData = _aacEldEncoder.Encode(pcmData);
+                if (aacData.Length > 0)
+                {
+                    await _rtpStreamer.SendRawAudioPayloadPacketAsync(aacData);
+                }
+                return;
+            }
+
+            await _rtpStreamer.SendPcmPacketAsync(pcmData);
+        }
+
         public void Dispose()
         {
             StopStreamingAsync().Wait(2000);
@@ -445,10 +582,13 @@ namespace WinStream.Audio
             _streamingCts?.Dispose();
             _captureService?.Dispose();
             _mp3TestSource?.Dispose();
+            _generatedTestSource?.Dispose();
             _alacEncoder?.Dispose();
+            _aacEldEncoder?.Dispose();
             _rtpStreamer?.Dispose();
             _timingService?.Dispose();
             _controlService?.Dispose();
+            _nodeAirTunesSender?.Dispose();
         }
     }
 }

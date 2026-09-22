@@ -22,16 +22,27 @@ namespace WinStream.Network
         public int AudioLatency { get; set; }
         public string SessionId { get; set; }
         public AudioCodec AudioCodec { get; set; }
+        public byte[] AudioAesKey { get; set; }
+        public byte[] AudioAesIv { get; set; }
         public AudioSessionManager AudioSession { get; set; }
     }
 
     public static class DeviceConnection
     {
-        private const string ClientSessionId = "3413821438";
+        internal const string ClientSessionId = "3413821438";
         private const int FramesPerPacket = 352;
         private const string AudioCodecEnvVar = "WINSTREAM_AUDIO_CODEC";
+        private const string ForceAirPlay2MediaSetupEnvVar = "WINSTREAM_FORCE_AIRPLAY2_MEDIA_SETUP";
         private static RSA _rsaPublicKey;
         private static string _storedAppleChallenge; // Store the challenge we send
+
+        private sealed class AnnounceResult
+        {
+            public string Response { get; init; }
+            public byte[] AudioAesKey { get; init; }
+            public byte[] AudioAesIv { get; init; }
+            public bool UsesAudioEncryption => AudioAesKey?.Length == 16 && AudioAesIv?.Length == 16;
+        }
         
         // Current active audio session
         private static AudioSessionManager _currentAudioSession;
@@ -102,6 +113,22 @@ namespace WinStream.Network
             DeviceInfo deviceInfo,
             bool preferAirPlay2Auth = false)
         {
+            if (NodeAirTunesSender.ShouldUseForDevice(deviceInfo))
+            {
+                return CreateNodeAirTunesConnection(deviceInfo, automaticFallback: false);
+            }
+
+            if (ShouldPreferNodeAirTunesMvp(deviceInfo))
+            {
+                if (NodeAirTunesSender.TryResolveDependencies(out _, requireEnableFlag: false))
+                {
+                    Logger.LogMessage(
+                        $"Using node_airtunes2 MVP backend directly for {deviceInfo.DisplayName} because it advertises AirPlay 2 without RSA and supports et=0.",
+                        "authentication");
+                    return CreateNodeAirTunesConnection(deviceInfo, automaticFallback: true);
+                }
+            }
+
             // Check what type of device/key we're dealing with
             if (deviceInfo.IsAirPlay2Device)
             {
@@ -144,7 +171,7 @@ namespace WinStream.Network
                         "Prefer AirPlay 2 auth is enabled; starting with forced auth flow.",
                         "authentication");
                     var forcedFirst = await RunConnectionAttemptAsync(deviceInfo, ipAddress, forceAirPlay2Auth: true);
-                    return forcedFirst;
+                    return TryPromoteNodeAirTunesFallback(deviceInfo, forcedFirst);
                 }
 
                 var firstAttempt = await RunConnectionAttemptAsync(deviceInfo, ipAddress, forceAirPlay2Auth: false);
@@ -156,10 +183,10 @@ namespace WinStream.Network
                         "First ANNOUNCE attempt timed out on AP2 receiver. Retrying with a fresh RTSP connection and forced AirPlay 2 auth.",
                         "authentication");
                     var retryAttempt = await RunConnectionAttemptAsync(deviceInfo, ipAddress, forceAirPlay2Auth: true);
-                    return retryAttempt;
+                    return TryPromoteNodeAirTunesFallback(deviceInfo, retryAttempt);
                 }
 
-                return firstAttempt;
+                return TryPromoteNodeAirTunesFallback(deviceInfo, firstAttempt);
             }
             catch (Exception ex)
             {
@@ -185,6 +212,76 @@ namespace WinStream.Network
                 $"Creating RTSP client for {deviceInfo.DisplayName} at {ipAddress}:{deviceInfo.Port} (forceAuth={forceAirPlay2Auth})",
                 "authentication");
             return await ExecuteRtspSequenceAsync(rtspClient, ipAddress, deviceInfo, forceAirPlay2Auth);
+        }
+
+        private static AirPlayConnectionResult CreateNodeAirTunesConnection(DeviceInfo deviceInfo, bool automaticFallback)
+        {
+            if (!NodeAirTunesSender.TryResolveDependencies(out var dependencyMessage, requireEnableFlag: !automaticFallback))
+            {
+                return new AirPlayConnectionResult
+                {
+                    Success = false,
+                    Message = dependencyMessage
+                };
+            }
+
+            if (deviceInfo.RequiresPairingPin && string.IsNullOrWhiteSpace(AirPlay2AuthService.PeekConfiguredPin()))
+            {
+                return new AirPlayConnectionResult
+                {
+                    Success = false,
+                    RequiresPin = true,
+                    Message = $"Receiver {deviceInfo.DisplayName} requires an AirPlay PIN for the node_airtunes2 backend."
+                };
+            }
+
+            Logger.LogMessage(
+                automaticFallback
+                    ? $"Promoting node_airtunes2 fallback backend for {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}."
+                    : $"Using node_airtunes2 sender backend for {deviceInfo.DisplayName} at {deviceInfo.IPAddress}:{deviceInfo.Port}.",
+                "authentication");
+
+            return new AirPlayConnectionResult
+            {
+                Success = true,
+                Message = automaticFallback
+                    ? $"Using node_airtunes2 fallback backend for {deviceInfo.DisplayName}."
+                    : $"Using node_airtunes2 sender backend for {deviceInfo.DisplayName}.",
+                DeviceIp = NormalizeIpAddress(deviceInfo.IPAddress),
+                ServerPort = deviceInfo.Port,
+                AudioCodec = AudioCodec.AppleLossless,
+                AudioSession = new AudioSessionManager(deviceInfo, requireNodeEnableFlag: !automaticFallback)
+            };
+        }
+
+        private static AirPlayConnectionResult TryPromoteNodeAirTunesFallback(
+            DeviceInfo deviceInfo,
+            AirPlayConnectionResult result)
+        {
+            if (result.Success || !ShouldUseAutomaticNodeFallback(deviceInfo, result.Message))
+            {
+                return result;
+            }
+
+            if (!NodeAirTunesSender.TryResolveDependencies(out var dependencyMessage, requireEnableFlag: false))
+            {
+                Logger.LogMessage(
+                    $"Automatic node_airtunes2 fallback was eligible but unavailable: {dependencyMessage}",
+                    "authentication");
+                return result;
+            }
+
+            Logger.LogMessage(
+                $"Native sender path failed for {deviceInfo.DisplayName} ({result.Message}). Switching to node_airtunes2 fallback.",
+                "authentication");
+            return CreateNodeAirTunesConnection(deviceInfo, automaticFallback: true);
+        }
+
+        private static bool ShouldPreferNodeAirTunesMvp(DeviceInfo deviceInfo)
+        {
+            return deviceInfo.IsAirPlay2Device &&
+                   !deviceInfo.HasRsaPublicKey &&
+                   deviceInfo.SupportsUnencryptedRaop;
         }
         
         /// <summary>
@@ -233,10 +330,36 @@ namespace WinStream.Network
                 AudioCodec = selectedCodec
             };
             var airPlay2AuthCompleted = false;
+            AirPlay2AuthResult airPlay2AuthResult = null;
 
             Logger.LogMessage($"Attempting to connect to {deviceName}...", "authentication");
 
-            string optionsResponse = await SendOptions(rtspClient);
+            // AP2-only receivers (e.g. phone-side AirPlay receiver apps) refuse to answer
+            // any RTSP method until pair-verify completes. When force-auth is requested
+            // up front, run the HAP handshake first and only then probe with OPTIONS.
+            string optionsResponse;
+            if (deviceInfo.IsAirPlay2Device && forceAirPlay2Auth)
+            {
+                Logger.LogMessage("Forced AirPlay 2 auth enabled; running HAP handshake before OPTIONS.", "authentication");
+                var preAuthResult = await AirPlay2AuthService.AuthenticateAndEnableEncryptionAsync(rtspClient, deviceInfo);
+                if (!preAuthResult.Success)
+                {
+                    result.RequiresPin = preAuthResult.PinRequired;
+                    result.Message = preAuthResult.Message;
+                    Logger.LogMessage(result.Message, "authentication");
+                    return result;
+                }
+
+                Logger.LogMessage(preAuthResult.Message, "authentication");
+                airPlay2AuthResult = preAuthResult;
+                airPlay2AuthCompleted = true;
+                optionsResponse = await SendOptions(rtspClient);
+            }
+            else
+            {
+                optionsResponse = await SendOptions(rtspClient);
+            }
+
             if (!IsSuccessResponse(optionsResponse) && deviceInfo.IsAirPlay2Device && IsLikelyAuthRequired(optionsResponse))
             {
                 Logger.LogMessage("OPTIONS indicates authentication is required; starting AirPlay 2 auth.", "authentication");
@@ -250,6 +373,7 @@ namespace WinStream.Network
                 }
 
                 Logger.LogMessage(authResult.Message, "authentication");
+                airPlay2AuthResult = authResult;
                 airPlay2AuthCompleted = true;
                 optionsResponse = await SendOptions(rtspClient);
             }
@@ -275,6 +399,7 @@ namespace WinStream.Network
                 }
 
                 Logger.LogMessage(forcedAuthResult.Message, "authentication");
+                airPlay2AuthResult = forcedAuthResult;
                 airPlay2AuthCompleted = true;
 
                 optionsResponse = await SendOptions(rtspClient);
@@ -286,11 +411,58 @@ namespace WinStream.Network
                 }
             }
 
+            if (deviceInfo.IsAirPlay2Device &&
+                airPlay2AuthCompleted &&
+                ShouldUseAirPlay2MediaSetup(airPlay2AuthResult))
+            {
+                Logger.LogMessage("Using AirPlay 2 binary-plist media SETUP path.", "authentication");
+                var airPlay2Setup = await AirPlay2MediaSetupService.SetupAudioSessionAsync(rtspClient, deviceInfo, airPlay2AuthResult);
+                if (airPlay2Setup.Success)
+                {
+                    result.ServerPort = airPlay2Setup.DataPort;
+                    result.ControlPort = airPlay2Setup.ControlPort;
+                    result.TimingPort = airPlay2Setup.TimingPort;
+                    result.AudioLatency = airPlay2Setup.AudioLatency;
+                    result.AudioCodec = airPlay2Setup.AudioCodec;
+                    result.AudioAesKey = airPlay2Setup.AudioAesKey;
+                    result.AudioAesIv = airPlay2Setup.AudioAesIv;
+                    result.AudioSession = new AudioSessionManager(
+                        ipAddress,
+                        result.ServerPort,
+                        result.ControlPort,
+                        result.TimingPort,
+                        result.AudioLatency,
+                        result.AudioCodec,
+                        result.AudioAesKey,
+                        result.AudioAesIv);
+                    result.Success = true;
+                    result.Message = airPlay2Setup.Message;
+                    Logger.LogMessage(
+                        $"AirPlay 2 media ports: data={result.ServerPort}, control={result.ControlPort}, timing={result.TimingPort}, latency={result.AudioLatency}",
+                        "authentication");
+                    Logger.LogMessage(result.Message, "authentication");
+                    return result;
+                }
+
+                // Binary-plist setup failed (e.g. FairPlay/fp-setup rejected). Fall through to the
+                // standard ANNOUNCE path — the HAP-encrypted RTSP channel is still active.
+                Logger.LogMessage(
+                    $"AirPlay 2 binary-plist SETUP failed ({airPlay2Setup.Message}); falling back to ANNOUNCE path over HAP-encrypted channel.",
+                    "authentication");
+            }
+            else if (deviceInfo.IsAirPlay2Device && airPlay2AuthCompleted)
+            {
+                Logger.LogMessage(
+                    "Skipping AirPlay 2 binary-plist media SETUP (AAC-ELD unavailable); falling back to ANNOUNCE.",
+                    "authentication");
+            }
+
             _storedAppleChallenge = GenerateAppleChallenge();
             Logger.LogMessage($"Generated Apple-Challenge: {_storedAppleChallenge}", "authentication");
             
             Logger.LogMessage($"Attempting ANNOUNCE with codec: {selectedCodec}", "authentication");
-            string announceResponse = await SendAnnounce(rtspClient, ipAddress, _storedAppleChallenge, selectedCodec);
+            var announceResult = await SendAnnounce(rtspClient, ipAddress, _storedAppleChallenge, selectedCodec);
+            string announceResponse = announceResult.Response;
 
             if (!IsSuccessResponse(announceResponse))
             {
@@ -311,21 +483,29 @@ namespace WinStream.Network
                     $"ANNOUNCE failed with codec {selectedCodec}. Retrying with fallback codec {fallbackCodec}.",
                     "authentication");
 
-                var fallbackResponse = await SendAnnounce(rtspClient, ipAddress, _storedAppleChallenge, fallbackCodec);
-                if (!IsSuccessResponse(fallbackResponse))
+                var fallbackAnnounceResult = await SendAnnounce(rtspClient, ipAddress, _storedAppleChallenge, fallbackCodec);
+                if (!IsSuccessResponse(fallbackAnnounceResult.Response))
                 {
-                    result.Message = await DescribeStageFailureAsync("ANNOUNCE", fallbackResponse, deviceInfo, ipAddress, deviceInfo.Port);
+                    result.Message = await DescribeStageFailureAsync("ANNOUNCE", fallbackAnnounceResult.Response, deviceInfo, ipAddress, deviceInfo.Port);
                     Logger.LogMessage(result.Message, "authentication");
                     Logger.LogMessage($"Primary ANNOUNCE response:\n{announceResponse}", "authentication");
-                    Logger.LogMessage($"Fallback ANNOUNCE response:\n{fallbackResponse}", "authentication");
+                    Logger.LogMessage($"Fallback ANNOUNCE response:\n{fallbackAnnounceResult.Response}", "authentication");
                     return result;
                 }
 
                 result.AudioCodec = fallbackCodec;
-                announceResponse = fallbackResponse;
+                announceResult = fallbackAnnounceResult;
+                announceResponse = fallbackAnnounceResult.Response;
                 Logger.LogMessage($"ANNOUNCE fallback succeeded with codec: {fallbackCodec}", "authentication");
             }
             Logger.LogMessage("ANNOUNCE request succeeded", "authentication");
+            result.AudioAesKey = announceResult.AudioAesKey;
+            result.AudioAesIv = announceResult.AudioAesIv;
+            Logger.LogMessage(
+                announceResult.UsesAudioEncryption
+                    ? "RTP audio payload encryption is enabled for this session."
+                    : "RTP audio payload encryption is disabled for this session.",
+                "authentication");
 
             string setupResponse = await SendSetup(rtspClient, ipAddress);
             if (!IsSuccessResponse(setupResponse))
@@ -365,7 +545,9 @@ namespace WinStream.Network
                 result.ControlPort,
                 result.TimingPort,
                 result.AudioLatency,
-                result.AudioCodec);
+                result.AudioCodec,
+                result.AudioAesKey,
+                result.AudioAesIv);
 
             result.Success = true;
             result.Message = $"Successfully connected to {deviceName}!";
@@ -412,6 +594,44 @@ namespace WinStream.Network
         {
             return !string.IsNullOrWhiteSpace(message) &&
                    message.Contains("ANNOUNCE timed out on a non-RSA receiver", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldUseAutomaticNodeFallback(DeviceInfo deviceInfo, string message)
+        {
+            if (deviceInfo == null || !deviceInfo.IsAirPlay2Device || deviceInfo.HasRsaPublicKey)
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            return message.Contains("ANNOUNCE timed out on a non-RSA receiver", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("AirPlay 2 audio SETUP failed", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldUseAirPlay2MediaSetup(AirPlay2AuthResult authResult)
+        {
+            var forceValue = Environment.GetEnvironmentVariable(ForceAirPlay2MediaSetupEnvVar);
+            if (IsEnabledEnvironmentValue(forceValue))
+            {
+                Logger.LogMessage(
+                    $"{ForceAirPlay2MediaSetupEnvVar} is enabled; forcing AirPlay 2 binary-plist media SETUP.",
+                    "authentication");
+                return true;
+            }
+
+            return true;
+        }
+
+        private static bool IsEnabledEnvironmentValue(string value)
+        {
+            return value != null &&
+                   (value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+                    value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                    value.Equals("yes", StringComparison.OrdinalIgnoreCase));
         }
 
         private static async Task<string> DescribeStageFailureAsync(string stage, string response, DeviceInfo deviceInfo, string ipAddress, int port)
@@ -463,11 +683,13 @@ namespace WinStream.Network
             return optionsResponse;
         }
 
-        private static async Task<string> SendAnnounce(RtspClient rtspClient, string ipAddress, string appleChallenge, AudioCodec audioCodec)
+        private static async Task<AnnounceResult> SendAnnounce(RtspClient rtspClient, string ipAddress, string appleChallenge, AudioCodec audioCodec)
         {
             Logger.LogMessage("Preparing SDP data for ANNOUNCE request...", "authentication");
             
             string sdp;
+            byte[] audioAesKey = null;
+            byte[] audioAesIv = null;
             
             // Check if we have a valid RSA key for encryption
             if (_rsaPublicKey != null)
@@ -479,6 +701,8 @@ namespace WinStream.Network
                 string aesIv = GenerateBase64AesIv(out aesIvBytes);
                 string encryptedAesKey = EncryptAesKeyWithRsa(aesKeyBytes, _rsaPublicKey);
                 sdp = PrepareSdpData(rtspClient.LocalIp, ipAddress, ClientSessionId, FramesPerPacket, encryptedAesKey, aesIv, audioCodec);
+                audioAesKey = aesKeyBytes;
+                audioAesIv = aesIvBytes;
             }
             else
             {
@@ -492,7 +716,12 @@ namespace WinStream.Network
             var sessionUri = $"rtsp://{rtspClient.LocalIp}/{ClientSessionId}";
             string announceResponse = await rtspClient.SendAnnounce(sessionUri, sdp, appleChallenge);
             Logger.LogMessage($"ANNOUNCE Response:\n{announceResponse}", "authentication");
-            return announceResponse;
+            return new AnnounceResult
+            {
+                Response = announceResponse,
+                AudioAesKey = audioAesKey,
+                AudioAesIv = audioAesIv
+            };
         }
 
         private static async Task<string> SendSetup(RtspClient rtspClient, string ipAddress)

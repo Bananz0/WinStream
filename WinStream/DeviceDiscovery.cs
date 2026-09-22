@@ -101,9 +101,10 @@ namespace WinStream.Network
                     }
 
                     var publicKey = GetTxtRecordValue(host, "pk");
+                    var matchingAirPlayHost = airplayResults.FirstOrDefault(h => h.IPAddresses.Contains(ipAddress));
                     currentDevices.Add(new DeviceInfo
                     {
-                        DisplayName = ExtractDeviceName(host, airplayResults),
+                        DisplayName = ExtractDeviceName(host, matchingAirPlayHost),
                         IPAddress = ipAddress,
                         Port = service.Port,
                         ToolTipText = $"IP Address: {ipAddress}",
@@ -122,11 +123,12 @@ namespace WinStream.Network
                         RsaPublicKey = ParseRsaPublicKey(publicKey),
                         SupportedCodecs = GetTxtRecordValue(host, "cn"),
                         EncryptionTypes = GetTxtRecordValue(host, "et"),
+                        RawTxtRecords = GetTxtRecords(host, matchingAirPlayHost),
                         HouseholdID = GetTxtRecordValue(host, "hmid"),
                         GroupUUID = GetTxtRecordValue(host, "gid"),
                         IsGroupLeader = TryParseBoolean(GetTxtRecordValue(host, "igl")),
                         RequiredSenderFeatures = TryParseLong(GetTxtRecordValue(host, "rsf")),
-                        SystemFlags = TryParseLong(GetTxtRecordValue(host, "flags"))
+                        SystemFlags = TryParseLong(GetTxtRecordValue(host, "sf"), GetTxtRecordValue(host, "flags"))
                     });
                 }
 
@@ -237,14 +239,74 @@ namespace WinStream.Network
             return string.Empty;
         }
 
+        private static string[] GetTxtRecords(params IZeroconfHost[] hosts)
+        {
+            var records = new List<string>();
+
+            foreach (var host in hosts)
+            {
+                if (host?.Services == null)
+                {
+                    continue;
+                }
+
+                foreach (var service in host.Services.Values)
+                {
+                    if (service.Properties == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var record in service.Properties)
+                    {
+                        foreach (var pair in record)
+                        {
+                            if (string.IsNullOrWhiteSpace(pair.Key))
+                            {
+                                continue;
+                            }
+
+                            records.Add($"{pair.Key}={pair.Value}");
+                        }
+                    }
+                }
+            }
+
+            return records
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(r => r, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
         private static bool TryParseBoolean(string value)
         {
             return bool.TryParse(value, out var result) ? result : false;
         }
 
-        private static long TryParseLong(string value)
+        private static long TryParseLong(params string[] values)
         {
-            return long.TryParse(value, out var result) ? result : 0;
+            foreach (var value in values)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                var normalized = value.Trim();
+                if (normalized.StartsWith("0x", StringComparison.OrdinalIgnoreCase) &&
+                    long.TryParse(normalized[2..], System.Globalization.NumberStyles.HexNumber, null, out var hexResult))
+                {
+                    return hexResult;
+                }
+
+                if (long.TryParse(normalized, out var result))
+                {
+                    return result;
+                }
+            }
+
+            return 0;
         }
 
         private static void PrintDeviceInfo(DeviceInfo device)
@@ -276,9 +338,8 @@ namespace WinStream.Network
             Console.WriteLine();
         }
 
-        private static string ExtractDeviceName(IZeroconfHost raopHost, IReadOnlyList<IZeroconfHost> airplayResults)
+        private static string ExtractDeviceName(IZeroconfHost raopHost, IZeroconfHost airplayHost)
         {
-            var airplayHost = airplayResults.FirstOrDefault(h => h.IPAddresses.Contains(raopHost.IPAddresses.FirstOrDefault()));
             return airplayHost?.DisplayName.Split('@').FirstOrDefault() ?? raopHost.DisplayName;
         }
 

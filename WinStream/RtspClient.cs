@@ -13,8 +13,11 @@ namespace WinStream.Network
 {
     public class RtspClient : IDisposable
     {
+        public const string VerboseLoggingEnvironmentVariable = "WINSTREAM_VERBOSE_RTSP";
+
         private readonly TcpClient _client;
         private readonly NetworkStream _stream;
+        private static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan DefaultResponseTimeout = TimeSpan.FromSeconds(8);
         private static readonly TimeSpan HapResponseTimeout = TimeSpan.FromSeconds(4);
         private readonly List<byte> _wireReadBuffer = new();
@@ -44,7 +47,29 @@ namespace WinStream.Network
         {
             _serverIp = serverIp;
             _serverPort = serverPort;
-            _client = new TcpClient(serverIp, serverPort);
+            _client = new TcpClient();
+            try
+            {
+                _client.ConnectAsync(serverIp, serverPort)
+                    .WaitAsync(DefaultConnectTimeout)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (TimeoutException ex)
+            {
+                _client.Dispose();
+                throw new TimeoutException(
+                    $"Unable to open RTSP connection to {serverIp}:{serverPort} within {DefaultConnectTimeout.TotalSeconds:0}s. Confirm the receiver is online, on the same network, and AirPlay Receiver is enabled.",
+                    ex);
+            }
+            catch (SocketException ex)
+            {
+                _client.Dispose();
+                throw new InvalidOperationException(
+                    $"Unable to open RTSP connection to {serverIp}:{serverPort}: {ex.Message} Confirm the receiver is online, on the same network, and AirPlay Receiver is enabled.",
+                    ex);
+            }
+
             _client.NoDelay = true;
             _stream = _client.GetStream();
             _cSeq = 0;
@@ -176,9 +201,14 @@ namespace WinStream.Network
             {
                 var requestBytes = BuildRequestBytes(method, target, protocol, headers, body);
                 var outbound = _hapEncryptionEnabled ? EncryptHapControlPayload(requestBytes) : requestBytes;
+                LogVerboseWire(
+                    $">> {method} {target} {protocol} bodyLen={body?.Length ?? 0} encrypted={_hapEncryptionEnabled}");
                 await _stream.WriteAsync(outbound, 0, outbound.Length);
                 await _stream.FlushAsync();
-                return await ReadResponseAsync(ResolveResponseTimeout(target));
+                var response = await ReadResponseAsync(ResolveResponseTimeout(target));
+                LogVerboseWire(
+                    $"<< {response.StatusLine} bodyLen={response.BodyBytes?.Length ?? 0} encrypted={_hapEncryptionEnabled}");
+                return response;
             }
             catch (Exception ex)
             {
@@ -189,6 +219,17 @@ namespace WinStream.Network
                     Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                     BodyBytes = Array.Empty<byte>(),
                 };
+            }
+        }
+
+        private static void LogVerboseWire(string message)
+        {
+            var value = Environment.GetEnvironmentVariable(VerboseLoggingEnvironmentVariable);
+            if (string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.LogMessage(message, "rtsp-wire");
             }
         }
 
