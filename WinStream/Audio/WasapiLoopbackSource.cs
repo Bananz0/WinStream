@@ -2,10 +2,12 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
 using WinStream.Core.Audio;
 using WinStream.Core.Logging;
@@ -34,7 +36,10 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private readonly LogRateLimiter _gapLog = new(TimeSpan.FromSeconds(5));
     private readonly LogRateLimiter _measureLog = new(TimeSpan.FromSeconds(5));
     private readonly CaptureCallbackMeasurer _callbackMeasurer = new();
+    private readonly CaptureGapFiller.JitterTracker _gapJitterTracker;
+    private readonly TimeProvider _timeProvider;
     private MMDeviceEnumerator? _enumerator;
+    private DefaultEndpointNotificationClient? _notificationClient;
     private MMDevice? _device;
     private WasapiCapture? _capture;
     private AudioFormat? _format;
@@ -47,12 +52,27 @@ public sealed class WasapiLoopbackSource : IAudioSource
     private long _captureGapCount;
     private long _lastInterCallbackTicks;
     private int _inGap;
+    private DateTimeOffset _lastEndpointFollowRebindUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? _gapFillCts;
     private Task? _gapFillLoop;
+
+    public WasapiLoopbackSource()
+        : this(TimeProvider.System)
+    {
+    }
+
+    /// <summary>Test seam for the default-endpoint-follow debounce clock.</summary>
+    internal WasapiLoopbackSource(TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        _gapJitterTracker = new CaptureGapFiller.JitterTracker(timeProvider);
+    }
 
     public event EventHandler<AudioFrame>? FrameAvailable;
 
     public event EventHandler<Exception>? CaptureFailed;
+
+    public event EventHandler<IReadOnlyList<AudioFrame>>? GapBurstAvailable;
 
     public event EventHandler? DeviceInvalidated;
 
@@ -99,8 +119,12 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     public bool IsSilent => RmsCalculator.IsSilent(CurrentRms);
 
-    /// <summary>How many sustained capture gaps were opened (developer telemetry).</summary>
-    internal long CaptureGapCount => Interlocked.Read(ref _captureGapCount);
+    /// <summary>
+    /// How many sustained capture gaps were opened. Also the <see cref="IAudioSource"/>
+    /// gap-count signal the orchestrator feeds into Auto latency's immediate-pressure
+    /// window as <c>GapDelta</c>.
+    /// </summary>
+    public long GapCount => Interlocked.Read(ref _captureGapCount);
 
     /// <summary>Most recent inter-callback interval in Stopwatch ticks.</summary>
     internal long LastInterCallbackTicks => Interlocked.Read(ref _lastInterCallbackTicks);
@@ -210,6 +234,19 @@ public sealed class WasapiLoopbackSource : IAudioSource
         }
 
         JoinGapFill(gapCts, gapLoop);
+        if (_enumerator is not null && _notificationClient is not null)
+        {
+            try
+            {
+                _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+            }
+            catch
+            {
+                // Best-effort; the enumerator is being torn down regardless.
+            }
+        }
+
+        _notificationClient = null;
         _enumerator?.Dispose();
         _enumerator = null;
         return ValueTask.CompletedTask;
@@ -217,8 +254,8 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
     private void StartCaptureLocked()
     {
-        _enumerator ??= new MMDeviceEnumerator();
-        _device = ResolveDevice(_enumerator, PreferredEndpointId);
+        EnsureNotificationsRegisteredLocked();
+        _device = ResolveDevice(_enumerator!, PreferredEndpointId);
         _activeEndpointId = _device.ID;
         _callbackMeasurer.Reset();
         var bufferMs = UseEventDrivenCapture
@@ -287,6 +324,68 @@ public sealed class WasapiLoopbackSource : IAudioSource
         }
     }
 
+    private void EnsureNotificationsRegisteredLocked()
+    {
+        _enumerator ??= new MMDeviceEnumerator();
+        if (_notificationClient is not null)
+        {
+            return;
+        }
+
+        _notificationClient = new DefaultEndpointNotificationClient(OnDefaultRenderDeviceChanged);
+        _enumerator.RegisterEndpointNotificationCallback(_notificationClient);
+    }
+
+    /// <summary>
+    /// Fired on a COM notification thread (never the UI thread) whenever Windows'
+    /// default render endpoint changes for any role. Rebinds capture to the new
+    /// default unless the user has pinned a specific device via
+    /// <see cref="PreferredEndpointId"/> — device removal already rebuilds correctly
+    /// via <see cref="OnRecordingStopped"/>/<see cref="DeviceInvalidated"/> and is
+    /// untouched here. <see cref="EndpointChangeDebouncer"/> folds the handful of
+    /// per-role notifications Windows fires for one physical switch into a single
+    /// rebind.
+    /// </summary>
+    private void OnDefaultRenderDeviceChanged()
+    {
+        if (Volatile.Read(ref _disposed))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(PreferredEndpointId))
+        {
+            // User pinned a specific device; do not follow the system default.
+            return;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        lock (_gate)
+        {
+            if (_disposed || !EndpointChangeDebouncer.ShouldRebind(_lastEndpointFollowRebindUtc, now))
+            {
+                return;
+            }
+
+            _lastEndpointFollowRebindUtc = now;
+        }
+
+        // Marshal off the COM notification thread; RebindAsync tears down and
+        // restarts capture, which must not run inline on that callback.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RebindAsync().ConfigureAwait(false);
+                AppLog.Info("capture", "Default output device changed — capture followed it");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warn("capture", $"Default output device follow-rebind failed: {ex.Message}");
+            }
+        });
+    }
+
     private static void JoinGapFill(CancellationTokenSource? gapCts, Task? gapLoop)
     {
         gapCts?.Cancel();
@@ -314,6 +413,7 @@ public sealed class WasapiLoopbackSource : IAudioSource
         var now = Stopwatch.GetTimestamp();
         var previous = Interlocked.Exchange(ref _lastCallbackQpc, now);
         CaptureGapFiller.EndGap(ref _inGap);
+        _gapJitterTracker.RecordCallback();
         if (previous != 0)
         {
             var delta = now - previous;
@@ -366,11 +466,15 @@ public sealed class WasapiLoopbackSource : IAudioSource
             var now = Stopwatch.GetTimestamp();
             var delta = now - last;
 
-            // Only a silence longer than the poll cadence counts as a gap. Once one is
-            // open, keep filling every tick until a real callback closes it.
+            // Only a silence longer than the adaptive threshold counts as a gap — scaled
+            // to measured callback jitter rather than a fixed 120ms, so a 48-120ms
+            // hiccup under Auto's 10ms event-driven capture is no longer an unfilled
+            // underrun. Once one is open, keep filling every tick until a real callback
+            // closes it.
             if (Volatile.Read(ref _inGap) == 0)
             {
-                if (!CaptureGapFiller.IsGap(delta, Stopwatch.Frequency))
+                if (!CaptureGapFiller.IsGap(
+                        delta, Stopwatch.Frequency, _gapJitterTracker.CurrentThresholdMilliseconds))
                 {
                     continue;
                 }
@@ -382,8 +486,10 @@ public sealed class WasapiLoopbackSource : IAudioSource
             }
 
             // Fill the whole elapsed span, not a fixed chunk, so the RTP timeline advances
-            // at exactly wall-clock rate and never runs fast or slow across a gap.
-            EmitSilence(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
+            // at exactly wall-clock rate and never runs fast or slow across a gap. Chunked
+            // and delivered as one burst rather than paced: the gap already cost real
+            // time, so catching it up must not re-pace it and cost more.
+            EmitGapBurst(CaptureGapFiller.GapMilliseconds(delta, Stopwatch.Frequency), format);
             Interlocked.Exchange(ref _lastCallbackQpc, now);
         }
     }
@@ -415,17 +521,33 @@ public sealed class WasapiLoopbackSource : IAudioSource
                 : "Loopback gap — inserting silence to keep RTP continuous");
     }
 
-    private void EmitSilence(double gapMilliseconds, AudioFormat format)
+    private void EmitGapBurst(double gapMilliseconds, AudioFormat format)
     {
-        var silence = CaptureGapFiller.CreateSilence(format, gapMilliseconds);
-        if (silence.Length == 0)
+        var chunks = CaptureGapFiller.CreateBurstSilence(format, gapMilliseconds);
+        if (chunks.Count == 0)
         {
             return;
         }
 
-        FrameAvailable?.Invoke(
-            this,
-            new AudioFrame(silence, format, DateTime.UtcNow.Ticks));
+        if (GapBurstAvailable is { } burstHandler)
+        {
+            var now = DateTime.UtcNow.Ticks;
+            var frames = new AudioFrame[chunks.Count];
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                frames[i] = new AudioFrame(chunks[i], format, now);
+            }
+
+            burstHandler.Invoke(this, frames);
+            return;
+        }
+
+        // No burst-capable listener attached: fall back to one FrameAvailable event
+        // per chunk so the gap still gets filled, just through the normal paced path.
+        foreach (var chunk in chunks)
+        {
+            FrameAvailable?.Invoke(this, new AudioFrame(chunk, format, DateTime.UtcNow.Ticks));
+        }
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
@@ -507,5 +629,45 @@ public sealed class WasapiLoopbackSource : IAudioSource
 
         protected override AudioClientStreamFlags GetAudioClientStreamFlags() =>
             AudioClientStreamFlags.Loopback | base.GetAudioClientStreamFlags();
+    }
+
+    /// <summary>
+    /// Thin <see cref="IMMNotificationClient"/> adapter that forwards only render-flow
+    /// default-device changes to the owning source. All other notifications (device
+    /// add/remove/state/property) are ignored — device removal is already handled via
+    /// <see cref="WasapiCapture"/>'s own <see cref="StoppedEventArgs"/> path.
+    /// </summary>
+    private sealed class DefaultEndpointNotificationClient : IMMNotificationClient
+    {
+        private readonly Action _onDefaultRenderDeviceChanged;
+
+        public DefaultEndpointNotificationClient(Action onDefaultRenderDeviceChanged)
+        {
+            _onDefaultRenderDeviceChanged = onDefaultRenderDeviceChanged;
+        }
+
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState)
+        {
+        }
+
+        public void OnDeviceAdded(string pwstrDeviceId)
+        {
+        }
+
+        public void OnDeviceRemoved(string deviceId)
+        {
+        }
+
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+        {
+            if (flow == DataFlow.Render)
+            {
+                _onDefaultRenderDeviceChanged();
+            }
+        }
+
+        public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key)
+        {
+        }
     }
 }
