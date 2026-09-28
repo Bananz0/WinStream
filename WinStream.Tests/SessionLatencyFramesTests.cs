@@ -41,12 +41,15 @@ public class SessionLatencyFramesTests
     [Fact]
     public void Both_protocols_accept_the_shared_auto_step()
     {
-        var shared = LatencyAutoController.NextRungUp(LatencyAutoController.AutoStartFrames);
+        // NextAutoRungUp is Auto's own fine-grained ladder (the one it actually
+        // steps through from AutoStartFrames), distinct from NextRungUp's coarse
+        // 3-rung Extreme ladder (2112 -> 3520 -> 11025).
+        var shared = LatencyAutoController.NextAutoRungUp(LatencyAutoController.AutoStartFrames);
         var a = new AirPlay2Session(DummyReceiver());
         var b = new RaopSession(DummyReceiver());
         a.SetEffectiveLatencyFrames(shared);
         b.SetEffectiveLatencyFrames(shared);
-        Assert.Equal(3520u, shared);
+        Assert.Equal(16538u, shared);
         Assert.Equal(shared, a.EffectiveLatencyFrames);
         Assert.Equal(shared, b.EffectiveLatencyFrames);
     }

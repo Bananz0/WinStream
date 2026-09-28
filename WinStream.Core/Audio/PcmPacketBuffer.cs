@@ -83,11 +83,7 @@ public sealed class PcmPacketBuffer
             ReadStereoPair(pcm, format, next, out var left1, out var right1);
             WriteInterpolated(left0, right0, left1, right1, frac);
             _filled += 4;
-            if (_filled == AlacPacketBytes)
-            {
-                packets.Add(_packet.ToArray());
-                _filled = 0;
-            }
+            EmitIfComplete(packets);
 
             _resampleCursor += ratio;
         }
@@ -152,12 +148,26 @@ public sealed class PcmPacketBuffer
             pcm.Slice(offset, copy).CopyTo(_packet.AsSpan(_filled));
             _filled += copy;
             offset += copy;
-            if (_filled == AlacPacketBytes)
-            {
-                packets.Add(_packet.ToArray());
-                _filled = 0;
-            }
+            EmitIfComplete(packets);
         }
+    }
+
+    /// <summary>
+    /// Copies the reusable scratch buffer out to the caller's list once it
+    /// holds a full packet. The copy itself is unavoidable — each entry in
+    /// <paramref name="packets"/> must own its bytes since <see cref="_packet"/>
+    /// keeps being written to by subsequent calls — but this keeps the single
+    /// allocation site shared between the direct-append and resample paths.
+    /// </summary>
+    private void EmitIfComplete(List<byte[]> packets)
+    {
+        if (_filled != AlacPacketBytes)
+        {
+            return;
+        }
+
+        packets.Add(_packet.ToArray());
+        _filled = 0;
     }
 
     private void WriteInterpolated(

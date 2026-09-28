@@ -4,6 +4,19 @@ namespace WinStream.Tests;
 
 public class AppLogTests
 {
+    /// <summary>
+    /// The file sink write is off the calling thread on a bounded background
+    /// channel now (see AppLog remarks). Tests that assert on file contents
+    /// need a deterministic drain point instead of relying on the write
+    /// having already landed synchronously.
+    /// </summary>
+    private static void DrainFileSink()
+    {
+        Assert.True(
+            AppLog.DrainFileWrites(),
+            "Expected the AppLog file-writer thread to drain pending writes.");
+    }
+
     [Fact]
     public void Info_writes_snapshot_line()
     {
@@ -24,6 +37,7 @@ public class AppLogTests
 
             AppLog.Error("test", "disk-persisted-line");
             AppLog.Warn("test", "aesiv=secret");
+            DrainFileSink();
 
             // The sink keeps the file open for append; read with a shared handle.
             string contents;

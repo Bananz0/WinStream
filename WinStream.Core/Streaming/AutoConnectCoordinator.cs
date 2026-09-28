@@ -24,7 +24,16 @@ public sealed class AutoConnectCoordinator
 
     public void RecordSuccess() => _attempts.RecordSuccess();
 
-    public void RecordFailure() => _attempts.RecordFailure();
+    /// <summary>
+    /// Records a failed automatic-connect attempt. <paramref name="kind"/> decides
+    /// only "keep retrying" vs. "stop until <see cref="Reset"/>" — a
+    /// <see cref="AutoConnectFailureKind.Config"/> failure stays bounded, every
+    /// other kind retries unbounded on the existing cooldown. Defaults to
+    /// <see cref="AutoConnectFailureKind.Other"/> so an unclassified failure never
+    /// silently trips the bounded (Config) path.
+    /// </summary>
+    public void RecordFailure(AutoConnectFailureKind kind = AutoConnectFailureKind.Other) =>
+        _attempts.RecordFailure(kind);
 
     /// <summary>
     /// Reports an aggregate state change. A session that ended on its own makes

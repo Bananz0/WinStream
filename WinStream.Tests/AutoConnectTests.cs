@@ -90,13 +90,13 @@ public class AutoConnectTests
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 3,
+            maxConfigAttempts: 3,
             cooldown: TimeSpan.FromSeconds(15),
             timeProvider: time);
 
         Assert.True(tracker.AttemptsAvailable);
 
-        tracker.RecordFailure();
+        tracker.RecordFailure(AutoConnectFailureKind.Silent);
         Assert.False(tracker.AttemptsAvailable);
 
         time.Advance(TimeSpan.FromSeconds(15));
@@ -104,19 +104,56 @@ public class AutoConnectTests
     }
 
     [Fact]
-    public void Repeated_failures_stop_retrying()
+    public void Repeated_Config_failures_stop_retrying()
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 2,
+            maxConfigAttempts: 2,
             cooldown: TimeSpan.FromSeconds(15),
             timeProvider: time);
 
-        tracker.RecordFailure();
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
         time.Advance(TimeSpan.FromSeconds(20));
-        tracker.RecordFailure();
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
         time.Advance(TimeSpan.FromSeconds(20));
 
+        Assert.False(tracker.AttemptsAvailable);
+    }
+
+    [Theory]
+    [InlineData(AutoConnectFailureKind.Silent)]
+    [InlineData(AutoConnectFailureKind.Other)]
+    public void Repeated_Silent_or_Other_failures_never_stop_retrying(AutoConnectFailureKind kind)
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
+        var tracker = new AutoConnectAttemptTracker(
+            maxConfigAttempts: 2,
+            cooldown: TimeSpan.FromSeconds(15),
+            timeProvider: time);
+
+        for (var i = 0; i < 50; i++)
+        {
+            tracker.RecordFailure(kind);
+            time.Advance(TimeSpan.FromSeconds(15));
+            Assert.True(tracker.AttemptsAvailable);
+        }
+    }
+
+    [Fact]
+    public void A_Config_failure_after_Silent_failures_still_counts_toward_the_bounded_cap()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
+        var tracker = new AutoConnectAttemptTracker(
+            maxConfigAttempts: 1,
+            cooldown: TimeSpan.FromSeconds(15),
+            timeProvider: time);
+
+        tracker.RecordFailure(AutoConnectFailureKind.Silent);
+        time.Advance(TimeSpan.FromSeconds(15));
+        Assert.True(tracker.AttemptsAvailable);
+
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
+        time.Advance(TimeSpan.FromSeconds(15));
         Assert.False(tracker.AttemptsAvailable);
     }
 
@@ -137,7 +174,7 @@ public class AutoConnectTests
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 3,
+            maxConfigAttempts: 3,
             cooldown: TimeSpan.FromSeconds(15),
             sessionLostCooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
@@ -158,7 +195,7 @@ public class AutoConnectTests
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 3,
+            maxConfigAttempts: 3,
             cooldown: TimeSpan.FromSeconds(15),
             sessionLostCooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
@@ -174,12 +211,12 @@ public class AutoConnectTests
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 2,
+            maxConfigAttempts: 2,
             cooldown: TimeSpan.FromSeconds(15),
             sessionLostCooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
-        tracker.RecordFailure();
-        tracker.RecordFailure();
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
 
         tracker.RecordSessionLost();
         time.Advance(TimeSpan.FromSeconds(5));
@@ -243,15 +280,15 @@ public class AutoConnectTests
     }
 
     [Fact]
-    public void Reset_clears_an_exhausted_budget()
+    public void Reset_clears_an_exhausted_Config_budget()
     {
         var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-31T12:00:00Z"));
         var tracker = new AutoConnectAttemptTracker(
-            maxAttempts: 1,
+            maxConfigAttempts: 1,
             cooldown: TimeSpan.FromSeconds(5),
             timeProvider: time);
 
-        tracker.RecordFailure();
+        tracker.RecordFailure(AutoConnectFailureKind.Config);
         time.Advance(TimeSpan.FromSeconds(10));
         Assert.False(tracker.AttemptsAvailable);
 

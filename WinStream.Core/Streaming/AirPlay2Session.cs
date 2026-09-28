@@ -61,6 +61,9 @@ public sealed class AirPlay2Session : IAirPlaySession
     private TaskCompletionSource? _rtpBaseFrozen;
     private float _volumeDb = -20f;
     private uint _latencyFrames = DefaultLatencyFrames;
+    private byte[]? _lastSentPcm;
+    private int _pendingLowerSteps;
+    private long _ptpReseedCount;
     private bool _disposed;
 
     /// <param name="senderDeviceId">
@@ -92,9 +95,120 @@ public sealed class AirPlay2Session : IAirPlaySession
 
     public uint EffectiveLatencyFrames => Volatile.Read(ref _latencyFrames);
 
+    /// <summary>
+    /// How many times this session's <see cref="PtpClock"/> has re-seeded (a clock
+    /// jump, not a smooth correction). Callers such as the Auto latency controller
+    /// poll the delta of this counter across a signal window and feed it in as a
+    /// re-anchor/pressure signal, rather than the session applying a re-seed silently.
+    /// </summary>
+    public long PtpReseedCount => Interlocked.Read(ref _ptpReseedCount);
+
+    /// <summary>
+    /// Updates the sync/announce latency, expressed only as which RTP numbers are
+    /// emitted when — never as a bare re-mapping of the announced anchor.
+    /// </summary>
+    /// <remarks>
+    /// A raise bursts one filler packet (a repeat of the last real packet's PCM, or
+    /// silence when none has been sent yet) per packet of latency being added, while
+    /// atomically advancing the RTP head by the same amount — so the announced
+    /// <c>head - latency</c> pairing never moves even though the receiver's buffer
+    /// grows. A lower is opportunistic: it only takes effect the next time a
+    /// genuinely silent outgoing packet would have been sent, dropping that one
+    /// packet (never advancing the RTP head for it) while shrinking latency by the
+    /// same amount, so the pairing again never moves. Before the session is actually
+    /// streaming (no bound audio socket yet) there is no receiver-visible anchor to
+    /// preserve, so the field is written directly.
+    /// </remarks>
     public void SetEffectiveLatencyFrames(uint frames)
     {
-        Volatile.Write(ref _latencyFrames, LatencyAutoController.ClampEffectiveFrames(frames));
+        var target = LatencyAutoController.ClampEffectiveFrames(frames);
+        List<(ushort Sequence, uint Timestamp, byte[] Pcm)>? fillerBurst = null;
+        lock (_mediaGate)
+        {
+            var current = _latencyFrames;
+            if (target == current)
+            {
+                return;
+            }
+
+            if (!IsStreamingLocked())
+            {
+                _latencyFrames = target;
+                return;
+            }
+
+            if (target > current)
+            {
+                fillerBurst = PrepareRaiseLocked(current, target);
+            }
+            else
+            {
+                RequestLowerLatencyLocked(current, target);
+            }
+        }
+
+        // Encode+encrypt+send happens outside _mediaGate, matching EmitAudioPacket's
+        // established pattern: state (sequence/timestamp/latency) is advanced
+        // atomically under the lock above, but the actual I/O for a burst that can
+        // be many hundreds of packets on a large raise must not block the real-time
+        // audio thread's own SubmitPcm calls for its duration.
+        if (fillerBurst is not null)
+        {
+            foreach (var (sequence, timestamp, pcm) in fillerBurst)
+            {
+                EncodeAndSend(pcm, sequence, timestamp, marker: false);
+            }
+        }
+    }
+
+    /// <summary>Caller must hold <see cref="_mediaGate"/>.</summary>
+    private bool IsStreamingLocked() =>
+        State == SessionState.Streaming &&
+        _audioSocket is not null &&
+        _audioEndpoint is not null &&
+        _shk is not null;
+
+    /// <summary>
+    /// Caller must hold <see cref="_mediaGate"/>. Advances the RTP head, sequence
+    /// numbers, and latency field for one filler packet per packet interval of
+    /// latency being added — by the exact same amount on every step, so the
+    /// announced anchor (<c>head - latency</c>) is invariant across the whole raise
+    /// regardless of how many filler packets it takes — and returns the
+    /// (sequence, timestamp, pcm) tuples to encode and send. The caller sends them
+    /// after releasing the lock; this method only advances state.
+    /// </summary>
+    private List<(ushort Sequence, uint Timestamp, byte[] Pcm)> PrepareRaiseLocked(
+        uint current,
+        uint target)
+    {
+        long deltaFrames = target - current;
+        var packets = (int)Math.Max(1, (deltaFrames + FramesPerPacket - 1) / FramesPerPacket);
+        var burst = new List<(ushort, uint, byte[])>(packets);
+
+        for (var i = 0; i < packets; i++)
+        {
+            var filler = _lastSentPcm ?? new byte[AlacEncoder.PcmBytesPerPacket];
+            burst.Add((_sequenceNumber++, _rtpTimestamp, filler));
+            _rtpTimestamp += (uint)FramesPerPacket;
+        }
+
+        _latencyFrames = current + (uint)(packets * FramesPerPacket);
+        return burst;
+    }
+
+    /// <summary>
+    /// Caller must hold <see cref="_mediaGate"/>. A lower cannot burst anything —
+    /// there is no safe "extra" audio to remove immediately without a jump — so it
+    /// is recorded as a pending step and only realized in <see cref="SubmitPcm"/>
+    /// the next time a genuinely silent outgoing packet is about to be sent
+    /// (already gated upstream on a detected silence window by the Auto latency
+    /// controller before this method is ever called).
+    /// </summary>
+    private void RequestLowerLatencyLocked(uint current, uint target)
+    {
+        long deltaFrames = current - target;
+        var packets = (int)Math.Max(1, (deltaFrames + FramesPerPacket - 1) / FramesPerPacket);
+        _pendingLowerSteps += packets;
     }
 
     public void SetAudioFidelity(AudioFidelity fidelity) =>
@@ -137,6 +251,7 @@ public sealed class AirPlay2Session : IAirPlaySession
                 // START_PLAYBACK order for PTP devices:
                 // session SETUP → event channel → RECORD → PTP start → stream SETUP.
                 _ptp = new PtpClock(PtpClock.ClockIdFromDeviceId(client.DeviceId));
+                _ptp.Reseeded += OnPtpReseeded;
                 _ptp.Bind();
 
                 await client.SessionSetupAsync(cancellationToken).ConfigureAwait(false);
@@ -192,6 +307,11 @@ public sealed class AirPlay2Session : IAirPlaySession
                 _rtpBaseFrozen = new TaskCompletionSource(
                     TaskCreationOptions.RunContinuationsAsynchronously);
                 _pcmBuffer.Reset();
+                lock (_mediaGate)
+                {
+                    _lastSentPcm = null;
+                    _pendingLowerSteps = 0;
+                }
 
                 await client.SetVolumeAsync(_volumeDb, cancellationToken).ConfigureAwait(false);
                 StartSyncLoop();
@@ -249,12 +369,17 @@ public sealed class AirPlay2Session : IAirPlaySession
 
         if (froze)
         {
+            // Anchor-before-audio: the receiver drops every audio packet until it has
+            // an RTP-to-PTP mapping, so the first announce must land synchronously
+            // here, before any audio leaves this call — not via the background sync
+            // task, which would otherwise race the foreach loop below.
+            SendAnchorAnnouncementSync(first: true);
             _rtpBaseFrozen?.TrySetResult();
         }
 
         foreach (var packetPcm in _submitPackets)
         {
-            SendAudioPacket(packetPcm);
+            EmitAudioPacket(packetPcm);
         }
     }
 
@@ -413,7 +538,70 @@ public sealed class AirPlay2Session : IAirPlaySession
     internal void FailStreamingForTests(string reason) =>
         TransitionStreamingToFailed(reason);
 
-    private void SendAudioPacket(byte[] pcmPacket)
+    /// <summary>
+    /// Test seam: binds the send-path fields a real <see cref="ConnectAsync"/> would
+    /// have set, without a live AirPlay handshake, so <see cref="SetEffectiveLatencyFrames"/>
+    /// and <see cref="SubmitPcm"/> exercise their real atomic raise/lower/drop paths
+    /// against a loopback socket instead of taking the "not yet streaming" bypass.
+    /// </summary>
+    internal void SeedNetworkForTests(
+        UdpClient audioSocket,
+        IPEndPoint audioEndpoint,
+        byte[] sharedKey)
+    {
+        _audioSocket = audioSocket;
+        _audioEndpoint = audioEndpoint;
+        _shk = sharedKey;
+        _ssrc = 1;
+    }
+
+    /// <summary>Test seam: raises <see cref="PtpClock.Reseeded"/> without a live PTP peer.</summary>
+    internal void RaisePtpReseededForTests(PtpReseedEventArgs args) =>
+        OnPtpReseeded(this, args);
+
+    /// <summary>Test seam: number of one-packet lower steps still awaiting a silent packet.</summary>
+    internal int PendingLowerStepsForTests => Volatile.Read(ref _pendingLowerSteps);
+
+    /// <summary>
+    /// Emits one real (source-derived) packet, or silently drops it in place of a
+    /// pending opportunistic latency lower — see <see cref="RequestLowerLatencyLocked"/>.
+    /// A drop advances neither the RTP head nor the sequence number for this packet,
+    /// while shrinking the latency field by the same one-packet amount, so the
+    /// announced <c>head - latency</c> pairing does not move.
+    /// </summary>
+    private void EmitAudioPacket(byte[] pcmPacket)
+    {
+        if (_audioSocket is null || _audioEndpoint is null || _shk is null)
+        {
+            return;
+        }
+
+        ushort sequence;
+        uint timestamp;
+        bool marker;
+        lock (_mediaGate)
+        {
+            if (_pendingLowerSteps > 0 && IsSilentPacket(pcmPacket))
+            {
+                _pendingLowerSteps--;
+                _latencyFrames = Math.Max(
+                    _latencyFrames - (uint)FramesPerPacket,
+                    LatencyAutoController.PacketFloorFrames);
+                return;
+            }
+
+            sequence = _sequenceNumber++;
+            timestamp = _rtpTimestamp;
+            _rtpTimestamp += (uint)FramesPerPacket;
+            marker = _sendMarker;
+            _sendMarker = false;
+            _lastSentPcm = pcmPacket;
+        }
+
+        EncodeAndSend(pcmPacket, sequence, timestamp, marker);
+    }
+
+    private void EncodeAndSend(byte[] pcmPacket, ushort sequence, uint timestamp, bool marker)
     {
         if (_audioSocket is null || _audioEndpoint is null || _shk is null)
         {
@@ -422,18 +610,6 @@ public sealed class AirPlay2Session : IAirPlaySession
 
         Span<byte> alac = stackalloc byte[AlacEncoder.GetMaxEncodedLength(pcmPacket.Length)];
         var alacLength = AlacEncoder.Encode(pcmPacket, alac);
-
-        ushort sequence;
-        uint timestamp;
-        bool marker;
-        lock (_mediaGate)
-        {
-            sequence = _sequenceNumber++;
-            timestamp = _rtpTimestamp;
-            _rtpTimestamp += (uint)FramesPerPacket;
-            marker = _sendMarker;
-            _sendMarker = false;
-        }
 
         var encrypted = RtpChaChaEncryptor.EncryptPayload(
             _shk,
@@ -459,6 +635,35 @@ public sealed class AirPlay2Session : IAirPlaySession
         {
             // Transient UDP send failures ignored; reconnect handled elsewhere.
         }
+    }
+
+    private static bool IsSilentPacket(byte[] pcmPacket)
+    {
+        foreach (var b in pcmPacket)
+        {
+            if (b != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Every re-seed is a clock jump, not a smooth correction, so it must be
+    /// observable rather than silently reflected into the next announcement. This
+    /// only counts the event for <see cref="PtpReseedCount"/>; the Auto latency
+    /// controller (fed via the orchestrator's windowed signals) decides whether and
+    /// how much to raise, then calls <see cref="SetEffectiveLatencyFrames"/> as usual.
+    /// </summary>
+    private void OnPtpReseeded(object? sender, PtpReseedEventArgs e)
+    {
+        Interlocked.Increment(ref _ptpReseedCount);
+        AppLog.Warn(
+            "ap2",
+            $"PTP re-seed observed old={e.PreviousOffsetNanoseconds / 1_000_000.0:F3} ms " +
+            $"new={e.NewOffsetNanoseconds / 1_000_000.0:F3} ms master=0x{e.MasterClockId:X16}");
     }
 
     /// <summary>
@@ -505,6 +710,61 @@ public sealed class AirPlay2Session : IAirPlaySession
         }
     }
 
+    /// <summary>
+    /// Synchronous counterpart to <see cref="RunAnchorLoopAsync"/>'s per-tick send,
+    /// used once to guarantee the very first anchor announcement reaches the wire
+    /// before any audio packet does (see the freeze handling in
+    /// <see cref="SubmitPcm"/>). Reads <c>_rtpTimestamp</c>/<c>_latencyFrames</c>
+    /// under the same lock the anchor loop uses, and marks <c>_firstSync</c>
+    /// consumed so the background loop's own next tick does not re-announce as
+    /// "first" — a benign, idempotent repeat of the same mapping shortly after is
+    /// harmless either way.
+    /// </summary>
+    private void SendAnchorAnnouncementSync(bool first)
+    {
+        var socket = _controlSocket;
+        var endpoint = _controlEndpoint;
+        var clock = _ptp;
+        if (socket is null || endpoint is null || clock is null)
+        {
+            return;
+        }
+
+        var clockId = clock.MasterClockId;
+        if (clockId == 0)
+        {
+            AppLog.Warn("ap2", "Skipping first time announce — PTP grandmaster unknown.");
+            return;
+        }
+
+        uint now;
+        uint latency;
+        lock (_mediaGate)
+        {
+            now = _rtpTimestamp;
+            latency = _latencyFrames;
+            _firstSync = false;
+        }
+
+        var packet = new byte[28];
+        var length = RtpPacketizer.WriteTimeAnnouncePacket(
+            packet,
+            now - latency,
+            clock.NowNanoseconds,
+            now,
+            clockId,
+            first);
+
+        try
+        {
+            _ = socket.Send(packet.AsSpan(0, length), endpoint);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            // The periodic anchor loop will retry on its next tick.
+        }
+    }
+
     private async Task RunAnchorLoopAsync(CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(SyncInterval);
@@ -521,10 +781,12 @@ public sealed class AirPlay2Session : IAirPlaySession
             try
             {
                 uint now;
+                uint latency;
                 bool first;
                 lock (_mediaGate)
                 {
                     now = _rtpTimestamp;
+                    latency = _latencyFrames;
                     first = _firstSync;
                     _firstSync = false;
                 }
@@ -539,7 +801,7 @@ public sealed class AirPlay2Session : IAirPlaySession
                 var packet = new byte[28];
                 var length = RtpPacketizer.WriteTimeAnnouncePacket(
                     packet,
-                    now - Volatile.Read(ref _latencyFrames),
+                    now - latency,
                     clock.NowNanoseconds,
                     now,
                     clockId,
@@ -591,6 +853,7 @@ public sealed class AirPlay2Session : IAirPlaySession
 
         if (_ptp is not null)
         {
+            _ptp.Reseeded -= OnPtpReseeded;
             await _ptp.DisposeAsync().ConfigureAwait(false);
             _ptp = null;
         }

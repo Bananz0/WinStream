@@ -1,7 +1,21 @@
+using System.Runtime;
 using WinStream.Core.Audio;
 using WinStream.Core.Protocol.Raop;
 
 namespace WinStream.Tests;
+
+/// <summary>
+/// <see cref="AudioFrameSendPump"/>'s GC latency mode hint is process-global
+/// (reference-counted across concurrent pumps by design — see
+/// <c>AudioFrameSendPump.TryEnterSustainedLowLatency</c>). The test classes below
+/// all construct pumps, so they must not run as separate parallel xUnit
+/// collections or one test's pump lifetime can straddle another's and make the
+/// GC-mode assertions flaky; this shared, non-parallelized collection keeps them
+/// serialized relative to each other while still running in parallel with the
+/// rest of the suite.
+/// </summary>
+[CollectionDefinition("AudioFrameSendPump", DisableParallelization = true)]
+public class AudioFrameSendPumpCollection;
 
 public class BoundedAudioFrameQueueTests
 {
@@ -25,6 +39,7 @@ public class BoundedAudioFrameQueueTests
     }
 }
 
+[Collection("AudioFrameSendPump")]
 public class AudioFrameSendPumpOffloadTests
 {
     [Fact]
@@ -75,6 +90,7 @@ public class AudioFrameSendPumpOffloadTests
     }
 }
 
+[Collection("AudioFrameSendPump")]
 public class AudioFrameSendPumpPacingTests
 {
     private const int PacketBytes = AlacEncoder.PcmBytesPerPacket;
@@ -195,5 +211,156 @@ public class AudioFrameSendPumpPacingTests
     private sealed class CallbackDisposable(Action onDispose) : IDisposable
     {
         public void Dispose() => onDispose();
+    }
+}
+
+[Collection("AudioFrameSendPump")]
+public class AudioFrameSendPumpBurstTests
+{
+    [Fact]
+    public async Task EnqueueBurst_releases_frames_without_a_pacing_wait()
+    {
+        var sent = new List<byte>();
+        var gate = new object();
+        // waitUntilDue would fail the test if a burst frame ever went through the
+        // paced path — burst frames must never call it.
+        await using var pump = new AudioFrameSendPump(
+            capacity: 8,
+            chunk =>
+            {
+                lock (gate)
+                {
+                    sent.Add(chunk.Pcm.Span[0]);
+                }
+            },
+            waitUntilDue: (_, _) => throw new InvalidOperationException(
+                "burst frames must not be paced"));
+
+        pump.Start();
+        var format = new AudioFormat(44100, 2, 16);
+        pump.EnqueueBurst(new[]
+        {
+            new AudioFrame(new byte[] { 1 }, format, 1),
+            new AudioFrame(new byte[] { 2 }, format, 2),
+        });
+
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (gate)
+            {
+                if (sent.Count >= 2)
+                {
+                    break;
+                }
+            }
+
+            await Task.Delay(5);
+        }
+
+        lock (gate)
+        {
+            Assert.Equal(new byte[] { 1, 2 }, sent);
+        }
+    }
+
+    [Fact]
+    public void EnqueueBurst_rejects_null_frames()
+    {
+        var pump = new AudioFrameSendPump(capacity: 8, _ => { });
+
+        Assert.Throws<ArgumentNullException>(() => pump.EnqueueBurst(null!));
+    }
+
+    [Fact]
+    public async Task EnqueueBurst_after_dispose_throws()
+    {
+        var pump = new AudioFrameSendPump(capacity: 8, _ => { });
+        await pump.DisposeAsync();
+
+        Assert.Throws<ObjectDisposedException>(
+            () => pump.EnqueueBurst(Array.Empty<AudioFrame>()));
+    }
+
+    [Fact]
+    public async Task StallCount_increments_when_lateness_exceeds_a_tightened_budget()
+    {
+        var format = new AudioFormat(44100, 2, 16);
+        await using var pump = new AudioFrameSendPump(
+            capacity: 8,
+            _ => { },
+            waitUntilDue: (_, token) => !token.IsCancellationRequested);
+
+        // A zero-frame budget means any real lateness at all forces a re-anchor.
+        pump.SetLatenessBudget(0);
+        pump.Start();
+
+        pump.Enqueue(new AudioFrame(new byte[AlacEncoder.PcmBytesPerPacket], format, 1));
+
+        var firstSent = DateTime.UtcNow.AddSeconds(2);
+        while (pump.SendCount == 0 && DateTime.UtcNow < firstSent)
+        {
+            await Task.Delay(5);
+        }
+
+        Assert.Equal(1, pump.SendCount);
+
+        // Let real time run past the packet's ~8 ms period before the next frame
+        // arrives, so the scheduler sees lateness beyond the zero-frame budget.
+        await Task.Delay(50);
+        pump.Enqueue(new AudioFrame(new byte[AlacEncoder.PcmBytesPerPacket], format, 2));
+
+        var secondSent = DateTime.UtcNow.AddSeconds(2);
+        while (pump.SendCount < 2 && DateTime.UtcNow < secondSent)
+        {
+            await Task.Delay(5);
+        }
+
+        Assert.Equal(2, pump.SendCount);
+        Assert.True(pump.StallCount >= 1);
+        Assert.Equal(pump.StallCount, pump.CatchUpClampCount);
+    }
+
+    [Fact]
+    public async Task Start_raises_sustained_low_latency_and_dispose_restores_it()
+    {
+        var originalMode = GCSettings.LatencyMode;
+        var pump = new AudioFrameSendPump(capacity: 4, _ => { });
+
+        pump.Start();
+        try
+        {
+            Assert.Equal(GCLatencyMode.SustainedLowLatency, GCSettings.LatencyMode);
+        }
+        finally
+        {
+            await pump.DisposeAsync();
+        }
+
+        Assert.Equal(originalMode, GCSettings.LatencyMode);
+    }
+
+    [Fact]
+    public async Task Two_overlapping_pumps_do_not_let_one_disposal_reset_the_other()
+    {
+        // Multi-room fan-out gives each session its own pump; one room
+        // disconnecting must not silently downgrade GC latency mode for a
+        // still-streaming second room. This is the scenario the process-wide
+        // reference count (not a per-instance save/restore) exists to handle.
+        var originalMode = GCSettings.LatencyMode;
+        var first = new AudioFrameSendPump(capacity: 4, _ => { });
+        var second = new AudioFrameSendPump(capacity: 4, _ => { });
+
+        first.Start();
+        second.Start();
+        Assert.Equal(GCLatencyMode.SustainedLowLatency, GCSettings.LatencyMode);
+
+        await first.DisposeAsync();
+        Assert.Equal(
+            GCLatencyMode.SustainedLowLatency,
+            GCSettings.LatencyMode);
+
+        await second.DisposeAsync();
+        Assert.Equal(originalMode, GCSettings.LatencyMode);
     }
 }

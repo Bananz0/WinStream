@@ -261,4 +261,70 @@ public class EncryptedRtspTests
             TimeSpan.FromSeconds(1));
         Assert.IsType<IOException>(error);
     }
+
+    [Fact]
+    public async Task SendAsync_times_out_against_a_peer_that_never_responds()
+    {
+        // The peer accepts the TCP connection (so the socket looks alive)
+        // but never answers — SendAsync must fail within its deadline
+        // instead of parking the caller (and the request gate) forever.
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var acceptTask = listener.AcceptTcpClientAsync();
+
+        using var clientSocket = new TcpClient();
+        await clientSocket.ConnectAsync(IPAddress.Loopback, port);
+        using var serverSocket = await acceptTask;
+
+        var writeKey = new byte[32];
+        var readKey = new byte[32];
+        using var crypto = new RtspCryptoStream(clientSocket.GetStream(), writeKey, readKey);
+
+        await using var client = new EncryptedRtspClient(IPAddress.Loopback.ToString(), port);
+        client.InstallCryptoForTests(crypto, receiverPassword: null);
+        client.SetDeadlinesForTests(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            client.SendAsync("GET", "/info", null, null));
+        stopwatch.Stop();
+
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(5),
+            $"Expected the deadline to fire quickly, took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task SendAsync_after_a_timeout_requires_reconnect_not_a_resumed_read()
+    {
+        // A cancelled mid-frame read desyncs RtspCryptoStream's ChaCha
+        // counters, so the whole channel must be retired: a later call must
+        // fail fast (demanding a fresh pair-verify/SETUP) rather than silently
+        // resuming the same desynced stream.
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var acceptTask = listener.AcceptTcpClientAsync();
+
+        using var clientSocket = new TcpClient();
+        await clientSocket.ConnectAsync(IPAddress.Loopback, port);
+        using var serverSocket = await acceptTask;
+
+        var writeKey = new byte[32];
+        var readKey = new byte[32];
+        using var crypto = new RtspCryptoStream(clientSocket.GetStream(), writeKey, readKey);
+
+        await using var client = new EncryptedRtspClient(IPAddress.Loopback.ToString(), port);
+        client.InstallCryptoForTests(crypto, receiverPassword: null);
+        client.SetDeadlinesForTests(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            client.SendAsync("GET", "/info", null, null));
+
+        // The old crypto channel is retired; using it again must not hang or
+        // silently desync further — it must demand a fresh pairing instead.
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.SendAsync("GET", "/info", null, null));
+    }
 }

@@ -16,10 +16,20 @@ public static class PairingOptionsFactory
         string receiverKey,
         Func<CancellationToken, Task<string?>>? requestPinAsync = null,
         Action? markTransient = null,
-        string? receiverPassword = null)
+        string? receiverPassword = null,
+        bool isAutomatic = false)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrWhiteSpace(receiverKey);
+
+        // An unattended background reconnect must never pop a blocking PIN dialog
+        // with nobody present to answer it. A saved password still answers the
+        // SETUP Digest 401 without a prompt, so only the password-less, PIN-only
+        // path is gated here; if pairing needs the callback anyway, the attempt
+        // fails and is surfaced as a Config-kind status instead.
+        var requestPin = isAutomatic && string.IsNullOrEmpty(receiverPassword)
+            ? null
+            : requestPinAsync;
 
         // Password and persistent identity are independent: the password is the
         // transient SRP secret and answers SETUP Digest 401s after pair-verify.
@@ -27,7 +37,7 @@ public static class PairingOptionsFactory
         return new PairingOptions
         {
             StoredCredentials = store.TryGet(receiverKey, out var stored) ? stored : null,
-            RequestPinAsync = requestPinAsync,
+            RequestPinAsync = requestPin,
             ReceiverPassword = string.IsNullOrEmpty(receiverPassword) ? null : receiverPassword,
             OnPaired = credentials => store.Save(receiverKey, credentials),
             OnStoredCredentialsRejected = () => store.Remove(receiverKey),

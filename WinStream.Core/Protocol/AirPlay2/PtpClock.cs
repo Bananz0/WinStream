@@ -43,12 +43,27 @@ public sealed class PtpClock : IAsyncDisposable
     /// <summary>Reject Follow_Up offsets that jump more than this vs the EMA.</summary>
     private const long SpikeRejectNanoseconds = 50_000_000; // 50 ms
 
+    /// <summary>Samples must agree within this much to be treated as one clock.</summary>
+    private const long AgreementToleranceNanoseconds = 5_000_000; // 5 ms
+
+    /// <summary>Mutually-agreeing samples required from one peer before we lock.</summary>
+    private const int LockSampleCount = 3;
+
+    /// <summary>Mutually-agreeing rejections from the locked peer before we re-seed.</summary>
+    private const int ReseedSampleCount = 8;
+
+    /// <summary>Bounds memory if many stray sources are heard before we lock.</summary>
+    private const int MaxTrackedPreLockPeers = 8;
+
     private static readonly TimeSpan ReceiveFaultBackoff = TimeSpan.FromMilliseconds(50);
 
     private readonly ulong _clockId;
     private readonly Stopwatch _mono = Stopwatch.StartNew();
     private readonly object _gate = new();
+    private readonly object _lockGate = new();
     private readonly LogRateLimiter _deltaLog = new(TimeSpan.FromSeconds(1));
+    private readonly Dictionary<IPAddress, List<long>> _pendingLockSamples = new();
+    private readonly List<(long Offset, ulong ClockId)> _pendingReseedSamples = new();
     private UdpClient? _event;
     private UdpClient? _general;
     private CancellationTokenSource? _cts;
@@ -58,8 +73,11 @@ public sealed class PtpClock : IAsyncDisposable
     private long _syncArrivalNs;
     private ushort _syncSequence;
     private bool _syncPending;
+    private IPAddress? _syncSourceAddress;
+    private ulong _syncClockId;
     private long _offsetNs;
     private ulong _masterClockId;
+    private IPAddress? _lockedPeerAddress;
     private int _samples;
     private int _spikesRejected;
     private int _consecutiveReceiveFaults;
@@ -75,7 +93,18 @@ public sealed class PtpClock : IAsyncDisposable
     /// <summary>Clock identity of the grandmaster we are tracking, 0 until heard.</summary>
     public ulong MasterClockId => Volatile.Read(ref _masterClockId);
 
+    /// <summary>Address of the locked peer, once <see cref="LockSampleCount"/> samples agree.</summary>
+    public IPAddress? LockedPeerAddress => Volatile.Read(ref _lockedPeerAddress);
+
     public bool IsLocked => Volatile.Read(ref _samples) > 0;
+
+    /// <summary>
+    /// Raised when the clock re-seeds after <see cref="ReseedSampleCount"/> consecutive,
+    /// mutually-agreeing rejections from the locked peer. A re-seed is a clock jump, not
+    /// a smooth correction, so callers (e.g. the Auto latency controller) must treat it as
+    /// a re-anchor event rather than an ordinary sample.
+    /// </summary>
+    public event EventHandler<PtpReseedEventArgs>? Reseeded;
 
     /// <summary>Nanoseconds on the grandmaster's timeline.</summary>
     public ulong NowNanoseconds
@@ -173,14 +202,18 @@ public sealed class PtpClock : IAsyncDisposable
     }
 
     /// <summary>Test seam: apply a captured PTP datagram as if it just arrived.</summary>
-    internal void HandleIncomingForTests(byte[] packet, long arrivalNs) =>
-        HandleIncoming(packet, arrivalNs);
+    internal void HandleIncomingForTests(
+        byte[] packet,
+        long arrivalNs,
+        IPAddress? sourceAddress = null) =>
+        HandleIncoming(packet, arrivalNs, sourceAddress);
 
     /// <summary>Test seam: set a synthetic offset without UDP.</summary>
-    internal void SetOffsetForTests(long offsetNs, ulong masterClockId)
+    internal void SetOffsetForTests(long offsetNs, ulong masterClockId, IPAddress? peerAddress = null)
     {
         Interlocked.Exchange(ref _offsetNs, offsetNs);
         Volatile.Write(ref _masterClockId, masterClockId);
+        Volatile.Write(ref _lockedPeerAddress, peerAddress);
         if (Interlocked.CompareExchange(ref _samples, 1, 0) == 0)
         {
             _lock?.TrySetResult();
@@ -188,8 +221,12 @@ public sealed class PtpClock : IAsyncDisposable
     }
 
     /// <summary>Test seam: apply a master/local pair through the production smoother.</summary>
-    internal void ApplyOffsetForTests(long masterNs, long localNs) =>
-        ApplyOffset(masterNs, localNs);
+    internal void ApplyOffsetForTests(
+        long masterNs,
+        long localNs,
+        IPAddress? sourceAddress = null,
+        ulong masterClockId = 0) =>
+        ApplyOffset(masterNs, localNs, sourceAddress, masterClockId);
 
     /// <summary>How many Follow_Up samples were rejected as spikes.</summary>
     internal int SpikesRejectedForTests => Volatile.Read(ref _spikesRejected);
@@ -234,7 +271,10 @@ public sealed class PtpClock : IAsyncDisposable
             if (result is { } datagram)
             {
                 _consecutiveReceiveFaults = 0;
-                HandleIncoming(datagram.Buffer, (long)_mono.Elapsed.TotalNanoseconds);
+                HandleIncoming(
+                    datagram.Buffer,
+                    (long)_mono.Elapsed.TotalNanoseconds,
+                    datagram.RemoteEndPoint.Address);
                 continue;
             }
 
@@ -283,7 +323,7 @@ public sealed class PtpClock : IAsyncDisposable
         }
     }
 
-    private void HandleIncoming(byte[] packet, long arrivalNs)
+    private void HandleIncoming(byte[] packet, long arrivalNs, IPAddress? sourceAddress)
     {
         if (packet.Length < HeaderLength)
         {
@@ -291,31 +331,35 @@ public sealed class PtpClock : IAsyncDisposable
         }
 
         var messageType = (byte)(packet[0] & 0x0f);
+
+        // Once locked, a stray PTP packet from another LAN device must not poison
+        // the lock: only the peer we already tracked down is trusted. Packets
+        // whose source we could not determine (e.g. the test seam) fall through.
+        var lockedPeer = Volatile.Read(ref _lockedPeerAddress);
+        if (lockedPeer is not null &&
+            sourceAddress is not null &&
+            !sourceAddress.Equals(lockedPeer) &&
+            messageType is MessageAnnounce or MessageSync or MessageFollowUp)
+        {
+            return;
+        }
+
         var sequence = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(30));
         switch (messageType)
         {
-            case MessageAnnounce:
-            case MessageSync when packet.Length >= HeaderLength + 10:
-                Volatile.Write(
-                    ref _masterClockId,
-                    BinaryPrimitives.ReadUInt64BigEndian(packet.AsSpan(20)));
-                break;
-        }
-
-        switch (messageType)
-        {
             case MessageSync:
-                HandleSync(packet, sequence, arrivalNs);
+                HandleSync(packet, sequence, arrivalNs, sourceAddress);
                 break;
             case MessageFollowUp when packet.Length >= HeaderLength + 10:
-                HandleFollowUp(packet, sequence);
+                HandleFollowUp(packet, sequence, sourceAddress);
                 break;
         }
     }
 
-    private void HandleSync(byte[] packet, ushort sequence, long arrivalNs)
+    private void HandleSync(byte[] packet, ushort sequence, long arrivalNs, IPAddress? sourceAddress)
     {
         var flags = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(6));
+        var clockId = BinaryPrimitives.ReadUInt64BigEndian(packet.AsSpan(20));
         if ((flags & FlagTwoStep) != 0)
         {
             lock (_gate)
@@ -323,6 +367,8 @@ public sealed class PtpClock : IAsyncDisposable
                 _syncArrivalNs = arrivalNs;
                 _syncSequence = sequence;
                 _syncPending = true;
+                _syncSourceAddress = sourceAddress;
+                _syncClockId = clockId;
             }
 
             return;
@@ -330,13 +376,15 @@ public sealed class PtpClock : IAsyncDisposable
 
         if (packet.Length >= HeaderLength + 10)
         {
-            ApplyOffset(ReadTimestamp(packet.AsSpan(HeaderLength, 10)), arrivalNs);
+            ApplyOffset(ReadTimestamp(packet.AsSpan(HeaderLength, 10)), arrivalNs, sourceAddress, clockId);
         }
     }
 
-    private void HandleFollowUp(byte[] packet, ushort sequence)
+    private void HandleFollowUp(byte[] packet, ushort sequence, IPAddress? sourceAddress)
     {
         long arrival;
+        IPAddress? syncAddress;
+        ulong clockId;
         lock (_gate)
         {
             if (!_syncPending || _syncSequence != sequence)
@@ -345,24 +393,25 @@ public sealed class PtpClock : IAsyncDisposable
             }
 
             arrival = _syncArrivalNs;
+            syncAddress = _syncSourceAddress;
+            clockId = _syncClockId;
             _syncPending = false;
         }
 
-        ApplyOffset(ReadTimestamp(packet.AsSpan(HeaderLength, 10)), arrival);
+        ApplyOffset(
+            ReadTimestamp(packet.AsSpan(HeaderLength, 10)),
+            arrival,
+            sourceAddress ?? syncAddress,
+            clockId);
     }
 
-    private void ApplyOffset(long masterNs, long localNs)
+    private void ApplyOffset(long masterNs, long localNs, IPAddress? sourceAddress, ulong candidateClockId)
     {
         var offset = masterNs - localNs;
         var samples = Volatile.Read(ref _samples);
         if (samples == 0)
         {
-            Interlocked.Exchange(ref _offsetNs, offset);
-            Interlocked.Exchange(ref _samples, 1);
-            AppLog.Info(
-                "ptp",
-                $"Locked to grandmaster 0x{MasterClockId:X16} offset={offset / 1_000_000.0:F3} ms");
-            _lock?.TrySetResult();
+            TryLock(offset, sourceAddress, candidateClockId);
             return;
         }
 
@@ -372,13 +421,133 @@ public sealed class PtpClock : IAsyncDisposable
         {
             Interlocked.Increment(ref _spikesRejected);
             MaybeLogPtpDelta(delta, rejected: true);
+            TryReseed(offset, candidateClockId);
             return;
+        }
+
+        lock (_lockGate)
+        {
+            _pendingReseedSamples.Clear();
         }
 
         var smoothed = ema + (long)(EmaAlpha * (offset - ema));
         Interlocked.Exchange(ref _offsetNs, smoothed);
         Interlocked.Increment(ref _samples);
         MaybeLogPtpDelta(delta, rejected: false);
+    }
+
+    /// <summary>
+    /// Locks only once <see cref="LockSampleCount"/> samples from the same peer
+    /// mutually agree within <see cref="AgreementToleranceNanoseconds"/>, so a single
+    /// stray packet from another device cannot seed a bad lock.
+    /// </summary>
+    private void TryLock(long offset, IPAddress? sourceAddress, ulong candidateClockId)
+    {
+        var key = sourceAddress ?? IPAddress.Any;
+        var locked = false;
+        long medianOffset = 0;
+
+        lock (_lockGate)
+        {
+            if (!_pendingLockSamples.TryGetValue(key, out var samples))
+            {
+                samples = new List<long>();
+                _pendingLockSamples[key] = samples;
+            }
+
+            samples.Add(offset);
+            if (samples.Count > LockSampleCount)
+            {
+                samples.RemoveAt(0);
+            }
+
+            if (_pendingLockSamples.Count > MaxTrackedPreLockPeers)
+            {
+                // Bound memory if many stray sources are heard before we lock;
+                // keep only the candidate we just heard from.
+                _pendingLockSamples.Clear();
+                _pendingLockSamples[key] = samples;
+            }
+
+            if (samples.Count == LockSampleCount &&
+                SamplesAgree(samples, AgreementToleranceNanoseconds, out medianOffset))
+            {
+                locked = true;
+                Volatile.Write(ref _lockedPeerAddress, sourceAddress);
+                _pendingLockSamples.Clear();
+            }
+        }
+
+        if (!locked)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _masterClockId, candidateClockId);
+        Interlocked.Exchange(ref _offsetNs, medianOffset);
+        Interlocked.Exchange(ref _samples, 1);
+        AppLog.Info(
+            "ptp",
+            $"Locked to grandmaster 0x{MasterClockId:X16} peer={sourceAddress?.ToString() ?? "unknown"} " +
+            $"offset={medianOffset / 1_000_000.0:F3} ms");
+        _lock?.TrySetResult();
+    }
+
+    /// <summary>
+    /// Re-seeds only after <see cref="ReseedSampleCount"/> consecutive rejected samples
+    /// from the locked peer that themselves mutually agree — i.e. the grandmaster's own
+    /// timeline moved, not a transient glitch. Every re-seed is raised as
+    /// <see cref="Reseeded"/> so it is observable, never applied silently.
+    /// </summary>
+    private void TryReseed(long rejectedOffset, ulong candidateClockId)
+    {
+        var reseeded = false;
+        long previousOffset = 0;
+        long newOffset = 0;
+
+        lock (_lockGate)
+        {
+            _pendingReseedSamples.Add((rejectedOffset, candidateClockId));
+            if (_pendingReseedSamples.Count > ReseedSampleCount)
+            {
+                _pendingReseedSamples.RemoveAt(0);
+            }
+
+            if (_pendingReseedSamples.Count == ReseedSampleCount)
+            {
+                var offsets = _pendingReseedSamples.Select(s => s.Offset).ToList();
+                if (SamplesAgree(offsets, AgreementToleranceNanoseconds, out newOffset))
+                {
+                    previousOffset = Interlocked.Read(ref _offsetNs);
+                    Interlocked.Exchange(ref _offsetNs, newOffset);
+                    Volatile.Write(ref _masterClockId, candidateClockId);
+                    _pendingReseedSamples.Clear();
+                    reseeded = true;
+                }
+            }
+        }
+
+        if (!reseeded)
+        {
+            return;
+        }
+
+        AppLog.Warn(
+            "ptp",
+            $"Re-seeded PTP offset after {ReseedSampleCount} consistent rejections " +
+            $"old={previousOffset / 1_000_000.0:F3} ms new={newOffset / 1_000_000.0:F3} ms");
+        Reseeded?.Invoke(
+            this,
+            new PtpReseedEventArgs(previousOffset, newOffset, candidateClockId));
+    }
+
+    private static bool SamplesAgree(IReadOnlyList<long> samples, long toleranceNanoseconds, out long median)
+    {
+        var sorted = samples.ToArray();
+        Array.Sort(sorted);
+        median = sorted[sorted.Length / 2];
+        var spread = sorted[^1] - sorted[0];
+        return spread <= toleranceNanoseconds;
     }
 
     private void MaybeLogPtpDelta(long deltaNs, bool rejected)
@@ -480,4 +649,17 @@ public sealed class PtpClock : IAsyncDisposable
         _general?.Dispose();
         _cts?.Dispose();
     }
+}
+
+/// <summary>Raised when <see cref="PtpClock"/> re-seeds its offset after a sustained,
+/// mutually-consistent disagreement from the locked peer. Represents a clock jump
+/// (re-anchor), not a smooth correction.</summary>
+public sealed class PtpReseedEventArgs(long previousOffsetNanoseconds, long newOffsetNanoseconds, ulong masterClockId)
+    : EventArgs
+{
+    public long PreviousOffsetNanoseconds { get; } = previousOffsetNanoseconds;
+
+    public long NewOffsetNanoseconds { get; } = newOffsetNanoseconds;
+
+    public ulong MasterClockId { get; } = masterClockId;
 }

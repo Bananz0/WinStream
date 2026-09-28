@@ -930,7 +930,7 @@ namespace WinStream
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.Auto,
                     "Auto (recommended)",
-                    "Starts at ~50 ms and adjusts up or down automatically based on delivery pressure. Not a guaranteed delay."));
+                    "Starts at ~250 ms. Raises smoothly, lowers rarely and only between quiet moments, down to ~80 ms. Not a guaranteed delay."));
                 playbackResponsivenessComboBox.Items.Add(CreateQualityOption(
                     PlaybackResponsiveness.LabPacket,
                     StreamingQualityCopy.ExtremeLabel,
@@ -1518,6 +1518,14 @@ namespace WinStream
             {
                 _liveBufferChange = AirPlayLiveQualityCopy.BufferChange(previousFrames, frames);
             }
+            else if (_streamingOrchestrator.Responsiveness == PlaybackResponsiveness.Auto &&
+                frames > LatencyAutoController.AutoFloorFrames)
+            {
+                // Auto has room to lower but hasn't found a safe quiet moment yet — say so
+                // honestly instead of leaving a stale "buffer changed" line on screen or
+                // implying an optimization is actively in progress.
+                _liveBufferChange = "Holding steady — no safe quiet moment yet";
+            }
 
             _lastDisplayedLatencyFrames = frames;
 
@@ -1705,7 +1713,7 @@ namespace WinStream
                 _streamingOrchestrator.ConfigureStreamingQuality(
                     _settings.Settings.PlaybackResponsiveness,
                     _settings.Settings.AudioFidelity);
-                await _streamingOrchestrator.ConnectAsync(device.Device, source);
+                await _streamingOrchestrator.ConnectAsync(device.Device, source, isAutomatic: isAutomatic);
                 await _streamingOrchestrator.SetVolumeAsync(PercentToDb(streamVolumeSlider.Value));
                 RememberReceiver(device);
                 _autoConnect.RecordSuccess();
@@ -1722,14 +1730,15 @@ namespace WinStream
             }
             catch (Exception ex)
             {
+                var autoFailureKind = AutoConnectFailureKindClassifier.Classify(ex);
                 if (isAutomatic)
                 {
-                    _autoConnect.RecordFailure();
+                    _autoConnect.RecordFailure(autoFailureKind);
                 }
 
                 device.SetStatus(
                     isAutomatic
-                        ? "Automatic connection failed. Retrying later."
+                        ? AutoConnectCopy.RetryingStatus(autoFailureKind, ex)
                         : ConnectionFailureCopy.DeviceRow(ex),
                     DeviceStatusKind.Error,
                     ConnectionFailureCopy.Detail(ex));

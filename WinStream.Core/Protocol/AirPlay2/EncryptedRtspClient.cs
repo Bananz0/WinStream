@@ -15,6 +15,20 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
 {
     private const string UserAgent = "AirPlay/415.3";
 
+    // Matches the receiver's ~30s teardown-on-silence budget with margin: a
+    // peer that accepts the TCP connection but never answers must not park
+    // this call (and everything serialized behind _requestGate) forever.
+    private static readonly TimeSpan SendDeadline = TimeSpan.FromSeconds(10);
+
+    // TEARDOWN is best-effort cleanup; a short deadline still bounds it so a
+    // wedged peer cannot hang the recovery path itself.
+    private static readonly TimeSpan TeardownDeadline = TimeSpan.FromSeconds(2);
+
+    // Instance-level so tests can shrink them; production code never changes
+    // these away from the constants above.
+    private TimeSpan _sendDeadline = SendDeadline;
+    private TimeSpan _teardownDeadline = TeardownDeadline;
+
     private readonly string _host;
     private readonly int _port;
     private readonly SemaphoreSlim _requestGate = new(1, 1);
@@ -227,7 +241,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             },
             body,
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("GET /info");
+        response.EnsureAirPlaySuccess("GET /info");
     }
 
     /// <summary>
@@ -253,7 +267,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             },
             BinaryPlist.Write(BuildSessionSetupPayload(LocalAddress, _host, DeviceId, SessionUuid)),
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("SETUP session");
+        response.EnsureAirPlaySuccess("SETUP session");
 
         if (response.Body.Length == 0)
         {
@@ -362,7 +376,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             null,
             null,
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("RECORD");
+        response.EnsureAirPlaySuccess("RECORD");
     }
 
     public async Task StreamSetupAsync(
@@ -423,7 +437,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             },
             body,
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("SETUP stream");
+        response.EnsureAirPlaySuccess("SETUP stream");
 
         if (response.Body.Length == 0)
         {
@@ -454,7 +468,7 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             },
             body,
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("SET_PARAMETER volume");
+        response.EnsureAirPlaySuccess("SET_PARAMETER volume");
     }
 
     /// <summary>
@@ -473,14 +487,14 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
             },
             BinaryPlist.Write(new Dictionary<string, object>()),
             cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccess("POST /feedback");
+        response.EnsureAirPlaySuccess("POST /feedback");
     }
 
     public async Task TeardownAsync(CancellationToken cancellationToken = default)
     {
-        EnsureCrypto();
         try
         {
+            EnsureCrypto();
             var body = BinaryPlist.Write(new Dictionary<string, object>());
             await SendAsync(
                 "TEARDOWN",
@@ -490,20 +504,31 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
                     ["Content-Type"] = "application/x-apple-binary-plist"
                 },
                 body,
+                _teardownDeadline,
                 cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            // Best-effort teardown.
+            // Best-effort teardown: a wedged peer, or a channel already
+            // retired by an earlier timeout, must not block recovery.
         }
     }
 
-    public async Task<RtspResponse> SendAsync(
+    public Task<RtspResponse> SendAsync(
         string method,
         string target,
         IReadOnlyDictionary<string, string>? headers,
         byte[]? body,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SendAsync(method, target, headers, body, _sendDeadline, cancellationToken);
+
+    private async Task<RtspResponse> SendAsync(
+        string method,
+        string target,
+        IReadOnlyDictionary<string, string>? headers,
+        byte[]? body,
+        TimeSpan deadline,
+        CancellationToken cancellationToken)
     {
         EnsureCrypto();
 
@@ -512,63 +537,117 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var request = BuildRequest(method, target, headers, body);
-            await _crypto!.WritePlaintextAsync(request, cancellationToken).ConfigureAwait(false);
-            var response = await ReadResponseAsync(cancellationToken).ConfigureAwait(false);
-            if (!response.IsUnauthorized)
+            // A peer that accepts the TCP connection but never answers must
+            // not park this call (and everything serialized behind
+            // _requestGate) forever. This deadline covers only the RTSP
+            // round trip below, not the gate wait above.
+            using var deadlineCts = new CancellationTokenSource(deadline);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                deadlineCts.Token);
+            var linkedToken = linkedCts.Token;
+            try
             {
-                return response;
+                var request = BuildRequest(method, target, headers, body);
+                await _crypto!.WritePlaintextAsync(request, linkedToken).ConfigureAwait(false);
+                var response = await ReadResponseAsync(linkedToken).ConfigureAwait(false);
+                return response.IsUnauthorized
+                    ? await RetryWithDigestAsync(response, method, target, headers, body, linkedToken)
+                        .ConfigureAwait(false)
+                    : response;
             }
-
-            // Persistent pair-verify alone is not enough when the Mac has an
-            // AirPlay password: SETUP returns Digest 401 until we answer it. A
-            // later 401 on a sticky-authenticated session means the receiver
-            // rotated its nonce — retry with the fresh challenge rather than
-            // giving up, or RECORD/stream SETUP would fail permanently after a
-            // successful SETUP.
-            var plan = RtspDigestRetryPlan.NextAttempt(
-                response.AuthenticationChallenge,
-                method,
-                target,
-                _receiverPassword,
-                headers?.ContainsKey("Authorization") == true);
-            AppLog.Warn(
-                "rtsp",
-                $"{method} refused with 401; havePassword={_receiverPassword is not null}; " +
-                $"retrying={plan is not null}; " +
-                $"challenge={response.AuthenticationChallenge ?? "none"}");
-            if (plan is not { } attempt)
+            catch (OperationCanceledException ex)
+                when (deadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
-                return response;
+                // The deadline fired mid-request/response, not the caller: a
+                // cancelled mid-frame read/write desyncs RtspCryptoStream's
+                // ChaCha counters, so the whole channel must be retired
+                // rather than resumed in place on the next call.
+                RetireChannelAfterTimeout();
+                throw new TimeoutException(
+                    $"{method} timed out after {deadline.TotalSeconds:0.#}s awaiting the RTSP response.",
+                    ex);
             }
-
-            _digestRealm = attempt.Realm;
-            _digestNonce = attempt.Nonce;
-            _digestUsername = attempt.Username;
-            var retryHeaders = headers is null
-                ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
-            retryHeaders["Authorization"] = attempt.Authorization;
-            var retry = BuildRequest(method, target, retryHeaders, body);
-            await _crypto.WritePlaintextAsync(retry, cancellationToken).ConfigureAwait(false);
-            var authenticated = await ReadResponseAsync(cancellationToken).ConfigureAwait(false);
-            if (!authenticated.IsUnauthorized)
-            {
-                return authenticated;
-            }
-
-            // The receiver rejected our Digest response to the password we were
-            // given — do not keep sending it, and let the caller clear it.
-            _digestRealm = null;
-            _digestNonce = null;
-            _digestUsername = null;
-            throw new AirPlayPasswordRejectedException(
-                $"{method} rejected the AirPlay password (RTSP 401 after Digest response).");
         }
         finally
         {
             _requestGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Persistent pair-verify alone is not enough when the Mac has an AirPlay
+    /// password: SETUP returns Digest 401 until we answer it. A later 401 on a
+    /// sticky-authenticated session means the receiver rotated its nonce — retry
+    /// with the fresh challenge rather than giving up, or RECORD/stream SETUP would
+    /// fail permanently after a successful SETUP.
+    /// </summary>
+    private async Task<RtspResponse> RetryWithDigestAsync(
+        RtspResponse response,
+        string method,
+        string target,
+        IReadOnlyDictionary<string, string>? headers,
+        byte[]? body,
+        CancellationToken linkedToken)
+    {
+        var plan = RtspDigestRetryPlan.NextAttempt(
+            response.AuthenticationChallenge,
+            method,
+            target,
+            _receiverPassword,
+            headers?.ContainsKey("Authorization") == true);
+        AppLog.Warn(
+            "rtsp",
+            $"{method} refused with 401; havePassword={_receiverPassword is not null}; " +
+            $"retrying={plan is not null}; " +
+            $"challenge={response.AuthenticationChallenge ?? "none"}");
+        if (plan is not { } attempt)
+        {
+            return response;
+        }
+
+        _digestRealm = attempt.Realm;
+        _digestNonce = attempt.Nonce;
+        _digestUsername = attempt.Username;
+        var retryHeaders = headers is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
+        retryHeaders["Authorization"] = attempt.Authorization;
+        var retry = BuildRequest(method, target, retryHeaders, body);
+        await _crypto!.WritePlaintextAsync(retry, linkedToken).ConfigureAwait(false);
+        var authenticated = await ReadResponseAsync(linkedToken).ConfigureAwait(false);
+        if (!authenticated.IsUnauthorized)
+        {
+            return authenticated;
+        }
+
+        // The receiver rejected our Digest response to the password we were
+        // given — do not keep sending it, and let the caller clear it.
+        _digestRealm = null;
+        _digestNonce = null;
+        _digestUsername = null;
+        throw new AirPlayPasswordRejectedException(
+            $"{method} rejected the AirPlay password (RTSP 401 after Digest response).");
+    }
+
+    /// <summary>
+    /// Retires the crypto channel and underlying socket after a deadline
+    /// timeout so a later call cannot resume a desynced ChaCha stream; the
+    /// caller must fully reconnect (pair-verify + SETUP again).
+    /// </summary>
+    private void RetireChannelAfterTimeout()
+    {
+        _crypto?.Dispose();
+        _crypto = null;
+        _keys = null;
+        ResetTcp();
+    }
+
+    /// <summary>Test seam: shrinks the SendAsync/TeardownAsync deadlines.</summary>
+    internal void SetDeadlinesForTests(TimeSpan sendDeadline, TimeSpan teardownDeadline)
+    {
+        _sendDeadline = sendDeadline;
+        _teardownDeadline = teardownDeadline;
     }
 
     private async Task<RtspResponse> ReadResponseAsync(CancellationToken cancellationToken)

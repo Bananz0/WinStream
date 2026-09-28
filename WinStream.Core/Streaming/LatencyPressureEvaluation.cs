@@ -12,7 +12,10 @@ public static class LatencyPressureEvaluation
         long ReanchorDelta,
         bool IsStreaming,
         bool IsSilent,
-        DateTimeOffset Now);
+        DateTimeOffset Now,
+        long PtpReseedDelta = 0,
+        long GapDelta = 0,
+        TimeSpan SilentDuration = default);
 
     public readonly record struct Outcome(
         bool LatencyChanged,
@@ -55,7 +58,10 @@ public static class LatencyPressureEvaluation
                     signals.IsStreaming,
                     signals.IsSilent,
                     signals.Now,
-                    signals.ReanchorDelta))
+                    signals.ReanchorDelta,
+                    signals.PtpReseedDelta,
+                    signals.GapDelta,
+                    signals.SilentDuration))
             {
                 return default;
             }

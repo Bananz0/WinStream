@@ -46,6 +46,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private long _dropsAtWindowStart;
     private long _slowAtWindowStart;
     private long _reanchorsAtWindowStart;
+    private long _ptpReseedsAtWindowStart;
+    private long _gapsAtWindowStart;
     private DateTimeOffset _signalWindowStart = DateTimeOffset.UtcNow;
     private bool _audioStartedMarked;
     private bool _disposed;
@@ -208,7 +210,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     public async Task ConnectAsync(
         DeviceInfo receiver,
         IAudioSource audioSource,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool isAutomatic = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(receiver);
@@ -284,7 +287,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 }
             }
 
-            var session = CreateConfiguredSession(receiver, protocol, receiverPassword);
+            var session = CreateConfiguredSession(receiver, protocol, receiverPassword, isAutomatic);
             session.StateChanged += OnSessionStateChanged;
             var entry = new SessionEntry(receiver, session, protocol);
             lock (_sessionsGate)
@@ -472,6 +475,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             _audioSource = audioSource;
             _audioSource.FrameAvailable += OnFrameAvailable;
+            _audioSource.GapBurstAvailable += OnGapBurstAvailable;
             _audioSource.DeviceInvalidated += OnDeviceInvalidated;
             _audioSource.CaptureFailed += OnCaptureFailed;
             _fanoutClock.Reset();
@@ -482,6 +486,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 MmcssHandle.TryRegisterCurrentThread,
                 _waiter.WaitUntilDue);
             _sendPump.Start();
+            ApplyLatenessBudget();
             return;
         }
 
@@ -500,6 +505,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         }
 
         _audioSource.FrameAvailable -= OnFrameAvailable;
+        _audioSource.GapBurstAvailable -= OnGapBurstAvailable;
         _audioSource.DeviceInvalidated -= OnDeviceInvalidated;
         _audioSource.CaptureFailed -= OnCaptureFailed;
         _audioSource = null;
@@ -520,6 +526,14 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     {
         // Capture thread: enqueue only. Encode/encrypt runs on the send pump.
         _sendPump?.Enqueue(frame);
+    }
+
+    private void OnGapBurstAvailable(object? sender, IReadOnlyList<AudioFrame> frames)
+    {
+        // A filled gap already cost real time; sending it through the normal paced
+        // path would cost more by re-pacing it, artificially deepening the queue for
+        // the gap's whole duration. Burst it instead.
+        _sendPump?.EnqueueBurst(frames);
     }
 
     private void DispatchQueuedFrame(AudioFrame frame)
@@ -603,7 +617,15 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
             pump.CatchUpClampCount - _reanchorsAtWindowStart,
             _aggregateState is SessionState.Streaming or SessionState.Degraded,
             isSilent,
-            now);
+            now,
+            // A PTP re-seed forces the receiver's timeline to jump exactly like a
+            // scheduler stall: it must raise Auto immediately (HasImmediatePressure),
+            // never wait out the leading-indicator cooldown.
+            PtpReseedDelta: TotalPtpReseedCount() - _ptpReseedsAtWindowStart,
+            // A filled capture gap is the third HasImmediatePressure trigger: it is
+            // already an unavoidable hole, so Auto should raise into it rather than
+            // wait out the leading-indicator cooldown.
+            GapDelta: (_audioSource?.GapCount ?? 0) - _gapsAtWindowStart);
 
         var latencyOutcome = LatencyPressureEvaluation.EvaluateLatencyChange(_latency, signals);
         if (latencyOutcome.LatencyChanged)
@@ -636,6 +658,7 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         LatencyPressureEvaluation.WindowSignals signals)
     {
         ApplyLatencyToAllSessions(_latency.EffectiveFrames);
+        ApplyLatenessBudget();
         LiveQualityChanged?.Invoke(this, EventArgs.Empty);
         var ms = AirPlayLiveQualityCopy.Milliseconds(_latency.EffectiveFrames);
         AppLog.Info(
@@ -648,6 +671,24 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         {
             ClearExtremePressure();
         }
+    }
+
+    /// <summary>
+    /// Ties the send pump's stall-detection budget to the current rung, so a stall
+    /// is judged against how much slack this latency actually affords rather than
+    /// the scheduler's fixed pre-Auto-latency fallback (see
+    /// <see cref="PacketSendScheduler.SetLatenessBudget"/>). Margin below the full
+    /// rung covers ordinary capture jitter and encode overhead; a per-source p95
+    /// measurement would tighten this further but isn't wired through
+    /// <see cref="IAudioSource"/> yet.
+    /// </summary>
+    private void ApplyLatenessBudget()
+    {
+        const uint marginFrames = 2 * AudioPacingConstants.PacketFrames;
+        var budget = _latency.EffectiveFrames > marginFrames
+            ? _latency.EffectiveFrames - marginFrames
+            : 0;
+        _sendPump?.SetLatenessBudget((int)budget);
     }
 
     private void ApplyLatencyToAllSessions(uint frames)
@@ -682,6 +723,30 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
         _dropsAtWindowStart = _sendPump?.QueueDropCount ?? 0;
         _slowAtWindowStart = _sendPump?.SlowSendCount ?? 0;
         _reanchorsAtWindowStart = _sendPump?.CatchUpClampCount ?? 0;
+        _ptpReseedsAtWindowStart = TotalPtpReseedCount();
+        _gapsAtWindowStart = _audioSource?.GapCount ?? 0;
+    }
+
+    /// <summary>
+    /// Sums <see cref="AirPlay2Session.PtpReseedCount"/> across every live AirPlay 2
+    /// session (multi-room fan-out can hold several); RAOP sessions have no PTP
+    /// clock and contribute nothing.
+    /// </summary>
+    private long TotalPtpReseedCount()
+    {
+        lock (_sessionsGate)
+        {
+            long total = 0;
+            foreach (var entry in _sessions.Values)
+            {
+                if (entry.Session is AirPlay2Session airPlay2)
+                {
+                    total += airPlay2.PtpReseedCount;
+                }
+            }
+
+            return total;
+        }
     }
 
     private async Task DisconnectAllAsync(CancellationToken cancellationToken)
@@ -801,20 +866,25 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                     return;
                 }
 
-                try
+                await AttemptReconnectOnceAsync(cancellationToken).ConfigureAwait(false);
+                if (_sessions.Count == 0)
                 {
-                    await AttemptReconnectOnceAsync(cancellationToken).ConfigureAwait(false);
-                    if (_sessions.Values.All(entry => entry.Session.State == SessionState.Streaming))
-                    {
-                        _reconnectBudget.Clear();
-                        CancelReconnectLoop();
-                        RefreshAggregate("reconnected");
-                        return;
-                    }
+                    // Every entry hit a classified failure and was dropped below —
+                    // nothing left to reconnect. Hand off to the outer
+                    // AutoConnectCoordinator's unbounded retry cadence rather than
+                    // spinning an empty loop until the budget expires.
+                    _reconnectBudget.Clear();
+                    CancelReconnectLoop();
+                    SetAggregate(SessionState.Disconnected, "All receivers rejected reconnect.");
+                    return;
                 }
-                catch (Exception ex)
+
+                if (_sessions.Values.All(entry => entry.Session.State == SessionState.Streaming))
                 {
-                    AppLog.Warn("stream", $"Reconnect attempt failed: {ex.GetType().Name}");
+                    _reconnectBudget.Clear();
+                    CancelReconnectLoop();
+                    RefreshAggregate("reconnected");
+                    return;
                 }
 
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -850,7 +920,29 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                 // ignore
             }
 
-            await RebuildEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await RebuildEntryAsync(entry, cancellationToken, isAutomatic: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Each attempt rebuilds a session — a fresh RTSP/SETUP handshake (and,
+                // on AirPlay 2, a fresh Mac Accept prompt). Once THIS receiver's failure
+                // is classified (Silent, Config, or Other), hammering it for the rest of
+                // the 30s budget only multiplies prompts for no benefit — hand off to the
+                // outer AutoConnectCoordinator's unbounded retry cadence for it instead.
+                // Scoped to this one receiver: a multi-room fan-out must not tear down
+                // every other receiver that is still streaming fine because one of them
+                // was rejected.
+                var kind = AutoConnectFailureKindClassifier.Classify(ex);
+                AppLog.Warn(
+                    "stream",
+                    $"Reconnect attempt failed for {entry.Receiver.DisplayName}: " +
+                    $"{ex.GetType().Name} (kind={kind}); handing off to auto-connect.");
+                await RemoveSessionAsync(ReceiverKey.For(entry.Receiver), cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
     }
 
@@ -860,7 +952,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     /// </summary>
     private async Task RebuildEntryAsync(
         SessionEntry entry,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isAutomatic = false)
     {
         var retired = entry.Session;
         retired.StateChanged -= OnSessionStateChanged;
@@ -877,7 +970,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                                 _passwordStore,
                                 ReceiverKey.For(entry.Receiver),
                                 entry.Receiver.RequiresPassword)
-                            : null);
+                            : null,
+                        isAutomatic);
                     replacement.StateChanged += OnSessionStateChanged;
                     lock (_sessionsGate)
                     {
@@ -907,13 +1001,14 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     private IAirPlaySession CreateConfiguredSession(
         DeviceInfo receiver,
         AirPlayProtocolKind protocol,
-        string? receiverPassword = null)
+        string? receiverPassword = null,
+        bool isAutomatic = false)
     {
         IAirPlaySession session = protocol == AirPlayProtocolKind.AirPlay2
             ? new AirPlay2Session(
                 receiver,
                 _senderDeviceId,
-                CreatePairingOptions(receiver, receiverPassword))
+                CreatePairingOptions(receiver, receiverPassword, isAutomatic))
             : new RaopSession(receiver);
         session.SetEffectiveLatencyFrames(_latency.EffectiveFrames);
         session.SetAudioFidelity(_fidelity);
@@ -926,7 +1021,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
     /// </summary>
     private PairingOptions CreatePairingOptions(
         DeviceInfo receiver,
-        string? receiverPassword = null)
+        string? receiverPassword = null,
+        bool isAutomatic = false)
     {
         var receiverKey = ReceiverKey.For(receiver);
         var usePassword = !string.IsNullOrEmpty(receiverPassword);
@@ -956,7 +1052,8 @@ public sealed class StreamingOrchestrator : IAsyncDisposable
                     }
                 }
             },
-            receiverPassword: receiverPassword);
+            receiverPassword: receiverPassword,
+            isAutomatic: isAutomatic);
     }
 
     private void EnsureHomogeneousWithExisting(AirPlayProtocolKind incoming)
