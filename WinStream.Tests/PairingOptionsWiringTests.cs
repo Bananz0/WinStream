@@ -172,6 +172,56 @@ public class PairingOptionsWiringTests
     }
 
     [Fact]
+    public void An_automatic_reconnect_omits_the_PIN_callback_for_a_password_less_receiver()
+    {
+        var store = new FakePairingCredentialStore();
+        Func<CancellationToken, Task<string?>> pin = _ => Task.FromResult<string?>("1234");
+
+        // Unattended background reconnect must never pop a blocking PIN dialog with
+        // nobody present to answer it.
+        var options = PairingOptionsFactory.Create(
+            store,
+            "receiver-a",
+            pin,
+            isAutomatic: true);
+
+        Assert.Null(options.RequestPinAsync);
+    }
+
+    [Fact]
+    public void A_manual_connect_still_gets_the_PIN_callback_for_a_password_less_receiver()
+    {
+        var store = new FakePairingCredentialStore();
+        Func<CancellationToken, Task<string?>> pin = _ => Task.FromResult<string?>("1234");
+
+        var options = PairingOptionsFactory.Create(
+            store,
+            "receiver-a",
+            pin,
+            isAutomatic: false);
+
+        Assert.Same(pin, options.RequestPinAsync);
+    }
+
+    [Fact]
+    public void An_automatic_reconnect_keeps_the_PIN_callback_when_a_password_is_saved()
+    {
+        var store = new FakePairingCredentialStore();
+        Func<CancellationToken, Task<string?>> pin = _ => Task.FromResult<string?>("1234");
+
+        // A saved receiver password already answers the SETUP Digest 401 without a
+        // prompt, so the automatic gate only needs to bite the password-less path.
+        var options = PairingOptionsFactory.Create(
+            store,
+            "receiver-a",
+            pin,
+            isAutomatic: true,
+            receiverPassword: "hunter2");
+
+        Assert.Same(pin, options.RequestPinAsync);
+    }
+
+    [Fact]
     public async Task A_session_accepts_pairing_options_and_keys_off_the_same_receiver()
     {
         var receiver = new DeviceInfo

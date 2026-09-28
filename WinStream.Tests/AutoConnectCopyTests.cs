@@ -1,3 +1,4 @@
+using WinStream.Core.Protocol.AirPlay2;
 using WinStream.Core.Streaming;
 
 namespace WinStream.Tests;
@@ -35,5 +36,45 @@ public class AutoConnectCopyTests
         Assert.Contains("auto-connect", AutoConnectCopy.PreferToolTip);
         Assert.Contains("Preferred", AutoConnectCopy.PreferredToolTip);
         Assert.Equal("Preferred", AutoConnectCopy.PreferredBadge);
+    }
+
+    [Fact]
+    public void A_Config_failure_reads_as_password_rejected_not_an_endless_retry()
+    {
+        var exception = new AirPlayPasswordRejectedException("rejected");
+
+        Assert.Equal(
+            AutoConnectCopy.PasswordRejectedStatus,
+            AutoConnectCopy.RetryingStatus(AutoConnectFailureKind.Config, exception));
+    }
+
+    [Fact]
+    public void A_SETUP_400_reads_as_waiting_on_the_Mac_not_receiver_not_found()
+    {
+        var exception = new RtspStatusException(
+            "SETUP session",
+            400,
+            "SETUP session failed with RTSP 400 Bad Request.");
+
+        Assert.Equal(
+            AutoConnectCopy.WaitingOnMacRetryingStatus,
+            AutoConnectCopy.RetryingStatus(AutoConnectFailureKind.Silent, exception));
+    }
+
+    [Fact]
+    public void An_absent_receiver_reads_as_not_found_distinct_from_the_SETUP_400_case()
+    {
+        var exception = new TimeoutException("dial timed out");
+
+        Assert.Equal(
+            AutoConnectCopy.ReceiverNotFoundRetryingStatus,
+            AutoConnectCopy.RetryingStatus(AutoConnectFailureKind.Silent, exception));
+    }
+
+    [Fact]
+    public void Both_Silent_sub_case_statuses_are_worded_as_retrying()
+    {
+        Assert.Contains("retrying", AutoConnectCopy.ReceiverNotFoundRetryingStatus);
+        Assert.Contains("retrying", AutoConnectCopy.WaitingOnMacRetryingStatus);
     }
 }
