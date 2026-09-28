@@ -46,7 +46,7 @@ public class LatencyPressureEvaluationTests
 
         Assert.True(outcome.LatencyChanged);
         Assert.Equal("Auto", outcome.ModeLabel);
-        Assert.Equal(3520u, outcome.EffectiveFrames);
+        Assert.Equal(16538u, outcome.EffectiveFrames);
     }
 
     [Fact]
@@ -67,7 +67,71 @@ public class LatencyPressureEvaluationTests
         var outcome = LatencyPressureEvaluation.EvaluateLatencyChange(latency, signals);
 
         Assert.True(outcome.LatencyChanged);
-        Assert.Equal(3520u, outcome.EffectiveFrames);
+        Assert.Equal(16538u, outcome.EffectiveFrames);
+    }
+
+    [Fact]
+    public void EvaluateLatencyChange_auto_raises_immediately_on_a_reported_stall()
+    {
+        var latency = new LatencyAutoController();
+        latency.ResetForConnect(PlaybackResponsiveness.Auto);
+        latency.MarkAudioStarted(T0);
+
+        var signals = new LatencyPressureEvaluation.WindowSignals(
+            DropDelta: 0,
+            SlowDelta: 0,
+            ReanchorDelta: 0,
+            IsStreaming: true,
+            IsSilent: false,
+            Now: T0.AddSeconds(3),
+            PtpReseedDelta: 1);
+
+        var outcome = LatencyPressureEvaluation.EvaluateLatencyChange(latency, signals);
+
+        Assert.True(outcome.LatencyChanged);
+        Assert.Equal(16538u, outcome.EffectiveFrames);
+
+        // Immediate raises bypass the raise cooldown, so a second stall in the
+        // very next (still-open) window can raise again right away.
+        var secondSignals = signals with { PtpReseedDelta = 1 };
+        var secondOutcome = LatencyPressureEvaluation.EvaluateLatencyChange(latency, secondSignals);
+
+        Assert.True(secondOutcome.LatencyChanged);
+        Assert.Equal(22050u, secondOutcome.EffectiveFrames);
+    }
+
+    [Fact]
+    public void EvaluateLatencyChange_auto_lowers_only_after_a_reported_silence_window()
+    {
+        var latency = new LatencyAutoController();
+        latency.ResetForConnect(PlaybackResponsiveness.Auto);
+        latency.MarkAudioStarted(T0);
+
+        latency.TryAdjustAuto(0, 0, true, false, T0.AddSeconds(3), ptpReseedDeltaInWindow: 1);
+        Assert.Equal(16538u, latency.EffectiveFrames);
+
+        var t = T0.AddSeconds(5);
+        for (var i = 0; i < LatencyAutoController.LowerCleanWindowsThreshold; i++)
+        {
+            var cleanSignals = new LatencyPressureEvaluation.WindowSignals(
+                0, 0, 0, true, false, t);
+            LatencyPressureEvaluation.EvaluateLatencyChange(latency, cleanSignals);
+            t = t.Add(LatencyAutoController.SignalWindow);
+        }
+
+        var silentSignals = new LatencyPressureEvaluation.WindowSignals(
+            0,
+            0,
+            0,
+            IsStreaming: true,
+            IsSilent: true,
+            Now: t,
+            SilentDuration: LatencyAutoController.MinSilenceForLower);
+
+        var outcome = LatencyPressureEvaluation.EvaluateLatencyChange(latency, silentSignals);
+
+        Assert.True(outcome.LatencyChanged);
+        Assert.Equal(11025u, outcome.EffectiveFrames);
     }
 
     [Fact]

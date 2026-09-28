@@ -13,12 +13,12 @@ public class AirPlayLiveQualityCopyTests
             LatencyAutoController.AutoStartFrames,
             AudioFidelity.Auto);
 
-        Assert.Equal("47.891156 ms", message.Buffer);
-        Assert.Contains("2,112 frames", message.Metrics);
-        Assert.Contains("6 packets", message.Metrics);
+        Assert.Equal("250 ms", message.Buffer);
+        Assert.Contains("11,025 frames", message.Metrics);
+        Assert.Contains("31.321023 packets", message.Metrics);
         Assert.Contains("44,100 Hz", message.Metrics);
         Assert.Contains("1,411,200 bit/s PCM", message.Metrics);
-        Assert.Contains("2,112 frames", message.Tooltip);
+        Assert.Contains("11,025 frames", message.Tooltip);
     }
 
     [Fact]
@@ -108,7 +108,7 @@ public class AirPlayLiveQualityCopyTests
             reanchors: 4);
 
         Assert.Equal(
-            "125,432 packets sent · 125.3 pkt/s · queue 2 · 0 drops · 3 slow sends · 4 re-anchors",
+            "125,432 packets sent · 125.3 pkt/s · queue 2 · 0 drops · 3 slow sends · 4 stalls",
             line);
     }
 
