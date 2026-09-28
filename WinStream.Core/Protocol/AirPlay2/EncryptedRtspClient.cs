@@ -551,55 +551,10 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
                 var request = BuildRequest(method, target, headers, body);
                 await _crypto!.WritePlaintextAsync(request, linkedToken).ConfigureAwait(false);
                 var response = await ReadResponseAsync(linkedToken).ConfigureAwait(false);
-                if (!response.IsUnauthorized)
-                {
-                    return response;
-                }
-
-                // Persistent pair-verify alone is not enough when the Mac has an
-                // AirPlay password: SETUP returns Digest 401 until we answer it. A
-                // later 401 on a sticky-authenticated session means the receiver
-                // rotated its nonce — retry with the fresh challenge rather than
-                // giving up, or RECORD/stream SETUP would fail permanently after a
-                // successful SETUP.
-                var plan = RtspDigestRetryPlan.NextAttempt(
-                    response.AuthenticationChallenge,
-                    method,
-                    target,
-                    _receiverPassword,
-                    headers?.ContainsKey("Authorization") == true);
-                AppLog.Warn(
-                    "rtsp",
-                    $"{method} refused with 401; havePassword={_receiverPassword is not null}; " +
-                    $"retrying={plan is not null}; " +
-                    $"challenge={response.AuthenticationChallenge ?? "none"}");
-                if (plan is not { } attempt)
-                {
-                    return response;
-                }
-
-                _digestRealm = attempt.Realm;
-                _digestNonce = attempt.Nonce;
-                _digestUsername = attempt.Username;
-                var retryHeaders = headers is null
-                    ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                    : new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
-                retryHeaders["Authorization"] = attempt.Authorization;
-                var retry = BuildRequest(method, target, retryHeaders, body);
-                await _crypto.WritePlaintextAsync(retry, linkedToken).ConfigureAwait(false);
-                var authenticated = await ReadResponseAsync(linkedToken).ConfigureAwait(false);
-                if (!authenticated.IsUnauthorized)
-                {
-                    return authenticated;
-                }
-
-                // The receiver rejected our Digest response to the password we were
-                // given — do not keep sending it, and let the caller clear it.
-                _digestRealm = null;
-                _digestNonce = null;
-                _digestUsername = null;
-                throw new AirPlayPasswordRejectedException(
-                    $"{method} rejected the AirPlay password (RTSP 401 after Digest response).");
+                return response.IsUnauthorized
+                    ? await RetryWithDigestAsync(response, method, target, headers, body, linkedToken)
+                        .ConfigureAwait(false)
+                    : response;
             }
             catch (OperationCanceledException ex)
                 when (deadlineCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -618,6 +573,61 @@ public sealed class EncryptedRtspClient : IAsyncDisposable
         {
             _requestGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Persistent pair-verify alone is not enough when the Mac has an AirPlay
+    /// password: SETUP returns Digest 401 until we answer it. A later 401 on a
+    /// sticky-authenticated session means the receiver rotated its nonce — retry
+    /// with the fresh challenge rather than giving up, or RECORD/stream SETUP would
+    /// fail permanently after a successful SETUP.
+    /// </summary>
+    private async Task<RtspResponse> RetryWithDigestAsync(
+        RtspResponse response,
+        string method,
+        string target,
+        IReadOnlyDictionary<string, string>? headers,
+        byte[]? body,
+        CancellationToken linkedToken)
+    {
+        var plan = RtspDigestRetryPlan.NextAttempt(
+            response.AuthenticationChallenge,
+            method,
+            target,
+            _receiverPassword,
+            headers?.ContainsKey("Authorization") == true);
+        AppLog.Warn(
+            "rtsp",
+            $"{method} refused with 401; havePassword={_receiverPassword is not null}; " +
+            $"retrying={plan is not null}; " +
+            $"challenge={response.AuthenticationChallenge ?? "none"}");
+        if (plan is not { } attempt)
+        {
+            return response;
+        }
+
+        _digestRealm = attempt.Realm;
+        _digestNonce = attempt.Nonce;
+        _digestUsername = attempt.Username;
+        var retryHeaders = headers is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
+        retryHeaders["Authorization"] = attempt.Authorization;
+        var retry = BuildRequest(method, target, retryHeaders, body);
+        await _crypto!.WritePlaintextAsync(retry, linkedToken).ConfigureAwait(false);
+        var authenticated = await ReadResponseAsync(linkedToken).ConfigureAwait(false);
+        if (!authenticated.IsUnauthorized)
+        {
+            return authenticated;
+        }
+
+        // The receiver rejected our Digest response to the password we were
+        // given — do not keep sending it, and let the caller clear it.
+        _digestRealm = null;
+        _digestNonce = null;
+        _digestUsername = null;
+        throw new AirPlayPasswordRejectedException(
+            $"{method} rejected the AirPlay password (RTSP 401 after Digest response).");
     }
 
     /// <summary>
