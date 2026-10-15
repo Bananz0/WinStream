@@ -29,7 +29,9 @@ namespace WinStream.Network
     {
         public bool Success { get; init; }
         public bool IsTransient { get; init; }
+        public bool UsesLegacyRawPairing { get; init; }
         public bool PinRequired { get; init; }
+        public byte[] SharedSecret { get; init; } = Array.Empty<byte>();
         public string Message { get; init; } = string.Empty;
     }
 
@@ -67,19 +69,17 @@ namespace WinStream.Network
         {
             try
             {
+                // auth-setup is the FairPlay/MFi handshake — independent of HAP pairing.
+                // A 403 here just means the device doesn't support FairPlay; HAP pair-setup may still work.
                 var authSetupResponse = await TryAuthSetupAsync(rtspClient);
                 if (IsForbiddenOrUnauthorized(authSetupResponse.StatusCode))
                 {
-                    var rejectedMessage = BuildPairingRejectedMessage(authSetupResponse.StatusCode);
-                    Logger.LogMessage(rejectedMessage, "authentication");
-                    return new AirPlay2AuthResult
-                    {
-                        Success = false,
-                        PinRequired = false,
-                        Message = rejectedMessage
-                    };
+                    Logger.LogMessage(
+                        $"auth-setup returned {authSetupResponse.StatusCode}; FairPlay auth was not accepted before pairing. Continuing with HAP-only pairing.",
+                        "authentication");
                 }
 
+                // Fast path: existing stored credentials from a previous pair-setup.
                 var stored = LoadStoredCredentials(deviceInfo);
                 if (stored != null)
                 {
@@ -95,21 +95,50 @@ namespace WinStream.Network
                         "authentication");
                 }
 
+                // If a PIN was provided (env var or from the UI PIN dialog), do full pair-setup.
                 var pin = ResolveConfiguredPin();
                 if (!string.IsNullOrWhiteSpace(pin))
                 {
                     var runtimePinActive = !string.IsNullOrWhiteSpace(_runtimePin);
                     Logger.LogMessage(
-                        $"Using configured AirPlay PIN (runtimePinActive={runtimePinActive}).",
+                        $"Using configured AirPlay PIN (runtimePinActive={runtimePinActive}, length={pin.Trim().Length}).",
                         "authentication");
                     var pairSetupResult = await TryFullPairSetupAsync(
                         rtspClient,
                         pin.Trim(),
                         initiatePinStart: !runtimePinActive);
+
+                    if (!pairSetupResult.Success && runtimePinActive && ShouldRetryPairSetupWithPinStart(pairSetupResult.Message))
+                    {
+                        Logger.LogMessage(
+                            $"Pair-setup with the already displayed PIN failed; retrying after /pair-pin-start on the pair-setup channel. Failure: {pairSetupResult.Message}",
+                            "authentication");
+                        pairSetupResult = await TryFullPairSetupAsync(
+                            rtspClient,
+                            pin.Trim(),
+                            initiatePinStart: true);
+                    }
+
                     if (pairSetupResult.Success && pairSetupResult.Credentials != null)
                     {
                         SaveStoredCredentials(deviceInfo, pairSetupResult.Credentials);
                         return await TryPairVerifyWithStoredCredentialsAsync(rtspClient, pairSetupResult.Credentials);
+                    }
+
+                    if (ShouldTryLegacyRawAfterHkpFailure(pairSetupResult.Message))
+                    {
+                        Logger.LogMessage(
+                            $"HKP PIN pair-setup is not usable on this receiver; trying legacy raw pairing. Failure: {pairSetupResult.Message}",
+                            "authentication");
+                        var rawAfterPinResult = await TryLegacyRawPairingAsync(rtspClient);
+                        if (rawAfterPinResult.Success)
+                        {
+                            return rawAfterPinResult;
+                        }
+
+                        Logger.LogMessage(
+                            $"Legacy raw pairing after HKP PIN failure did not succeed: {rawAfterPinResult.Message}",
+                            "authentication");
                     }
 
                     return new AirPlay2AuthResult
@@ -120,22 +149,66 @@ namespace WinStream.Network
                     };
                 }
 
+                // Try legacy raw pairing first — works on Samsung and many non-Apple AirPlay 2
+                // devices without opening side-channel TCP connections or burning HAP SRP timeouts.
+                var rawPairingResult = await TryLegacyRawPairingAsync(rtspClient);
+                if (rawPairingResult.Success)
+                {
+                    return rawPairingResult;
+                }
+
+                Logger.LogMessage(
+                    $"Legacy raw pairing did not succeed ({rawPairingResult.Message}); trying HAP SRP paths.",
+                    "authentication");
+
+                // Try full pair-setup with an empty setup code. macOS AirPlay Receiver with
+                // password disabled still performs SRP, but should not need /pair-pin-start.
+                var openPairSetupResult = await TryFullPairSetupAsync(
+                    rtspClient,
+                    pin: string.Empty,
+                    initiatePinStart: false);
+                if (openPairSetupResult.Success && openPairSetupResult.Credentials != null)
+                {
+                    SaveStoredCredentials(deviceInfo, openPairSetupResult.Credentials);
+                    return await TryPairVerifyWithStoredCredentialsAsync(rtspClient, openPairSetupResult.Credentials);
+                }
+
+                // Try transient pairing (PIN = "3939") — works on many open receivers.
+                var transientResult = await TryTransientPairingAsync(
+                    rtspClient,
+                    setupCode: TransientPin,
+                    description: "transient");
+                if (transientResult.Success)
+                {
+                    return transientResult;
+                }
+
+                // Last resort: ask the device to display a pairing PIN for the user to enter.
+                // /pair-pin-start puts the device into PIN-display mode, so only call it when all
+                // no-interaction paths have been exhausted.
                 var pinAvailability = await TryPinPairingAvailabilityAsync(rtspClient);
                 if (pinAvailability.PinRequired)
                 {
+                    // Device is now showing a PIN — return immediately so the UI can prompt.
                     return new AirPlay2AuthResult
                     {
                         Success = false,
                         PinRequired = true,
                         Message =
-                            $"{pinAvailability.Message} Provide PIN in the app or set {PinEnvVar} to perform full pair-setup and persist credentials."
+                            $"{pinAvailability.Message} Enter the PIN shown on the device, or set {PinEnvVar}."
                     };
                 }
 
-                var transientResult = await TryTransientPairingAsync(rtspClient);
-                if (transientResult.Success)
+                if (!string.IsNullOrWhiteSpace(pinAvailability.Message) &&
+                    (pinAvailability.Message.Contains("403", StringComparison.Ordinal) ||
+                     pinAvailability.Message.Contains("401", StringComparison.Ordinal)))
                 {
-                    return transientResult;
+                    return new AirPlay2AuthResult
+                    {
+                        Success = false,
+                        PinRequired = false,
+                        Message = pinAvailability.Message
+                    };
                 }
 
                 return transientResult;
@@ -179,6 +252,62 @@ namespace WinStream.Network
             }
 
             return false;
+        }
+
+        private static bool ShouldRetryPairSetupWithPinStart(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            // A timeout on M1 means the device does not speak HAP SRP at all.
+            // Retrying with /pair-pin-start first would also timeout and waste another connection.
+            if (IsTimeoutMessage(message))
+            {
+                return false;
+            }
+
+            if (message.Contains("server proof verification failed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("HAP error 2", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("authentication failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return message.Contains("Pair-setup M1 failed", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("Pair-setup M3 failed", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("missing salt/public key", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("missing server proof", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("RTSP_ERROR", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldTryLegacyRawAfterHkpFailure(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            // Legacy raw was already tried before HAP SRP. No point retrying it here.
+            if (IsTimeoutMessage(message))
+            {
+                return false;
+            }
+
+            if (message.Contains("server proof verification failed", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("HAP error 2", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return message.Contains("Pair-setup M1 failed", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("missing salt/public key", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("missing server proof", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("status 400", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("status 404", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("status 405", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("status 501", StringComparison.OrdinalIgnoreCase);
         }
 
         public static async Task<PairVerifyProbeResult> TryPairVerifyProbeAsync(string ipAddress, int port)
@@ -270,6 +399,31 @@ namespace WinStream.Network
             _runtimePin = string.Empty;
         }
 
+        public static string PeekConfiguredPin()
+        {
+            return ResolveConfiguredPin();
+        }
+
+        public static void ForgetStoredCredentials()
+        {
+            try
+            {
+                var path = PairingStorePath;
+                if (!File.Exists(path))
+                {
+                    Logger.LogMessage($"No AirPlay 2 pairing store exists at {path}.", "authentication");
+                    return;
+                }
+
+                File.Delete(path);
+                Logger.LogMessage($"Deleted AirPlay 2 pairing store at {path}.", "authentication");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogMessage($"Failed to delete AirPlay 2 pairing store: {ex.Message}", "authentication");
+            }
+        }
+
         private static string ResolveConfiguredPin()
         {
             if (!string.IsNullOrWhiteSpace(_runtimePin))
@@ -296,18 +450,38 @@ namespace WinStream.Network
                 {
                     return (false, BuildPairingRejectedMessage(response.StatusCode));
                 }
+
+                if (IsPairPinStartLikelyWaitingForUser(response))
+                {
+                    return (true, $"Receiver may be waiting for PIN pairing (HKP {hkpVersion}); /pair-pin-start did not return before timeout.");
+                }
             }
 
             return (false, $"PIN pairing not available: {last?.StatusLine ?? "no response"}");
         }
 
-        private static async Task<AirPlay2AuthResult> TryTransientPairingAsync(RtspClient rtspClient)
+        private static bool IsPairPinStartLikelyWaitingForUser(RtspResponse response)
+        {
+            if (response == null)
+            {
+                return false;
+            }
+
+            var status = response.StatusLine ?? string.Empty;
+            return response.StatusCode == 0 &&
+                   (status.Contains("TimeoutException", StringComparison.OrdinalIgnoreCase) ||
+                    status.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static async Task<AirPlay2AuthResult> TryTransientPairingAsync(
+            RtspClient rtspClient,
+            string setupCode,
+            string description)
         {
             try
             {
-                var pairPinStartResponse = await SendPairPinStartAsync(rtspClient, hkpVersion: 4);
-                var pinFlowAvailable = pairPinStartResponse.StatusCode == 200;
-
+                // Transient/open pairing does not require user interaction.
+                // Do NOT call /pair-pin-start here — that would trigger a PIN display on the device.
                 var m2 = await SendPairSetupM1Async(rtspClient, pinMethod: 0x00, hkpVersion: 4, transient: true);
                 if (!m2.Success)
                 {
@@ -324,15 +498,13 @@ namespace WinStream.Network
                     return new AirPlay2AuthResult
                     {
                         Success = false,
-                        PinRequired = pinFlowAvailable,
-                        Message = pinFlowAvailable
-                            ? $"Transient pair-setup failed: {m2.Message}"
-                            : m2.Message
+                        PinRequired = false,
+                        Message = m2.Message
                     };
                 }
 
                 var srp = CreateSrpClient();
-                var m3Payload = srp.CreateStepM3Payload(m2.Salt, m2.ServerPublicKey, TransientPin);
+                var m3Payload = srp.CreateStepM3Payload(m2.Salt, m2.ServerPublicKey, setupCode);
                 var m4Response = await PostTlvAsync(rtspClient, "/pair-setup", m3Payload, hkpVersion: 4);
                 if (m4Response.StatusCode != 200)
                 {
@@ -349,7 +521,7 @@ namespace WinStream.Network
                     return new AirPlay2AuthResult
                     {
                         Success = false,
-                        PinRequired = pinFlowAvailable,
+                        PinRequired = false,
                         Message = $"Transient pair-setup M3 failed with status {m4Response.StatusCode}."
                     };
                 }
@@ -357,11 +529,12 @@ namespace WinStream.Network
                 var m4Tlv = HapTlv8.Decode(m4Response.BodyBytes);
                 if (m4Tlv.TryGetValue((byte)HapTlvType.Error, out var transientError) && transientError.Length > 0)
                 {
+                    // HAP error 2 = authentication failure (wrong PIN/setup code).
                     return new AirPlay2AuthResult
                     {
                         Success = false,
-                        PinRequired = pinFlowAvailable || transientError[0] == 0x02,
-                        Message = $"Transient pair-setup rejected with HAP error {transientError[0]}."
+                        PinRequired = transientError[0] == 0x02,
+                        Message = $"{description} pair-setup rejected with HAP error {transientError[0]}."
                     };
                 }
 
@@ -370,8 +543,8 @@ namespace WinStream.Network
                     return new AirPlay2AuthResult
                     {
                         Success = false,
-                        PinRequired = pinFlowAvailable,
-                        Message = "Transient pair-setup did not return server proof."
+                        PinRequired = false,
+                        Message = $"{description} pair-setup did not return server proof."
                     };
                 }
 
@@ -380,19 +553,20 @@ namespace WinStream.Network
                     return new AirPlay2AuthResult
                     {
                         Success = false,
-                        PinRequired = pinFlowAvailable,
-                        Message = "Transient pair-setup server proof verification failed."
+                        PinRequired = false,
+                        Message = $"{description} pair-setup server proof verification failed."
                     };
                 }
 
                 var sessionKey = srp.GetSessionKey();
                 EnableControlEncryption(rtspClient, sessionKey);
-                Logger.LogMessage("AirPlay 2 transient pairing succeeded.", "authentication");
+                Logger.LogMessage($"AirPlay 2 {description} pairing succeeded.", "authentication");
                 return new AirPlay2AuthResult
                 {
                     Success = true,
                     IsTransient = true,
-                    Message = "AirPlay 2 transient pairing succeeded."
+                    SharedSecret = sessionKey,
+                    Message = $"AirPlay 2 {description} pairing succeeded."
                 };
             }
             catch (Exception ex)
@@ -401,7 +575,122 @@ namespace WinStream.Network
                 {
                     Success = false,
                     PinRequired = false,
-                    Message = $"Transient pair-setup failed: {ex.Message}"
+                    Message = $"{description} pair-setup failed: {ex.Message}"
+                };
+            }
+        }
+
+        // Headers that match what UxPlay-derived receivers (and many phone-side AirPlay
+        // receiver apps) expect on the raw pair-setup/pair-verify path. RTSP/1.0 is required;
+        // HTTP/1.1 makes some receivers silently drop the connection. The User-Agent must be
+        // a recent AirPlay/* string — old iTunes UAs are filtered out.
+        private static Dictionary<string, string> RawPairingHeaders()
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Content-Type"] = "application/octet-stream",
+                ["User-Agent"] = "AirPlay/935.7.1",
+                ["X-Apple-ProtocolVersion"] = "1",
+            };
+        }
+
+        private static async Task<AirPlay2AuthResult> TryLegacyRawPairingAsync(RtspClient rtspClient)
+        {
+            try
+            {
+                var random = new SecureRandom();
+                var edPrivate = new Ed25519PrivateKeyParameters(random);
+                var edPublic = edPrivate.GeneratePublicKey().GetEncoded();
+                var setupResponse = await rtspClient.SendCustomRequestAsync(
+                    "POST",
+                    "/pair-setup",
+                    RawPairingHeaders(),
+                    edPublic,
+                    protocol: "RTSP/1.0");
+
+                if (setupResponse.StatusCode != 200 || setupResponse.BodyBytes.Length != 32)
+                {
+                    return new AirPlay2AuthResult
+                    {
+                        Success = false,
+                        Message = $"Legacy raw pair-setup failed with status {setupResponse.StatusCode}."
+                    };
+                }
+
+                var serverEdPublic = setupResponse.BodyBytes;
+                var verifyPrivate = new X25519PrivateKeyParameters(random);
+                var verifyPublic = verifyPrivate.GeneratePublicKey().GetEncoded();
+                var m1 = Concat(new byte[] { 0x01, 0x00, 0x00, 0x00 }, verifyPublic, edPublic);
+                var m2Response = await rtspClient.SendCustomRequestAsync(
+                    "POST",
+                    "/pair-verify",
+                    RawPairingHeaders(),
+                    m1,
+                    protocol: "RTSP/1.0");
+
+                if (m2Response.StatusCode != 200 || m2Response.BodyBytes.Length != 96)
+                {
+                    return new AirPlay2AuthResult
+                    {
+                        Success = false,
+                        Message = $"Legacy raw pair-verify M1 failed with status {m2Response.StatusCode}."
+                    };
+                }
+
+                var serverVerifyPublic = m2Response.BodyBytes.Take(32).ToArray();
+                var encryptedServerSignature = m2Response.BodyBytes.Skip(32).Take(64).ToArray();
+                var sharedSecret = new byte[32];
+                verifyPrivate.GenerateSecret(new X25519PublicKeyParameters(serverVerifyPublic), sharedSecret, 0);
+
+                var aesKey = Sha512Prefix("Pair-Verify-AES-Key", sharedSecret, 16);
+                var aesIv = Sha512Prefix("Pair-Verify-AES-IV", sharedSecret, 16);
+                var serverSignature = AesCtrCrypt(aesKey, aesIv, encryptedServerSignature, skipBytes: 0);
+                if (!VerifyEd25519(
+                        new Ed25519PublicKeyParameters(serverEdPublic),
+                        Concat(serverVerifyPublic, verifyPublic),
+                        serverSignature))
+                {
+                    return new AirPlay2AuthResult
+                    {
+                        Success = false,
+                        Message = "Legacy raw pair-verify server signature validation failed."
+                    };
+                }
+
+                var clientSignature = SignEd25519(edPrivate, Concat(verifyPublic, serverVerifyPublic));
+                var encryptedClientSignature = AesCtrCrypt(aesKey, aesIv, clientSignature, skipBytes: 64);
+                var m3 = Concat(new byte[] { 0x00, 0x00, 0x00, 0x00 }, encryptedClientSignature);
+                var m4Response = await rtspClient.SendCustomRequestAsync(
+                    "POST",
+                    "/pair-verify",
+                    RawPairingHeaders(),
+                    m3,
+                    protocol: "RTSP/1.0");
+
+                if (m4Response.StatusCode != 200)
+                {
+                    return new AirPlay2AuthResult
+                    {
+                        Success = false,
+                        Message = $"Legacy raw pair-verify M3 failed with status {m4Response.StatusCode}."
+                    };
+                }
+
+                Logger.LogMessage("Legacy raw AirPlay pair-verify succeeded.", "authentication");
+                return new AirPlay2AuthResult
+                {
+                    Success = true,
+                    UsesLegacyRawPairing = true,
+                    SharedSecret = sharedSecret,
+                    Message = "Legacy raw AirPlay pair-verify succeeded."
+                };
+            }
+            catch (Exception ex)
+            {
+                return new AirPlay2AuthResult
+                {
+                    Success = false,
+                    Message = $"Legacy raw pair-verify failed: {ex.Message}"
                 };
             }
         }
@@ -450,7 +739,9 @@ namespace WinStream.Network
                 var authSetup = await TryAuthSetupAsync(pairSetupClient);
                 if (IsForbiddenOrUnauthorized(authSetup.StatusCode))
                 {
-                    return (false, BuildPairingRejectedMessage(authSetup.StatusCode), null);
+                    Logger.LogMessage(
+                        $"auth-setup returned {authSetup.StatusCode} on pair-setup channel; continuing with HAP pair-setup.",
+                        "authentication");
                 }
 
                 if (initiatePinStart)
@@ -696,6 +987,7 @@ namespace WinStream.Network
                 return new AirPlay2AuthResult
                 {
                     Success = true,
+                    SharedSecret = sharedSecret,
                     Message = $"AirPlay 2 pair-verify succeeded and control encryption enabled (HKP {hkpVersion})."
                 };
             }
@@ -781,6 +1073,9 @@ namespace WinStream.Network
             byte[] body,
             int hkpVersion)
         {
+            Logger.LogMessage(
+                $"HAP TLV POST {path} HKP={hkpVersion} bodyLen={body?.Length ?? 0} {DescribeTlv(body)}",
+                "authentication");
             return await SendPostWithProtocolFallbackAsync(rtspClient, path, BuildHapHeaders(hkpVersion), body);
         }
 
@@ -833,6 +1128,9 @@ namespace WinStream.Network
                     body,
                     protocol: protocol);
                 last = response;
+                Logger.LogMessage(
+                    $"{path} over {protocol} -> {response.StatusLine} bodyLen={response.BodyBytes?.Length ?? 0} {DescribeTlv(response.BodyBytes)}",
+                    "authentication");
 
                 if (!ShouldRetryAlternateProtocol(response))
                 {
@@ -873,9 +1171,59 @@ namespace WinStream.Network
                    response.StatusCode == 501;
         }
 
+        private static string DescribeTlv(byte[] body)
+        {
+            if (body == null || body.Length == 0)
+            {
+                return "tlv=empty";
+            }
+
+            try
+            {
+                var decoded = HapTlv8.Decode(body);
+                if (decoded.Count == 0)
+                {
+                    return "tlv=unparsed";
+                }
+
+                var parts = decoded
+                    .OrderBy(entry => entry.Key)
+                    .Select(entry =>
+                    {
+                        var name = Enum.IsDefined(typeof(HapTlvType), entry.Key)
+                            ? ((HapTlvType)entry.Key).ToString()
+                            : $"0x{entry.Key:X2}";
+                        var value = entry.Value ?? Array.Empty<byte>();
+                        if (entry.Key == (byte)HapTlvType.State && value.Length > 0)
+                        {
+                            return $"{name}:{value.Length}:state={value[0]}";
+                        }
+
+                        if (entry.Key == (byte)HapTlvType.Error && value.Length > 0)
+                        {
+                            return $"{name}:{value.Length}:error={value[0]}";
+                        }
+
+                        return $"{name}:{value.Length}";
+                    });
+
+                return $"tlv=[{string.Join(",", parts)}]";
+            }
+            catch (Exception ex)
+            {
+                return $"tlv=parse-error:{ex.GetType().Name}";
+            }
+        }
+
         private static bool ShouldRetryWithAlternateHkp(string message)
         {
             if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            // Timeout means the device ignores HAP SRP entirely — a different HKP version won't help.
+            if (IsTimeoutMessage(message))
             {
                 return false;
             }
@@ -889,6 +1237,12 @@ namespace WinStream.Network
                    !message.Contains("HAP error 2", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsTimeoutMessage(string message)
+        {
+            return message.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("TimeoutException", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsForbiddenOrUnauthorized(int statusCode)
         {
             return statusCode == 401 || statusCode == 403;
@@ -896,7 +1250,7 @@ namespace WinStream.Network
 
         private static string BuildPairingRejectedMessage(int statusCode)
         {
-            return $"Receiver rejected pairing setup ({statusCode}). This receiver likely requires Apple-account/current-user authorization and may not support PIN pairing from WinStream.";
+            return $"Receiver rejected pairing setup ({statusCode}). On macOS, set System Settings > General > AirDrop & Handoff > AirPlay Receiver to allow Everyone or Anyone on the Same Network, then retry. Current User or Apple Account modes reject third-party PIN pairing before WinStream can authenticate.";
         }
 
         private static SrpClientSession CreateSrpClient()
@@ -911,6 +1265,60 @@ namespace WinStream.Network
             var output = new byte[outputLength];
             generator.GenerateBytes(output, 0, outputLength);
             return output;
+        }
+
+        private static byte[] Sha512Prefix(string salt, byte[] secret, int outputLength)
+        {
+            using var sha512 = SHA512.Create();
+            var hash = sha512.ComputeHash(Concat(Encoding.ASCII.GetBytes(salt), secret));
+            var output = new byte[outputLength];
+            Buffer.BlockCopy(hash, 0, output, 0, output.Length);
+            return output;
+        }
+
+        private static byte[] AesCtrCrypt(byte[] key, byte[] iv, byte[] input, int skipBytes)
+        {
+            using var aes = Aes.Create();
+            aes.Mode = CipherMode.ECB;
+            aes.Padding = PaddingMode.None;
+            aes.Key = key;
+
+            using var encryptor = aes.CreateEncryptor();
+            var counter = iv.ToArray();
+            var output = new byte[input.Length];
+            var streamOffset = 0;
+            var inputOffset = 0;
+            var counterBlock = new byte[16];
+            while (inputOffset < input.Length)
+            {
+                encryptor.TransformBlock(counter, 0, counter.Length, counterBlock, 0);
+                IncrementBigEndian(counter);
+
+                for (var i = 0; i < counterBlock.Length && inputOffset < input.Length; i++, streamOffset++)
+                {
+                    if (streamOffset < skipBytes)
+                    {
+                        continue;
+                    }
+
+                    output[inputOffset] = (byte)(input[inputOffset] ^ counterBlock[i]);
+                    inputOffset++;
+                }
+            }
+
+            return output;
+        }
+
+        private static void IncrementBigEndian(byte[] counter)
+        {
+            for (var i = counter.Length - 1; i >= 0; i--)
+            {
+                counter[i]++;
+                if (counter[i] != 0)
+                {
+                    break;
+                }
+            }
         }
 
         private static byte[] EncryptChaCha(byte[] key, byte[] nonceInput, byte[] plaintext, byte[] aad)

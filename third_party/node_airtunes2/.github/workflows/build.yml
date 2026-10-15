@@ -1,0 +1,63 @@
+name: Build
+
+on: push
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "yarn"
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+
+      - name: Install DiskUtils (macOS)
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install setuptools
+          pip install packaging
+
+      - name: Install Dependencies
+        run: yarn install
+
+        # npm config set msvs_version 2022
+
+      - name: Build tar files
+        run: yarn build
+
+      - name: Build Exe (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        run: yarn exe
+
+      - name: Upload release assets
+        uses: svenstaro/upload-release-action@v2
+        with:
+          tag: "v2.4.9"
+          overwrite: true
+          file: prebuilds/*.tar.gz
+          file_glob: true
+
+      - name: Upload executable
+        if: ${{ matrix.os == 'windows-latest' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          tag: "v2.4.9"
+          overwrite: true
+          file: ./airtunes2.exe

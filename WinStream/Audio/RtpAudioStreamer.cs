@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using WinStream.Network;
@@ -19,6 +20,8 @@ namespace WinStream.Audio
         private readonly int _framesPerPacket;
         private readonly int _sampleRate;
         private readonly AudioCodec _audioCodec;
+        private readonly byte[] _audioAesKey;
+        private readonly byte[] _audioAesIv;
         
         private ushort _sequenceNumber;
         private uint _rtpTimestamp;
@@ -42,7 +45,14 @@ namespace WinStream.Audio
         /// <param name="serverPort">Server audio port from SETUP response</param>
         /// <param name="framesPerPacket">Audio frames per RTP packet (typically 352)</param>
         /// <param name="sampleRate">Audio sample rate (typically 44100)</param>
-        public RtpAudioStreamer(string serverIp, int serverPort, int framesPerPacket = 352, int sampleRate = 44100, AudioCodec audioCodec = AudioCodec.AppleLossless)
+        public RtpAudioStreamer(
+            string serverIp,
+            int serverPort,
+            int framesPerPacket = 352,
+            int sampleRate = 44100,
+            AudioCodec audioCodec = AudioCodec.AppleLossless,
+            byte[] audioAesKey = null,
+            byte[] audioAesIv = null)
         {
             _serverEndpoint = new IPEndPoint(IPAddress.Parse(serverIp), serverPort);
             _audioSocket = new UdpClient();
@@ -51,13 +61,17 @@ namespace WinStream.Audio
             _framesPerPacket = framesPerPacket;
             _sampleRate = sampleRate;
             _audioCodec = audioCodec;
+            _audioAesKey = IsValidAesMaterial(audioAesKey, audioAesIv) ? (byte[])audioAesKey.Clone() : null;
+            _audioAesIv = IsValidAesMaterial(audioAesKey, audioAesIv) ? (byte[])audioAesIv.Clone() : null;
             
             // Initialize RTP state
             _sequenceNumber = (ushort)new Random().Next(0, ushort.MaxValue);
             _rtpTimestamp = (uint)new Random().Next(0, int.MaxValue);
             _ssrc = (uint)new Random().Next();
             
-            Logger.LogMessage($"RTP Streamer initialized - Server: {serverIp}:{serverPort}, SSRC: {_ssrc:X8}, Codec: {_audioCodec}", "audio");
+            Logger.LogMessage(
+                $"RTP Streamer initialized - Server: {serverIp}:{serverPort}, SSRC: {_ssrc:X8}, Codec: {_audioCodec}, Encryption: {(_audioAesKey != null ? "AES-CBC" : "none")}",
+                "audio");
         }
 
         /// <summary>
@@ -69,15 +83,17 @@ namespace WinStream.Audio
             if (alacData == null || alacData.Length == 0)
                 return;
 
-            // Build RTP packet with ALAC payload (12-byte RTP + 4-byte ALAC header + payload)
-            var rtpPacket = new byte[12 + 4 + alacData.Length];
-            int offset = WriteRtpHeader(rtpPacket, marker: true);
+            var payload = new byte[4 + alacData.Length];
+            payload[0] = 0x00; // Flags
+            payload[1] = 0x00; // Reserved
+            payload[2] = (byte)(_framesPerPacket >> 8);
+            payload[3] = (byte)(_framesPerPacket & 0xFF);
+            Buffer.BlockCopy(alacData, 0, payload, 4, alacData.Length);
+            payload = EncryptAudioPayloadIfNeeded(payload);
 
-            rtpPacket[offset++] = 0x00; // Flags
-            rtpPacket[offset++] = 0x00; // Reserved
-            rtpPacket[offset++] = (byte)(_framesPerPacket >> 8);
-            rtpPacket[offset++] = (byte)(_framesPerPacket & 0xFF);
-            Buffer.BlockCopy(alacData, 0, rtpPacket, offset, alacData.Length);
+            var rtpPacket = new byte[12 + payload.Length];
+            int offset = WriteRtpHeader(rtpPacket, marker: true);
+            Buffer.BlockCopy(payload, 0, rtpPacket, offset, payload.Length);
 
             try
             {
@@ -95,8 +111,38 @@ namespace WinStream.Audio
         }
 
         /// <summary>
-        /// Sends raw PCM audio (will be converted to simple format for testing)
-        /// For production, use SendAudioPacketAsync with proper ALAC encoding
+        /// Sends an already-framed compressed audio payload directly after the RTP header.
+        /// AirPlay 2 AAC-ELD uses this path; unlike ALAC it must not receive the
+        /// four byte AirPlay 1 ALAC frame header.
+        /// </summary>
+        public async Task SendRawAudioPayloadPacketAsync(byte[] payload)
+        {
+            if (payload == null || payload.Length == 0)
+            {
+                return;
+            }
+
+            payload = EncryptAudioPayloadIfNeeded(payload);
+
+            var rtpPacket = new byte[12 + payload.Length];
+            var headerOffset = WriteRtpHeader(rtpPacket, marker: true);
+            Buffer.BlockCopy(payload, 0, rtpPacket, headerOffset, payload.Length);
+
+            try
+            {
+                await _audioSocket.SendAsync(rtpPacket, rtpPacket.Length);
+                _sequenceNumber++;
+                _rtpTimestamp += (uint)_framesPerPacket;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error sending RTP raw payload packet: {ex.Message}");
+                Logger.LogMessage($"RTP raw payload send error: {ex.Message}", "audio");
+            }
+        }
+
+        /// <summary>
+        /// Sends raw PCM audio (will be converted to RTP L16 for legacy receivers).
         /// </summary>
         /// <param name="pcmData">Raw PCM audio data (16-bit stereo)</param>
         public async Task SendPcmPacketAsync(byte[] pcmData)
@@ -113,6 +159,8 @@ namespace WinStream.Audio
                 payload[i] = pcmData[i + 1];
                 payload[i + 1] = pcmData[i];
             }
+
+            payload = EncryptAudioPayloadIfNeeded(payload);
 
             var rtpPacket = new byte[12 + payload.Length];
             var headerOffset = WriteRtpHeader(rtpPacket, marker: true);
@@ -144,6 +192,10 @@ namespace WinStream.Audio
                 if (_audioCodec == AudioCodec.AppleLossless)
                 {
                     await SendAudioPacketAsync(silence);
+                }
+                else if (_audioCodec == AudioCodec.AirPlay2AacEld)
+                {
+                    await SendRawAudioPayloadPacketAsync(silence);
                 }
                 else
                 {
@@ -208,6 +260,36 @@ namespace WinStream.Audio
             buffer[offset++] = (byte)(_ssrc >> 8);
             buffer[offset++] = (byte)(_ssrc & 0xFF);
             return offset;
+        }
+
+        private static bool IsValidAesMaterial(byte[] key, byte[] iv)
+            => key?.Length == 16 && iv?.Length == 16;
+
+        private byte[] EncryptAudioPayloadIfNeeded(byte[] payload)
+        {
+            if (_audioAesKey == null || payload == null || payload.Length == 0)
+            {
+                return payload;
+            }
+
+            var encryptedLength = payload.Length / 16 * 16;
+            if (encryptedLength == 0)
+            {
+                return payload;
+            }
+
+            var output = new byte[payload.Length];
+            using var aes = Aes.Create();
+            aes.Mode = CipherMode.CBC;
+            aes.Padding = PaddingMode.None;
+            aes.Key = _audioAesKey;
+            aes.IV = _audioAesIv;
+
+            using var encryptor = aes.CreateEncryptor();
+            var encrypted = encryptor.TransformFinalBlock(payload, 0, encryptedLength);
+            Buffer.BlockCopy(encrypted, 0, output, 0, encrypted.Length);
+            Buffer.BlockCopy(payload, encryptedLength, output, encryptedLength, payload.Length - encryptedLength);
+            return output;
         }
     }
 }

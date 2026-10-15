@@ -36,6 +36,7 @@ namespace WinStream.Network
         public RSAParameters? RsaPublicKey { get; set; }
         public string SupportedCodecs { get; set; }
         public string EncryptionTypes { get; set; }
+        public string[] RawTxtRecords { get; set; } = System.Array.Empty<string>();
         public string HouseholdID { get; set; }
         public string GroupUUID { get; set; }
         public bool IsGroupLeader { get; set; }
@@ -47,9 +48,13 @@ namespace WinStream.Network
         public bool HasRsaPublicKey => RsaPublicKey.HasValue;
         public bool HasEd25519PublicKey => !string.IsNullOrEmpty(PublicKey) && !HasRsaPublicKey;
         public bool IsAirPlay2Device => HasEd25519PublicKey;
+        public string AirPlayGenerationLabel => IsAirPlay2Device ? "AirPlay 2" : "AirPlay";
         public bool SupportsAlac => SupportsCodec(1);
         public bool SupportsL16 => SupportsCodec(0);
+        public bool SupportsAacEld => SupportsCodec(2);
         public bool SupportsUnencryptedRaop => SupportsEncryptionType(0);
+        public bool RequiresPairingPin => (SystemFlags & ((1L << 3) | (1L << 9))) != 0;
+        public bool RequiresDevicePassword => (SystemFlags & (1L << 7)) != 0;
 
         private bool SupportsCodec(int codecId)
         {

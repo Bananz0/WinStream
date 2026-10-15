@@ -1,0 +1,93 @@
+{
+  "name": "airtunes2",
+  "description": "an AirTunes v2 implementation: stream wirelessly to audio devices.",
+  "keywords": [
+    "airtunes",
+    "airplay",
+    "raop",
+    "coreaudio",
+    "sound",
+    "audio",
+    "cider"
+  ],
+  "version": "2.4.9",
+  "author": "vapormusic <vapormusic.service@gmail.com>",
+  "main": "./lib/index.js",
+  "bin": "./examples/play_stdin.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ciderapp/node_airtunes2.git"
+  },
+  "scripts": {
+    "build": "run-script-os",
+    "build:win32": "prebuild --platform win32 -r electron -t 30.0.4",
+    "build:linux": "prebuild --platform linux -r electron -t 30.0.4",
+    "build:darwin": "prebuild --platform darwin -r electron -t 30.0.4 && prebuild --platform darwin -a arm64 -r electron -t 30.0.4",
+    "prebuild-install": "prebuild-install || (npm run rebuild || (true || VER>NUL))",
+    "rebuild": "node-gyp configure build",
+    "exe": "pkg --compress Brotli .",
+    "exefast": "pkg .",
+    "vaportest": "node examples\\play_radio.js --host 192.168.100.12 --port 7000  --debug true --mode 1 --airplay2 1"
+  },
+  "licenses": [
+    {
+      "type": "AGPLv3"
+    }
+  ],
+  "pkg": {
+    "scripts": [
+      "lib/homekit/*.js",
+      "lib/*.js",
+      "examples/play_stdin_worker.js"
+    ],
+    "assets": [
+      "build/Release/obj/airtunes/*",
+      "node_modules/lame/build/Release/*",
+      "node_modules/deasync/bin/darwin-x64-node-18/*",
+      "node_modules/deasync/bin/linux-x64-node-18/*",
+      "node_modules/deasync/bin/win32-x64-node-18/*",
+      "node_modules/castv2/lib/*.proto"
+    ],
+    "targets": [
+      "node20-win"
+    ]
+  },
+  "dependencies": {
+    "@noble/ed25519": "^1.7.3",
+    "@yao-pkg/pkg": "^5.11.4",
+    "arraybuffer-to-string": "^1.0.2",
+    "async": "^3.2.5",
+    "axlsign": "ciderapp/curve25519-js",
+    "big-integer": "^1.6.52",
+    "castv2-client": "^1.2.0",
+    "chacha-js": "ciderapp/chacha20poly1305",
+    "crypto-js": "^4.2.0",
+    "curve25519-js": "^0.0.4",
+    "electron-fetch": "^1.9.1",
+    "elliptic": "^6.5.5",
+    "fast-srp-hap": "^2.0.4",
+    "js-crypto-aes": "^1.0.6",
+    "js-sha1": "^0.7.0",
+    "lodash": "^4.17.21",
+    "mdns-js": "ciderapp/node-mdns-js",
+    "node-gyp": "^10.1.0",
+    "parse-raw-http": "0.0.1",
+    "prebuild-install": "ciderapp/prebuild-install",
+    "python-struct": "^1.1.3",
+    "simple-plist": "^1.4.0",
+    "varint": "^6.0.0",
+    "ws": "^8.16.0",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "node-abi": "^3.56.0",
+    "optimist": "^0.6.1",
+    "prebuild": "ciderapp/prebuild",
+    "request": "^2.88.2",
+    "run-script-os": "^1.1.6"
+  },
+  "bugs": {
+    "url": "https://github.com/ciderapp/node_airtunes2/issues"
+  },
+  "packageManager": "yarn@4.1.0"
+}

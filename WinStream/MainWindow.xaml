@@ -10,138 +10,412 @@
 
     <Grid Background="Transparent">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- Toolbar -->
-        <Grid Grid.Row="0" Padding="16,12,16,8" ColumnSpacing="8">
+        <Grid x:Name="AppTitleBar"
+              Grid.Row="0"
+              Padding="12,0"
+              Background="Transparent">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <TextBox x:Name="filterTextBox"
-                     PlaceholderText="Search devices..."
-                     TextChanged="FilterTextBox_TextChanged"/>
+            <Border Width="24"
+                    Height="24"
+                    CornerRadius="6"
+                    Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                    VerticalAlignment="Center">
+                <FontIcon Glyph="&#xE8D6;"
+                          FontSize="12"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+            </Border>
 
-            <Button x:Name="refreshButton"
-                    Grid.Column="1"
-                    ToolTipService.ToolTip="Refresh"
-                    Click="RefreshButton_Click">
-                <FontIcon Glyph="&#xE72C;" FontSize="14"/>
-            </Button>
+            <StackPanel Grid.Column="1"
+                        Margin="10,0,0,0"
+                        VerticalAlignment="Center"
+                        Spacing="0">
+                <TextBlock Text="WinStream"
+                           FontSize="13"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="AirPlay audio sender"
+                           FontSize="11"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
 
-            <ProgressRing x:Name="scanProgressRing"
-                          Grid.Column="2"
-                          Width="20" Height="20"
-                          IsActive="False"/>
+            <TextBlock x:Name="titleBarStatusTextBlock"
+                       Grid.Column="2"
+                       VerticalAlignment="Center"
+                       FontSize="11"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Idle" />
         </Grid>
 
-        <!-- Device list -->
-        <ScrollViewer Grid.Row="1" Padding="16,4,16,8">
-            <ItemsRepeater x:Name="devicesRepeater" ItemsSource="{x:Bind DeviceList}">
-                <ItemsRepeater.Layout>
-                    <StackLayout Spacing="8"/>
-                </ItemsRepeater.Layout>
-                <ItemsRepeater.ItemTemplate>
-                    <DataTemplate x:DataType="local:DeviceInfo">
-                        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1"
-                                CornerRadius="8"
-                                Padding="16,12">
+        <NavigationView x:Name="navView"
+                        Grid.Row="1"
+                        PaneDisplayMode="Auto"
+                        IsBackButtonVisible="Collapsed"
+                        IsSettingsVisible="True"
+                        SelectionChanged="NavView_SelectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="devicesNavItem"
+                                    Content="Devices"
+                                    Tag="devices">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Audio" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <Grid x:Name="RootContentPanel">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <InfoBar x:Name="connectionInfoBar"
+                         Grid.Row="0"
+                         Margin="24,16,24,0"
+                         IsOpen="False"
+                         IsClosable="True" />
+
+                <Grid x:Name="DevicesPanel"
+                      Grid.Row="1">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Spacing="16"
+                                    Padding="24,20,24,24">
+                            <Border Style="{StaticResource SectionCardStyle}">
+                                <StackPanel Spacing="16">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Discover and connect to AirPlay receivers"
+                                                   Style="{ThemeResource TitleTextBlockStyle}" />
+                                        <TextBlock Text="Browse devices on your local network, filter the list, and start or stop audio streaming from one place."
+                                                   TextWrapping="Wrap"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBox x:Name="filterTextBox"
+                                                 PlaceholderText="Search devices"
+                                                 TextChanged="FilterTextBox_TextChanged" />
+
+                                        <Button x:Name="refreshButton"
+                                                Grid.Column="1"
+                                                Click="RefreshButton_Click">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE72C;"/>
+                                                <TextBlock Text="Refresh" />
+                                            </StackPanel>
+                                        </Button>
+
+                                        <ProgressRing x:Name="scanProgressRing"
+                                                      Grid.Column="2"
+                                                      Width="20"
+                                                      Height="20"
+                                                      IsActive="False"
+                                                      VerticalAlignment="Center" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
                             <Grid ColumnSpacing="12">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
 
-                                <!-- Device icon -->
-                                <Border Width="44" Height="44"
-                                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                        CornerRadius="8"
-                                        VerticalAlignment="Center">
-                                    <FontIcon Glyph="{x:Bind DeviceTypeGlyph}"
-                                              FontSize="22"
-                                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
+                                <Border Grid.Column="0" Style="{StaticResource SummaryCardStyle}">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Discovered"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="deviceCountValueTextBlock"
+                                                   Style="{StaticResource CaptionValueTextStyle}"
+                                                   Text="0" />
+                                    </StackPanel>
                                 </Border>
 
-                                <!-- Device info -->
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
-                                    <TextBlock Text="{x:Bind DisplayName}"
-                                               FontWeight="SemiBold"
-                                               FontSize="14"
-                                               TextTrimming="CharacterEllipsis"/>
-                                    <TextBlock FontSize="12"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                               TextTrimming="CharacterEllipsis">
-                                        <Run Text="{x:Bind Manufacturer}"/>
-                                        <Run Text=" · "/>
-                                        <Run Text="{x:Bind Model}"/>
-                                    </TextBlock>
-                                    <TextBlock Text="{x:Bind IPAddress}"
-                                               FontSize="11"
-                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-                                </StackPanel>
+                                <Border Grid.Column="1" Style="{StaticResource SummaryCardStyle}">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Scan state"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="scanStateValueTextBlock"
+                                                   Style="{StaticResource CaptionValueTextStyle}"
+                                                   Text="Idle" />
+                                    </StackPanel>
+                                </Border>
 
-                                <!-- Connect area -->
-                                <StackPanel Grid.Column="2" Orientation="Horizontal"
-                                            Spacing="8" VerticalAlignment="Center">
-                                    <ProgressRing Width="20" Height="20"
-                                                  IsActive="{x:Bind IsConnecting, Mode=OneWay}"
-                                                  Visibility="{x:Bind ConnectingVisibility, Mode=OneWay}"/>
-                                    <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
-                                               FontSize="12"
-                                               VerticalAlignment="Center"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                    <Button Tag="{x:Bind}"
-                                            Content="{x:Bind ConnectButtonText, Mode=OneWay}"
-                                            Click="ConnectButton_Click"
-                                            Style="{StaticResource AccentButtonStyle}"
-                                            MinWidth="90"/>
-                                </StackPanel>
+                                <Border Grid.Column="2" Style="{StaticResource SummaryCardStyle}">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Streaming"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="streamingStateValueTextBlock"
+                                                   Style="{StaticResource CaptionValueTextStyle}"
+                                                   Text="Off" />
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Grid.Column="3" Style="{StaticResource SummaryCardStyle}">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Last scan"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="lastScanValueTextBlock"
+                                                   Style="{StaticResource CaptionValueTextStyle}"
+                                                   Text="Waiting" />
+                                    </StackPanel>
+                                </Border>
                             </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsRepeater.ItemTemplate>
-            </ItemsRepeater>
-        </ScrollViewer>
 
-        <!-- Status bar -->
-        <Border Grid.Row="2"
-                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-                BorderThickness="0,1,0,0"
-                Padding="16,8">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource SectionCardStyle}">
+                                <StackPanel Spacing="16">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
 
-                <TextBlock x:Name="audioSourceTextBlock"
-                           Text="Audio source: not streaming"
-                           FontSize="12"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           VerticalAlignment="Center"/>
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Text="Available devices"
+                                                       Style="{ThemeResource SubtitleTextBlockStyle}" />
+                                            <TextBlock x:Name="deviceListHeaderTextBlock"
+                                                       Text="0 receivers match the current view"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </StackPanel>
 
-                <StackPanel Grid.Column="1" Orientation="Horizontal"
-                            Spacing="6" VerticalAlignment="Center">
-                    <Ellipse x:Name="streamingDot"
-                             Width="8" Height="8"
-                             Fill="{ThemeResource SystemFillColorSuccessBrush}"
-                             Visibility="Collapsed"/>
-                    <TextBlock x:Name="streamingLabel"
-                               Text="Live"
-                               FontSize="12"
-                               FontWeight="SemiBold"
-                               Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                               Visibility="Collapsed"/>
-                </StackPanel>
+                                        <StackPanel Grid.Column="1"
+                                                    Orientation="Horizontal"
+                                                    Spacing="6"
+                                                    VerticalAlignment="Center">
+                                            <Ellipse x:Name="streamingDot"
+                                                     Width="8"
+                                                     Height="8"
+                                                     Fill="{ThemeResource SystemFillColorSuccessBrush}"
+                                                     Visibility="Collapsed" />
+                                            <TextBlock x:Name="streamingLabel"
+                                                       Text="Live"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                       Visibility="Collapsed" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <Border x:Name="emptyStateCard"
+                                            Style="{StaticResource SummaryCardStyle}"
+                                            Visibility="Collapsed">
+                                        <StackPanel Spacing="12"
+                                                    HorizontalAlignment="Center">
+                                            <FontIcon Glyph="&#xE711;"
+                                                      FontSize="28"
+                                                      HorizontalAlignment="Center"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <TextBlock x:Name="emptyStateTitleTextBlock"
+                                                       Text="No devices found"
+                                                       FontWeight="SemiBold"
+                                                       HorizontalAlignment="Center" />
+                                            <TextBlock x:Name="emptyStateBodyTextBlock"
+                                                       Text="Run another discovery pass or broaden the current search."
+                                                       TextWrapping="Wrap"
+                                                       TextAlignment="Center"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            <Button Content="Scan again"
+                                                    HorizontalAlignment="Center"
+                                                    Click="RefreshButton_Click" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <ItemsRepeater x:Name="devicesRepeater">
+                                        <ItemsRepeater.Layout>
+                                            <StackLayout Spacing="8" />
+                                        </ItemsRepeater.Layout>
+                                        <ItemsRepeater.ItemTemplate>
+                                            <DataTemplate x:DataType="local:DeviceInfo">
+                                                <Border Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="10"
+                                                        Padding="16,14"
+                                                        ToolTipService.ToolTip="{x:Bind ToolTipText}">
+                                                    <Grid ColumnSpacing="12">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <Border Width="44"
+                                                                Height="44"
+                                                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                                                CornerRadius="10"
+                                                                VerticalAlignment="Top">
+                                                            <FontIcon Glyph="{x:Bind DeviceTypeGlyph}"
+                                                                      FontSize="22"
+                                                                      Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                                      HorizontalAlignment="Center"
+                                                                      VerticalAlignment="Center" />
+                                                        </Border>
+
+                                                        <StackPanel Grid.Column="1"
+                                                                    Spacing="6">
+                                                            <StackPanel Spacing="2">
+                                                                <TextBlock Text="{x:Bind DisplayName}"
+                                                                           FontWeight="SemiBold"
+                                                                           FontSize="14"
+                                                                           TextTrimming="CharacterEllipsis" />
+                                                                <TextBlock FontSize="12"
+                                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                                           TextTrimming="CharacterEllipsis">
+                                                                    <Run Text="{x:Bind Manufacturer}" />
+                                                                    <Run Text=" · " />
+                                                                    <Run Text="{x:Bind Model}" />
+                                                                </TextBlock>
+                                                            </StackPanel>
+
+                                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                <Border Background="{ThemeResource ControlFillColorSecondaryBrush}"
+                                                                        CornerRadius="999"
+                                                                        Padding="8,2">
+                                                                    <TextBlock Text="{x:Bind IPAddress}"
+                                                                               FontSize="11" />
+                                                                </Border>
+                                                                <Border Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                                                        CornerRadius="999"
+                                                                        Padding="8,2">
+                                                                    <TextBlock Text="{x:Bind AirPlayGenerationLabel}"
+                                                                               FontSize="11"
+                                                                               Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                        </StackPanel>
+
+                                                        <StackPanel Grid.Column="2"
+                                                                    Spacing="8"
+                                                                    VerticalAlignment="Center">
+                                                            <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
+                                                                       FontSize="12"
+                                                                       HorizontalAlignment="Right"
+                                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                            <ProgressRing Width="20"
+                                                                          Height="20"
+                                                                          HorizontalAlignment="Right"
+                                                                          IsActive="{x:Bind IsConnecting, Mode=OneWay}"
+                                                                          Visibility="{x:Bind ConnectingVisibility, Mode=OneWay}" />
+                                                            <Button Tag="{x:Bind}"
+                                                                    MinWidth="96"
+                                                                    Click="ConnectButton_Click"
+                                                                    Content="{x:Bind ConnectButtonText, Mode=OneWay}"
+                                                                    Style="{StaticResource AccentButtonStyle}" />
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsRepeater.ItemTemplate>
+                                    </ItemsRepeater>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+
+                <Grid x:Name="SettingsPanel"
+                      Grid.Row="1"
+                      Visibility="Collapsed">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Spacing="16"
+                                    Padding="24,20,24,24">
+                            <Border Style="{StaticResource SectionCardStyle}">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="Pairing"
+                                               Style="{ThemeResource TitleTextBlockStyle}" />
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <PasswordBox x:Name="airPlayPinPasswordBox"
+                                                     PlaceholderText="AirPlay PIN"
+                                                     MaxLength="8" />
+                                        <Button Grid.Column="1"
+                                                Content="Use PIN"
+                                                Style="{StaticResource AccentButtonStyle}"
+                                                Click="ApplyPinButton_Click" />
+                                        <Button Grid.Column="2"
+                                                Content="Clear"
+                                                Click="ClearPinButton_Click" />
+                                    </Grid>
+                                    <TextBlock x:Name="pinStatusTextBlock"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource SectionCardStyle}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="Diagnostics"
+                                               Style="{ThemeResource SubtitleTextBlockStyle}" />
+                                    <CheckBox x:Name="verboseRtspCheckBox"
+                                              Content="Verbose RTSP and pairing logs"
+                                              Checked="VerboseRtspCheckBox_Changed"
+                                              Unchecked="VerboseRtspCheckBox_Changed" />
+                                    <Button Content="Forget stored AirPlay pairings"
+                                            HorizontalAlignment="Left"
+                                            Click="ForgetPairingsButton_Click" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource SectionCardStyle}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="Runtime details"
+                                               Style="{ThemeResource SubtitleTextBlockStyle}" />
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="Version"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="aboutVersionTextBlock"
+                                                   Grid.Column="1" />
+                                    </Grid>
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="Framework"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="aboutFrameworkTextBlock"
+                                                   Grid.Column="1" />
+                                    </Grid>
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="Audio source"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="audioSourceTextBlock"
+                                                   Grid.Column="1"
+                                                   Text="Audio source: not streaming"
+                                                   TextWrapping="Wrap" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
             </Grid>
-        </Border>
+        </NavigationView>
     </Grid>
 </Window>
